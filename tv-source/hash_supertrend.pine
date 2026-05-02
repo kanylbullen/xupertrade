@@ -1,0 +1,205 @@
+//@version=6
+strategy("Hash Supertrend", 
+         shorttitle="Hash Supertrend", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=15)
+
+// Company Information - Info icon only, no text box
+_ = input.bool(true, "ℹ️ About Hash Capital Research", tooltip="Developed by Hash Capital Partners\n\nFollow us on TradingView for exclusive premium indicators and cutting-edge quantitative research.", group="Company Information")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// CORE SUPERTREND SETTINGS
+// ════════════════════════════════════════════════════════════════════════════════
+
+atrPeriod = input.int(16, "ATR Length", minval=1, group="Supertrend Settings", tooltip="Number of bars for ATR calculation. Lower values (7-10) = more sensitive. Higher values (12-14) = smoother but slower.")
+factor = input.float(3.11, "Factor", step=0.01, minval=0.1, group="Supertrend Settings", tooltip="ATR multiplier. Lower values (1.5-2.5) = more signals but more whipsaws. Higher values (3.0-4.0) = fewer but stronger signals.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIME FILTER SETTINGS
+// ════════════════════════════════════════════════════════════════════════════════
+
+useTimeFilter = input.bool(false, "Enable Time Filter", group="Time Filter", tooltip="Only trade during specified hours. Useful for avoiding choppy sessions or off-hours volatility.")
+startHour = input.int(9, "Start Hour", minval=0, maxval=23, group="Time Filter", tooltip="Trading session start hour in exchange timezone (24-hour format).")
+startMinute = input.int(30, "Start Minute", minval=0, maxval=59, group="Time Filter", tooltip="Trading session start minute.")
+endHour = input.int(16, "End Hour", minval=0, maxval=23, group="Time Filter", tooltip="Trading session end hour in exchange timezone (24-hour format).")
+endMinute = input.int(0, "End Minute", minval=0, maxval=59, group="Time Filter", tooltip="Trading session end minute.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// VISUAL SETTINGS - HASH CAPITAL STYLE
+// ════════════════════════════════════════════════════════════════════════════════
+
+colorIntensity = input.float(7.0, "Color Intensity", minval=1.0, maxval=10.0, step=1.0, group="Visual", tooltip="Controls color vibrancy. 1-3 = subtle colors, 4-6 = balanced, 7-10 = very bright and vibrant colors.")
+showGlowEffect = input.bool(true, "Glow Effect", group="Visual", tooltip="Adds luminous glow around the Supertrend line. Creates a more dramatic visual effect.")
+glowIntensity = input.float(5.0, "Glow Intensity", minval=1.0, maxval=10.0, step=1.0, group="Visual", tooltip="Controls glow brightness. 1-3 = subtle glow, 4-6 = moderate glow, 7-10 = intense glow effect.")
+showSignals = input.bool(true, "Show Entry Signals", group="Visual", tooltip="Display buy/sell signals on chart when trend changes.")
+showZone = input.bool(true, "Show Trend Zone", group="Visual", tooltip="Fill area between price and Supertrend line to visualize trend zones.")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SUPERTREND CALCULATION
+// ════════════════════════════════════════════════════════════════════════════════
+
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// Trend state
+isBullish = direction < 0
+isBearish = direction > 0
+
+// Detect trend changes
+trendChanged = ta.change(direction) != 0
+longSignal = ta.change(direction) < 0
+shortSignal = ta.change(direction) > 0
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIME FILTER LOGIC
+// ════════════════════════════════════════════════════════════════════════════════
+
+isInSession = true
+
+if useTimeFilter
+    // Get current time components
+    currentHour = hour(time)
+    currentMinute = minute(time)
+    
+    // Convert to minutes for easier comparison
+    currentTimeInMinutes = currentHour * 60 + currentMinute
+    startTimeInMinutes = startHour * 60 + startMinute
+    endTimeInMinutes = endHour * 60 + endMinute
+    
+    // Handle cases where session crosses midnight
+    if endTimeInMinutes > startTimeInMinutes
+        // Normal case: session within same day (e.g., 9:30 to 16:00)
+        isInSession := currentTimeInMinutes >= startTimeInMinutes and currentTimeInMinutes <= endTimeInMinutes
+    else
+        // Session crosses midnight (e.g., 22:00 to 02:00)
+        isInSession := currentTimeInMinutes >= startTimeInMinutes or currentTimeInMinutes <= endTimeInMinutes
+
+// ════════════════════════════════════════════════════════════════════════════════
+// HASH CAPITAL COLOR SYSTEM - FLUORESCENT GRADIENT
+// ════════════════════════════════════════════════════════════════════════════════
+
+getAdaptiveColor(bool bullish) =>
+    // Convert 1-10 scale to 0-1 for calculations
+    colorScale = colorIntensity / 10.0
+    
+    if bullish
+        // Bright fluorescent green spectrum for bullish
+        intensity = colorScale
+        redVal = math.round(100 * (1 - intensity))
+        greenVal = 255
+        blueVal = math.round(100 * (1 - intensity * 0.7))
+        alpha = math.max(0, math.round(30 * (1 - intensity)))
+        color.rgb(redVal, greenVal, blueVal, alpha)
+    else
+        // Bright fluorescent red spectrum for bearish
+        intensity = colorScale
+        redVal = 255
+        greenVal = math.round(100 * (1 - intensity))
+        blueVal = math.round(100 * (1 - intensity * 0.7))
+        alpha = math.max(0, math.round(30 * (1 - intensity)))
+        color.rgb(redVal, greenVal, blueVal, alpha)
+
+// Enhanced Glow effect
+getGlowColor(bool bullish) =>
+    if showGlowEffect
+        // Convert 1-10 scale to usable range
+        glowScale = glowIntensity / 10.0
+        glowAlpha = math.round(100 - (60 * glowScale))
+        
+        if bullish
+            // Bright green glow for bullish
+            color.new(#00FF00, math.max(30, glowAlpha))
+        else
+            // Bright red glow for bearish
+            color.new(#FF0000, math.max(30, glowAlpha))
+    else
+        na
+
+// ════════════════════════════════════════════════════════════════════════════════
+// STRATEGY EXECUTION
+// ════════════════════════════════════════════════════════════════════════════════
+
+if longSignal and isInSession
+    strategy.entry("Long", strategy.long)
+
+if shortSignal and isInSession
+    strategy.entry("Short", strategy.short)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// VISUAL PLOTTING - HASH CAPITAL STYLE
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Main Supertrend line with adaptive color
+mainColor = getAdaptiveColor(isBullish)
+glowColor = getGlowColor(isBullish)
+
+// Plot main line with glow effect
+supertrendGlow = plot(supertrend, "Supertrend Glow", color=glowColor, linewidth=6, display=display.all)
+supertrendMain = plot(supertrend, "Supertrend", color=mainColor, linewidth=3, display=display.all)
+
+// Trend zone fill - area between price and Supertrend
+priceLinePlot = plot(close, "Price Reference", color=color.new(color.white, 100), display=display.none)
+
+// Fill zones conditionally
+bullishZoneColor = color.new(#00FF00, 92)
+bearishZoneColor = color.new(#FF0000, 92)
+
+// Create conditional fill colors
+currentBullFill = isBullish ? bullishZoneColor : na
+currentBearFill = isBearish ? bearishZoneColor : na
+
+// Bullish zone - green tint
+fill(supertrendMain, priceLinePlot, 
+     color=currentBullFill, 
+     title="Bullish Zone")
+
+// Bearish zone - red tint
+fill(supertrendMain, priceLinePlot, 
+     color=currentBearFill, 
+     title="Bearish Zone")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS - TINY FLUORESCENT DOTS
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Long signals - tiny bright green dot
+plotshape(showSignals and longSignal, 
+          title="Long Signal", 
+          style=shape.circle, 
+          location=location.belowbar, 
+          color=color.new(#00FF00, 0), 
+          size=size.tiny)
+
+// Short signals - tiny bright red dot
+plotshape(showSignals and shortSignal, 
+          title="Short Signal", 
+          style=shape.circle, 
+          location=location.abovebar, 
+          color=color.new(#FF0000, 0), 
+          size=size.tiny)
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TIME FILTER VISUAL INDICATOR (OPTIONAL)
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Subtle background shading when outside trading hours
+bgcolor(useTimeFilter and not isInSession ? color.new(color.gray, 95) : na, title="Outside Trading Hours")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// ALERT SYSTEM - PROFESSIONAL, NO EMOJIS
+// ════════════════════════════════════════════════════════════════════════════════
+
+alertcondition(longSignal and isInSession, "Long Entry", "Supertrend flipped BULLISH - Long signal triggered")
+alertcondition(shortSignal and isInSession, "Short Entry", "Supertrend flipped BEARISH - Short signal triggered")
+alertcondition(trendChanged and isInSession, "Trend Change", "Supertrend direction changed - Position reversal")
+
+// Additional alert for signals outside trading hours (if time filter enabled)
+alertcondition(useTimeFilter and longSignal and not isInSession, "Long Signal (Filtered)", "Supertrend BULLISH signal outside trading hours - Not executed")
+alertcondition(useTimeFilter and shortSignal and not isInSession, "Short Signal (Filtered)", "Supertrend BEARISH signal outside trading hours - Not executed")
+
+// ════════════════════════════════════════════════════════════════════════════════
+// BACKGROUND COLOR (OPTIONAL) - SUBTLE TREND INDICATION
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Uncomment below for subtle background coloring
+// bgcolor(isBullish ? color.new(#00FF00, 97) : color.new(#FF0000, 97), title="Trend Background")

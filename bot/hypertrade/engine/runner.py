@@ -1,0 +1,707 @@
+"""Strategy engine runner — the core loop."""
+
+import logging
+import time
+
+from hypertrade.config import settings
+from hypertrade.data.feed import fetch_candles
+from hypertrade.db.repo import Repository
+from hypertrade.engine.control import BotControl
+from hypertrade.engine.portfolio import PortfolioManager
+from hypertrade.engine.signals import Signal, SignalAction
+from hypertrade.events.bus import EventBus
+from hypertrade.events.types import (
+    BotHeartbeat,
+    ErrorOccurred,
+    LogEntry,
+    SignalGenerated,
+    TickCompleted,
+    TradeExecuted,
+)
+from hypertrade.exchange.base import Exchange, OrderType
+from hypertrade.strategies.base import Strategy
+
+logger = logging.getLogger(__name__)
+
+_start_time = time.time()
+
+
+class EngineRunner:
+    def __init__(
+        self,
+        exchange: Exchange,
+        strategies: list[Strategy],
+        repo: Repository | None = None,
+        event_bus: EventBus | None = None,
+        control: BotControl | None = None,
+    ) -> None:
+        self.exchange = exchange
+        self.strategies = strategies
+        self.repo = repo
+        self.event_bus = event_bus
+        self.control = control
+        self.portfolio = PortfolioManager(exchange)
+        self._last_reconcile = 0.0  # epoch seconds
+        self._last_funding_poll = 0.0
+
+    async def startup(self) -> None:
+        """Restore in-memory strategy state from DB after a restart."""
+        if not self.repo:
+            return
+        try:
+            positions = await self.repo.get_open_positions()
+        except Exception:
+            logger.exception("Failed to fetch open positions for state restoration")
+            return
+
+        import json
+        strat_by_name = {s.name: s for s in self.strategies}
+        restored = 0
+        for pos in positions:
+            strat = strat_by_name.get(pos.strategy_name)
+            if strat is None:
+                continue
+            # Prefer exact restore from stored state_json. Fall back to
+            # recompute-based restore_state if state was never persisted
+            # (legacy rows or strategies that don't override export_state).
+            state = None
+            if pos.state_json:
+                try:
+                    state = json.loads(pos.state_json)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(
+                        "[%s] Invalid state_json — falling back to recompute",
+                        pos.strategy_name,
+                    )
+            if state is not None:
+                strat.restore_from_json(pos.side, pos.entry_price, state)
+                logger.info(
+                    "Restored %s state from JSON: %s @ %.2f (state=%s)",
+                    pos.strategy_name, pos.side, pos.entry_price, state,
+                )
+            else:
+                strat.restore_state(pos.side, pos.entry_price)
+                logger.info(
+                    "Restored %s state (recomputed): %s @ %.2f",
+                    pos.strategy_name, pos.side, pos.entry_price,
+                )
+            restored += 1
+
+        if positions:
+            logger.info(
+                "State restoration complete: %d/%d positions restored",
+                restored, len(positions),
+            )
+
+    async def tick(self) -> None:
+        """Run one cycle: fetch data, evaluate strategies, execute signals."""
+        # Heartbeat first — even if downstream work fails, we want the
+        # watchdog to know the runner is alive.
+        if self.control:
+            try:
+                await self.control.beat_heartbeat()
+            except Exception:
+                logger.warning("Heartbeat write failed (continuing)")
+
+        # Periodic reconcile every 5 minutes. Catches positions closed
+        # manually on the exchange, partial fills, and any post-startup
+        # divergence between DB and exchange.
+        if self.repo and (time.time() - self._last_reconcile) > 300:
+            try:
+                actions = await self.repo.reconcile_positions(self.exchange)
+                if actions:
+                    logger.warning(
+                        "Periodic reconcile: %d action(s) — %s",
+                        len(actions), "; ".join(actions),
+                    )
+            except Exception:
+                logger.exception("Periodic reconcile failed")
+            self._last_reconcile = time.time()
+
+        # Funding poll every 30 minutes. Backfills user_funding_history
+        # since the most-recent stored payment (or 24h back on first run).
+        if self.repo and (time.time() - self._last_funding_poll) > 1800:
+            try:
+                await self._poll_funding()
+            except Exception:
+                logger.exception("Funding poll failed")
+            self._last_funding_poll = time.time()
+
+        # Honor flat-all request before everything else
+        if self.control:
+            pending = await self.control.get_pending_flat_request()
+            if pending:
+                await self._flat_all_positions()
+                await self.control.acknowledge_flat_request(pending)
+
+        paused = False
+        disabled: set[str] = set()
+        leverage_overrides: dict[str, int] = {}
+        if self.control:
+            paused = await self.control.is_paused()
+            disabled = await self.control.get_disabled_strategies()
+            leverage_overrides = await self.control.get_all_leverage_overrides()
+            # Apply overrides to strategy instances (used for sizing this tick)
+            for s in self.strategies:
+                if s.name in leverage_overrides:
+                    s.leverage = leverage_overrides[s.name]
+
+        if paused:
+            logger.info("Tick skipped — bot is paused")
+        else:
+            active = [s for s in self.strategies if s.name not in disabled]
+            logger.info(
+                "Tick started — evaluating %d/%d strategies (disabled: %s)",
+                len(active),
+                len(self.strategies),
+                sorted(disabled) if disabled else "none",
+            )
+            for strategy in active:
+                try:
+                    await self._run_strategy(strategy)
+                except Exception:
+                    logger.exception("Error running strategy %s", strategy.name)
+                    if self.event_bus:
+                        await self.event_bus.publish(
+                            ErrorOccurred(
+                                strategy=strategy.name,
+                                message="Strategy tick failed",
+                            )
+                        )
+
+        # Update unrealized P&L for open positions (always, even when paused)
+        if self.repo:
+            try:
+                await self._update_position_pnl()
+            except Exception:
+                logger.exception("Failed to update position P&L")
+
+        # Snapshot equity (always, even when paused)
+        try:
+            balance = await self.exchange.get_balance()
+            if self.repo:
+                await self.repo.snapshot_equity(
+                    balance.total, balance.available, balance.unrealized_pnl
+                )
+
+            if self.event_bus:
+                positions = await self.exchange.get_positions()
+                await self.event_bus.publish(
+                    BotHeartbeat(
+                        mode=settings.exchange_mode,
+                        strategies=",".join(s.name for s in self.strategies),
+                        equity=balance.total,
+                        positions=len(positions),
+                        uptime_seconds=int(time.time() - _start_time),
+                    )
+                )
+        except Exception:
+            logger.exception("Failed to snapshot equity")
+
+    async def _flat_all_positions(self) -> None:
+        """Close every open position with a market order."""
+        try:
+            positions = await self.exchange.get_positions()
+        except Exception:
+            logger.exception("Failed to fetch positions for flat-all")
+            return
+
+        if not positions:
+            logger.info("Flat-all requested — no open positions")
+            return
+
+        logger.warning("Flat-all closing %d positions", len(positions))
+        failed = 0
+        for pos in positions:
+            try:
+                close_side = "sell" if pos.side == "long" else "buy"
+                order = await self.exchange.place_order(
+                    pos.symbol, close_side, pos.size, OrderType.MARKET
+                )
+                if order.status.value != "filled":
+                    logger.error(
+                        "Flat-all: order NOT filled for %s — position may still be open",
+                        pos.symbol,
+                    )
+                    failed += 1
+                    continue
+
+                filled_price = order.filled_price or 0
+                fee = filled_price * pos.size * settings.taker_fee_rate
+                if pos.side == "long":
+                    realized_pnl = (filled_price - pos.entry_price) * pos.size - fee
+                else:
+                    realized_pnl = (pos.entry_price - filled_price) * pos.size - fee
+
+                if self.repo:
+                    await self.repo.record_trade(
+                        order_id=order.id,
+                        strategy_name="manual_flat",
+                        symbol=pos.symbol,
+                        side=order.side,
+                        size=pos.size,
+                        price=filled_price,
+                        fee=fee,
+                        pnl=realized_pnl,
+                        reason="Flat-all from dashboard",
+                    )
+                    # Find the open position record (any strategy) and close it
+                    open_rec = await self.repo.get_open_position_any(pos.symbol)
+                    if open_rec:
+                        await self.repo.close_position(
+                            open_rec.strategy_name,
+                            pos.symbol,
+                            filled_price,
+                            realized_pnl,
+                        )
+                self.portfolio.record_pnl(realized_pnl)
+                logger.warning(
+                    "Closed %s %s @ %.2f (PnL %.2f)",
+                    pos.side,
+                    pos.symbol,
+                    filled_price,
+                    realized_pnl,
+                )
+            except Exception:
+                logger.exception("Failed to close position %s", pos.symbol)
+                failed += 1
+
+        if failed:
+            logger.error(
+                "Flat-all completed with %d failures — manual intervention may be required",
+                failed,
+            )
+
+    async def _update_position_pnl(self) -> None:
+        """Update unrealized P&L for all open positions in the DB."""
+        if not self.repo:
+            return
+        open_positions = await self.repo.get_open_positions()
+        for pos in open_positions:
+            current_price = await self.exchange.get_current_price(pos.symbol)
+            if current_price <= 0:
+                continue
+            if pos.side == "long":
+                pnl = (current_price - pos.entry_price) * pos.size
+            else:
+                pnl = (pos.entry_price - current_price) * pos.size
+            await self.repo.update_position_pnl(pos.id, pnl)
+
+    async def _run_strategy(self, strategy: Strategy) -> None:
+        # Fetch candles
+        candles = await fetch_candles(strategy.symbol, strategy.timeframe)
+        if candles.empty:
+            logger.warning("No candle data for %s %s", strategy.symbol, strategy.timeframe)
+            return
+
+        # Update exchange price (use latest/forming candle for real-time pricing)
+        latest_price = candles["close"].iloc[-1]
+        logger.info("[%s] %s %s — %d candles, price: $%.2f", strategy.name, strategy.symbol, strategy.timeframe, len(candles), latest_price)
+        if hasattr(self.exchange, "set_price"):
+            self.exchange.set_price(strategy.symbol, latest_price)
+
+        # Evaluate strategy only on CLOSED candles to avoid repeatedly
+        # re-firing signals based on the forming candle's changing values.
+        closed_candles = candles.iloc[:-1] if len(candles) > 1 else candles
+        signal = await strategy.on_candle(closed_candles)
+        signal_action = "none"
+        signal_reason = ""
+
+        if signal is not None and signal.action != SignalAction.HOLD:
+            signal_action = signal.action.value
+            signal_reason = signal.reason
+
+            logger.info(
+                "[%s] Signal: %s %s — %s",
+                strategy.name,
+                signal.action.value,
+                signal.symbol,
+                signal.reason,
+            )
+
+            await self._execute_signal(signal, latest_price, leverage=strategy.leverage)
+
+        # Publish tick result
+        if self.event_bus:
+            await self.event_bus.publish(
+                TickCompleted(
+                    strategy=strategy.name,
+                    symbol=strategy.symbol,
+                    timeframe=strategy.timeframe,
+                    price=latest_price,
+                    signal=signal_action,
+                    reason=signal_reason,
+                )
+            )
+
+    async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> None:
+        if not await self.portfolio.check_risk_limits():
+            logger.warning(
+                "[%s] Risk limit breached — skipping execution of %s %s",
+                signal.strategy_name,
+                signal.action.value,
+                signal.symbol,
+            )
+            if self.event_bus:
+                await self.event_bus.publish(
+                    ErrorOccurred(
+                        strategy=signal.strategy_name,
+                        message=f"Risk limit breached — execution of {signal.action.value} {signal.symbol} blocked",
+                    )
+                )
+            return
+
+        if settings.kill_switch:
+            logger.warning("Kill switch is ON — skipping execution")
+            return
+
+        # Idempotency / flip detection: don't open a same-side duplicate;
+        # if we already hold the opposite side, synthesize a CLOSE first
+        # so the exchange position fully reverses (instead of HL netting
+        # the new open against the existing position and leaving a partial).
+        if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
+            if self.repo:
+                existing = await self.repo.get_open_position(
+                    signal.strategy_name, signal.symbol
+                )
+                if existing:
+                    wanted_side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+                    if existing.side == wanted_side:
+                        logger.info(
+                            "[%s] Skipping %s %s — already have open %s position",
+                            signal.strategy_name,
+                            signal.action.value,
+                            signal.symbol,
+                            existing.side,
+                        )
+                        return
+                    # Opposite side → flip. Close the existing position first
+                    # via a synthesized CLOSE signal that goes through the
+                    # standard close path (DB-driven size, trade record, etc.).
+                    close_action = (
+                        SignalAction.CLOSE_SHORT if existing.side == "short"
+                        else SignalAction.CLOSE_LONG
+                    )
+                    logger.info(
+                        "[%s] Flip detected — closing %s %s before opening %s "
+                        "(reason: %s)",
+                        signal.strategy_name,
+                        existing.side, signal.symbol, wanted_side,
+                        signal.reason[:80],
+                    )
+                    flip_close = Signal(
+                        action=close_action,
+                        symbol=signal.symbol,
+                        strategy_name=signal.strategy_name,
+                        reason=f"Auto-close before flip ({signal.reason[:60]})",
+                    )
+                    await self._execute_signal(flip_close, current_price, leverage)
+                    # Fall through to the open path below; the close above
+                    # has already cleared the DB position so the next
+                    # get_open_position call would return None.
+
+            # Cross-strategy check: block if another strategy already holds
+            # this coin and allow_multi_coin is disabled.
+            if self.control and self.repo:
+                allow_multi = await self.control.get_allow_multi_coin()
+                if not allow_multi:
+                    blocking = await self.repo.get_open_position_any(signal.symbol)
+                    if blocking and blocking.strategy_name != signal.strategy_name:
+                        logger.info(
+                            "[%s] Skipping %s %s — %s already holds %s on %s (allow_multi_coin=False)",
+                            signal.strategy_name,
+                            signal.action.value,
+                            signal.symbol,
+                            blocking.strategy_name,
+                            blocking.side,
+                            signal.symbol,
+                        )
+                        return
+
+            # Total exposure cap: block if opening this would exceed the
+            # configured margin sum across all open strategy positions.
+            if (
+                self.repo
+                and settings.max_total_exposure_usd > 0
+            ):
+                open_pos = await self.repo.get_open_positions()
+                current_margin = sum(
+                    float(p.size) * float(p.entry_price) / max(getattr(p, "leverage", 1) or 1, 1)
+                    for p in open_pos
+                )
+                # Approximation: each open strategy position contributes
+                # MAX_POSITION_SIZE_USD of margin (the same cap used at open).
+                approx_existing_margin = len(open_pos) * settings.max_position_size_usd
+                if approx_existing_margin + settings.max_position_size_usd > settings.max_total_exposure_usd:
+                    logger.warning(
+                        "[%s] Skipping %s %s — total exposure cap "
+                        "reached: %d open positions × $%.0f >= $%.0f",
+                        signal.strategy_name,
+                        signal.action.value,
+                        signal.symbol,
+                        len(open_pos),
+                        settings.max_position_size_usd,
+                        settings.max_total_exposure_usd,
+                    )
+                    return
+
+        size = signal.size or self._calculate_size(current_price, leverage)
+
+        if signal.action == SignalAction.OPEN_LONG:
+            order = await self.exchange.place_order(
+                signal.symbol, "buy", size, OrderType.MARKET
+            )
+        elif signal.action == SignalAction.CLOSE_LONG:
+            close_size = await self._resolve_close_size(
+                signal.strategy_name, signal.symbol, "long"
+            )
+            if close_size is None:
+                return
+            order = await self.exchange.place_order(
+                signal.symbol, "sell", close_size, OrderType.MARKET
+            )
+            size = close_size
+        elif signal.action == SignalAction.OPEN_SHORT:
+            order = await self.exchange.place_order(
+                signal.symbol, "sell", size, OrderType.MARKET
+            )
+        elif signal.action == SignalAction.CLOSE_SHORT:
+            close_size = await self._resolve_close_size(
+                signal.strategy_name, signal.symbol, "short"
+            )
+            if close_size is None:
+                return
+            order = await self.exchange.place_order(
+                signal.symbol, "buy", close_size, OrderType.MARKET
+            )
+            size = close_size
+        else:
+            return
+
+        if self.event_bus:
+            await self.event_bus.publish(
+                SignalGenerated(
+                    strategy=signal.strategy_name,
+                    symbol=signal.symbol,
+                    action=signal.action.value,
+                    reason=signal.reason,
+                )
+            )
+
+        if order.status.value != "filled":
+            logger.warning("Order not filled: %s", order.status)
+            return
+
+        filled_price = order.filled_price or 0
+        fee = filled_price * size * settings.taker_fee_rate
+
+        logger.info(
+            "[%s] Executed: %s %s %.4f @ %.2f",
+            signal.strategy_name,
+            signal.action.value,
+            signal.symbol,
+            size,
+            filled_price,
+        )
+
+        # Calculate realized P&L for closes
+        realized_pnl: float | None = None
+        if signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
+            if self.repo:
+                open_pos = await self.repo.get_open_position(
+                    signal.strategy_name, signal.symbol
+                )
+                if open_pos:
+                    if open_pos.side == "long":
+                        realized_pnl = (filled_price - open_pos.entry_price) * size - fee
+                    else:
+                        realized_pnl = (open_pos.entry_price - filled_price) * size - fee
+
+        # Record to DB
+        if self.repo:
+            await self.repo.record_trade(
+                order_id=order.id,
+                strategy_name=signal.strategy_name,
+                symbol=signal.symbol,
+                side=order.side,
+                size=size,
+                price=filled_price,
+                fee=fee,
+                pnl=realized_pnl,
+                reason=signal.reason,
+            )
+
+            if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
+                import json as _json
+                side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+                # Snapshot strategy state at signal time so restart can
+                # restore the exact SL/TP/etc. without recomputation drift.
+                strat = next(
+                    (s for s in self.strategies if s.name == signal.strategy_name),
+                    None,
+                )
+                state_json = None
+                if strat is not None:
+                    try:
+                        state = strat.export_state()
+                        if state is not None:
+                            state_json = _json.dumps(state)
+                    except Exception:
+                        logger.exception(
+                            "[%s] export_state failed (continuing without)",
+                            signal.strategy_name,
+                        )
+                await self.repo.open_position(
+                    signal.strategy_name,
+                    signal.symbol,
+                    side,
+                    size,
+                    filled_price,
+                    state_json=state_json,
+                )
+            elif signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
+                await self.repo.close_position(
+                    signal.strategy_name,
+                    signal.symbol,
+                    filled_price,
+                    realized_pnl or 0,
+                )
+                self.portfolio.record_pnl(realized_pnl or 0)
+
+        # Publish events
+        if self.event_bus:
+            await self.event_bus.publish(
+                TradeExecuted(
+                    strategy=signal.strategy_name,
+                    symbol=signal.symbol,
+                    side=order.side,
+                    size=size,
+                    price=filled_price,
+                    order_id=order.id,
+                    reason=signal.reason,
+                )
+            )
+
+    async def _poll_funding(self) -> None:
+        """Pull HL funding events since the latest stored timestamp and
+        upsert them into the funding_payments table. Best-effort attribution
+        to the strategy that holds the coin at funding time."""
+        from datetime import datetime, timedelta, timezone
+        if self.repo is None:
+            return
+        latest = await self.repo.get_latest_funding_timestamp()
+        # On first run, look back 24h. Otherwise from the latest stored ts
+        # minus 1 minute (overlap window — dedup by hash handles duplicates).
+        if latest is None:
+            start_ms = int(
+                (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000
+            )
+        else:
+            start_ms = int((latest - timedelta(minutes=1)).timestamp() * 1000)
+
+        try:
+            events = await self.exchange.get_user_funding_history(start_ms)
+        except Exception:
+            logger.exception("Funding fetch failed")
+            return
+
+        if not events:
+            return
+
+        inserted = 0
+        for ev in events:
+            try:
+                ts_ms = int(ev.get("time", 0))
+                h = str(ev.get("hash", ""))
+                delta = ev.get("delta", {})
+                coin = str(delta.get("coin", ""))
+                usdc = float(delta.get("usdc", 0))
+                szi = delta.get("szi")
+                szi_f = float(szi) if szi is not None else None
+                fr = delta.get("fundingRate")
+                fr_f = float(fr) if fr is not None else None
+                if not h or not coin:
+                    continue
+
+                ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+                # Best-effort strategy attribution: open position on this coin
+                strat_name = None
+                pos = await self.repo.get_open_position_any(coin)
+                if pos is not None:
+                    strat_name = pos.strategy_name
+
+                ok = await self.repo.upsert_funding_payment(
+                    ts=ts, h=h, coin=coin, usdc=usdc,
+                    szi=szi_f, funding_rate=fr_f, strategy_name=strat_name,
+                )
+                if ok:
+                    inserted += 1
+            except Exception:
+                logger.exception("Failed to record funding event %s", ev)
+
+        if inserted:
+            logger.info("Funding poll: %d new payment(s) recorded", inserted)
+
+    async def _resolve_close_size(
+        self, strategy_name: str, symbol: str, expected_side: str
+    ) -> float | None:
+        """Determine how much to close on an exit signal.
+
+        Source of truth: the strategy's own DB position. Falls back to the
+        exchange position only if DB is unavailable.
+
+        Returns None if no position should be closed (logs a warning).
+        """
+        if self.repo:
+            db_pos = await self.repo.get_open_position(strategy_name, symbol)
+            if db_pos is None:
+                logger.warning(
+                    "[%s] CLOSE_%s ignored for %s — no open DB position",
+                    strategy_name, expected_side.upper(), symbol,
+                )
+                return None
+            if db_pos.side != expected_side:
+                logger.warning(
+                    "[%s] CLOSE_%s ignored for %s — DB position side is %s",
+                    strategy_name, expected_side.upper(), symbol, db_pos.side,
+                )
+                return None
+
+            # Sanity-clamp to the exchange's actual netted position size for
+            # this side. If the DB thinks we own more than the exchange has
+            # (could happen after partial reconcile), close only what exists.
+            try:
+                ex_pos = await self.exchange.get_position(symbol)
+            except Exception:
+                ex_pos = None
+            if ex_pos is not None and ex_pos.side == expected_side:
+                if db_pos.size > ex_pos.size + 1e-9:
+                    logger.warning(
+                        "[%s] CLOSE_%s clamping DB size %.6f to exchange %.6f for %s",
+                        strategy_name, expected_side.upper(),
+                        db_pos.size, ex_pos.size, symbol,
+                    )
+                    return ex_pos.size
+            return db_pos.size
+
+        # No DB available — fall back to exchange total (legacy behavior).
+        ex_pos = await self.exchange.get_position(symbol)
+        if not (ex_pos and ex_pos.side == expected_side):
+            logger.warning(
+                "[%s] CLOSE_%s ignored for %s — no matching exchange position",
+                strategy_name, expected_side.upper(), symbol,
+            )
+            return None
+        return ex_pos.size
+
+    def _calculate_size(self, price: float, leverage: int = 1) -> float:
+        """Calculate position size in base units.
+
+        Notional = MAX_POSITION_SIZE_USD * leverage. Margin used = MAX_POSITION_SIZE_USD.
+        So a $200 max position at 5x means $1000 notional exposure with $200 of margin.
+        """
+        if price <= 0:
+            return 0.0
+        notional = settings.max_position_size_usd * min(max(1, int(leverage)), 50)
+        return round(notional / price, 6)

@@ -1,0 +1,205 @@
+//@version=5
+strategy("Volume Breakout Strategy [Tables Fixed]", 
+     overlay=true,
+     initial_capital=1000,
+     currency=currency.USD,
+     default_qty_type=strategy.cash,
+     default_qty_value=1000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1, 
+     slippage=5,
+     use_bar_magnifier=false)
+
+// ==========================================
+// 1. WEBHOOK / BOT MESSAGES
+// ==========================================
+grp_msg = "Webhook / Bot Messages"
+msg_long_entry  = input.text_area('{"action": "open_long", "ticker": "ETHUSD"}', "Long Entry JSON", group=grp_msg)
+msg_long_exit   = input.text_area('{"action": "close_long", "ticker": "ETHUSD"}', "Long Exit JSON", group=grp_msg)
+msg_short_entry = input.text_area('{"action": "open_short", "ticker": "ETHUSD"}', "Short Entry JSON", group=grp_msg)
+msg_short_exit  = input.text_area('{"action": "close_short", "ticker": "ETHUSD"}', "Short Exit JSON", group=grp_msg)
+
+// ==========================================
+// 2. STRATEGY INPUTS
+// ==========================================
+grp_mm = "Money Management"
+use_compounding = input.bool(true, "Use Compounding?", group=grp_mm)
+equity_pct      = input.float(50.0, "Equity % per Trade", step=5, group=grp_mm)
+fixed_cash      = input.float(500, "Fixed Margin (if Compounding OFF)", group=grp_mm)
+leverage        = input.int(2, title="Leverage (x)", minval=1, maxval=50, group=grp_mm)
+
+grp_logic = "Strategy Logic"
+kc_len          = input.int(22, "Keltner Length", group=grp_logic)
+kc_mult         = input.float(2.0, "Keltner Multiplier", step=0.1, group=grp_logic)
+use_trend_ema   = input.bool(true, "Trade with 200 EMA Trend Only", group=grp_logic)
+ema_len         = input.int(220, "Trend EMA Length", group=grp_logic)
+use_adx         = input.bool(true, "Use ADX Filter", group=grp_logic)
+adx_thresh      = input.int(20, "Min ADX Value", group=grp_logic)
+use_vol_filter  = input.bool(true, "Require Volume Spike", group=grp_logic)
+vol_len         = input.int(18, "Volume Average Length", group=grp_logic)
+rsi_len         = input.int(14, "RSI Length", group=grp_logic)
+
+grp_risk = "Risk Management"
+atr_len         = input.int(14, "ATR Length", group=grp_risk)
+sl_multiplier   = input.float(4.0, "Stop Loss (ATR Multiplier)", group=grp_risk)
+bk_activation   = input.float(1.5, "Breakeven Trigger (%)", step=0.1, group=grp_risk)
+use_trail       = input.bool(true, "Use Trailing Stop", group=grp_risk)
+trail_start     = input.float(3.0, "Start Trailing after % Gain", group=grp_risk)
+trail_offset    = input.float(1.0, "Trailing Offset %", group=grp_risk)
+
+// ==========================================
+// 3. CALCULATIONS
+// ==========================================
+trend_ema = ta.ema(close, ema_len)
+
+// Keltner
+kc_basis = ta.ema(close, kc_len)
+kc_range = ta.atr(10) * kc_mult
+kc_upper = kc_basis + kc_range
+kc_lower = kc_basis - kc_range
+
+// Filters
+vol_avg = ta.sma(volume, vol_len)
+vol_cond = use_vol_filter ? (volume > vol_avg) : true
+
+[di_plus, di_minus, adx] = ta.dmi(14, 14)
+
+adx_cond = use_adx ? (adx > adx_thresh) : true
+rsi = ta.rsi(close, rsi_len)
+is_uptrend = use_trend_ema ? close > trend_ema : true
+is_downtrend = use_trend_ema ? close < trend_ema : true
+
+// Entry Conditions
+long_condition  = ta.crossover(close, kc_upper) and vol_cond and is_uptrend and rsi > 50 and adx_cond
+short_condition = ta.crossunder(close, kc_lower) and vol_cond and is_downtrend and rsi < 50 and adx_cond
+
+// Position Sizing
+float margin_to_use = use_compounding ? strategy.equity * (equity_pct / 100.0) : fixed_cash
+float final_qty = (margin_to_use * leverage) / close
+atr = ta.atr(atr_len)
+
+// ==========================================
+// 4. STRATEGY EXECUTION
+// ==========================================
+var int last_trade_time = 0 
+is_cooldown_over = (time - last_trade_time) > (4 * 60 * 60 * 1000)
+
+if long_condition and strategy.position_size == 0 and is_cooldown_over
+    strategy.entry("Long", strategy.long, qty=final_qty, alert_message=msg_long_entry)
+    last_trade_time := time
+
+if short_condition and strategy.position_size == 0 and is_cooldown_over
+    strategy.entry("Short", strategy.short, qty=final_qty, alert_message=msg_short_entry)
+    last_trade_time := time
+
+// Dynamic Exits
+if strategy.position_size != 0
+    float entry_p = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    float long_sl  = entry_p - (atr * sl_multiplier)
+    float short_sl = entry_p + (atr * sl_multiplier)
+
+    if strategy.position_size > 0 and high > entry_p * (1 + bk_activation/100)
+        long_sl := entry_p
+    if strategy.position_size < 0 and low < entry_p * (1 - bk_activation/100)
+        short_sl := entry_p
+
+    if strategy.position_size > 0
+        strategy.exit("Exit Long", "Long", stop=long_sl, trail_price=use_trail ? entry_p * (1 + trail_start/100) : na, trail_offset=use_trail ? entry_p * (trail_offset/100) : na, alert_message=msg_long_exit)
+
+    if strategy.position_size < 0
+        strategy.exit("Exit Short", "Short", stop=short_sl, trail_price=use_trail ? entry_p * (1 - trail_start/100) : na, trail_offset=use_trail ? entry_p * (trail_offset/100) : na, alert_message=msg_short_exit)
+
+// ==========================================
+// 5. VISUALS
+// ==========================================
+plot(trend_ema, "Trend EMA", color=color.white)
+p1 = plot(kc_upper, "Upper", color=color.new(color.green, 60))
+p2 = plot(kc_lower, "Lower", color=color.new(color.red, 60))
+fill(p1, p2, color=color.new(color.blue, 95))
+
+// ==========================================
+// 6. DASHBOARDS (ROBUST VERSION)
+// ==========================================
+
+// Safe security function that returns 0 if EMA is invalid (not enough history)
+get_safe_trend(tf, len) =>
+    [c, e] = request.security(syminfo.tickerid, tf, [close, ta.ema(close, len)], lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
+    // If e (EMA) is NaN, return 0 (Gray), else 1 (Green) or -1 (Red)
+    res = na(e) ? 0 : (c > e ? 1 : -1)
+    res
+
+// Pre-fetch all data
+// Using "1", "3", etc explicitly for Minutes
+s_1m  = get_safe_trend("1", ema_len)
+s_3m  = get_safe_trend("3", ema_len)
+s_5m  = get_safe_trend("5", ema_len)
+s_15m = get_safe_trend("15", ema_len)
+s_30m = get_safe_trend("30", ema_len)
+s_1h  = get_safe_trend("60", ema_len)
+s_2h  = get_safe_trend("120", ema_len)
+s_4h  = get_safe_trend("240", ema_len)
+s_8h  = get_safe_trend("480", ema_len)
+s_D   = get_safe_trend("D", ema_len)
+s_W   = get_safe_trend("W", ema_len)
+s_M   = get_safe_trend("M", ema_len)
+
+// Helper to pick color based on result
+f_col(val) =>
+    val == 1 ? color.new(#4caf50, 0) : (val == -1 ? color.new(#f44336, 0) : color.gray)
+
+// Table Creation - Using var to ensure persistence
+var tbl_ind = table.new(position.bottom_right, 4, 2, bgcolor=color.black, frame_color=color.black, frame_width=1, border_width=1, border_color=color.gray)
+var tbl_mtf = table.new(position.bottom_left, 14, 2, bgcolor=color.black, frame_color=color.gray, frame_width=1, border_width=1, border_color=color.gray)
+
+if barstate.islast
+    // --- TABLE 1: INDICATORS (RSI, ADX etc) ---
+    table.cell(tbl_ind, 0, 0, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(tbl_ind, 1, 0, "DI+", text_color=color.white, text_size=size.small)
+    table.cell(tbl_ind, 2, 0, "DI-", text_color=color.white, text_size=size.small)
+    table.cell(tbl_ind, 3, 0, "ADX", text_color=color.white, text_size=size.small)
+    
+    // Check for NaNs in local indicators just in case
+    safe_rsi = na(rsi) ? 0.0 : rsi
+    safe_adx = na(adx) ? 0.0 : adx
+    
+    table.cell(tbl_ind, 0, 1, str.tostring(safe_rsi, "#"), bgcolor=color.new(#00bcd4, 0), text_color=color.white, text_size=size.normal)
+    table.cell(tbl_ind, 1, 1, str.tostring(di_plus, "#"), bgcolor=color.new(#4caf50, 0), text_color=color.white, text_size=size.normal)
+    table.cell(tbl_ind, 2, 1, str.tostring(di_minus, "#"), bgcolor=color.new(#f44336, 0), text_color=color.white, text_size=size.normal)
+    table.cell(tbl_ind, 3, 1, str.tostring(safe_adx, "#"), bgcolor=color.new(#00897b, 0), text_color=color.white, text_size=size.normal)
+
+    // --- TABLE 2: MTF TREND ---
+    txt_dot = "●"
+    
+    // Row 0: Headers
+    table.cell(tbl_mtf, 0, 0, "SYMBOL", text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 1, 0, "VOL",    text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 2, 0, "1M",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 3, 0, "3M",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 4, 0, "5M",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 5, 0, "15M",    text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 6, 0, "30M",    text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 7, 0, "1H",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 8, 0, "2H",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 9, 0, "4H",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 10, 0, "8H",    text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 11, 0, "D",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 12, 0, "W",     text_color=color.white, text_size=size.small)
+    table.cell(tbl_mtf, 13, 0, "M",     text_color=color.white, text_size=size.small)
+
+    // Row 1: Values
+    table.cell(tbl_mtf, 0, 1, syminfo.ticker, text_color=color.new(color.red, 0), text_size=size.small)
+    table.cell(tbl_mtf, 1, 1, str.tostring(volume, format.volume), text_color=color.white, text_size=size.small)
+    
+    // Use the safe colors
+    table.cell(tbl_mtf, 2, 1, txt_dot, text_color=f_col(s_1m), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 3, 1, txt_dot, text_color=f_col(s_3m), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 4, 1, txt_dot, text_color=f_col(s_5m), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 5, 1, txt_dot, text_color=f_col(s_15m), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 6, 1, txt_dot, text_color=f_col(s_30m), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 7, 1, txt_dot, text_color=f_col(s_1h), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 8, 1, txt_dot, text_color=f_col(s_2h), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 9, 1, txt_dot, text_color=f_col(s_4h), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 10, 1, txt_dot, text_color=f_col(s_8h), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 11, 1, txt_dot, text_color=f_col(s_D), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 12, 1, txt_dot, text_color=f_col(s_W), bgcolor=color.new(color.gray, 80), text_size=size.normal)
+    table.cell(tbl_mtf, 13, 1, txt_dot, text_color=f_col(s_M), bgcolor=color.new(color.gray, 80), text_size=size.normal)

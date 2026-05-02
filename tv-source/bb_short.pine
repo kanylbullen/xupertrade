@@ -1,0 +1,63 @@
+//@version=5
+strategy("BB Upper breakout Short  +2%", 
+     overlay       = true,
+     initial_capital = 40000,
+     default_qty_type  = strategy.cash,
+     default_qty_value = 10000,
+     currency          = currency.USD)
+
+// ────────────────────────────────────────────────
+// Parametry
+// ────────────────────────────────────────────────
+bb_length     = input.int(20,    "BB okres", minval=5)
+bb_mult       = input.float(2.0, "BB mnożnik", step=0.1, minval=0.5)
+breakout_pct  = input.float(2.0, "Wybicie powyżej górnej BB (%)", step=0.1) / 100
+profit_pct    = input.float(2.0, "Take profit – spadek ceny (%)", step=0.1) / 100
+
+use_high      = input.bool(true,  "Sprawdzaj HIGH świecy (zamiast CLOSE)")
+
+// ────────────────────────────────────────────────
+// Bollinger Bands
+// ────────────────────────────────────────────────
+basis = ta.sma(close, bb_length)
+dev   = bb_mult * ta.stdev(close, bb_length)
+upper = basis + dev
+lower = basis - dev
+
+plot(basis, "Basis", color=color.orange, linewidth=1)
+plot(upper, "Upper BB", color=color.purple, linewidth=2)
+plot(lower, "Lower BB", color=color.teal,   linewidth=1)
+
+// ────────────────────────────────────────────────
+// Warunek wejścia SHORT
+// ────────────────────────────────────────────────
+ref_price = use_high ? high : close
+
+overbought = ref_price > upper * (1 + breakout_pct)
+
+// ────────────────────────────────────────────────
+// Wejście SHORT
+// ────────────────────────────────────────────────
+if overbought
+    strategy.entry("Short", strategy.short)
+
+// ────────────────────────────────────────────────
+// Wyjście – dokładnie –2% od ceny wejścia (dla short = +2% zysku)
+// ────────────────────────────────────────────────
+var float entry_price = na
+
+if strategy.position_size < 0 and strategy.position_size[1] >= 0
+    entry_price := strategy.position_avg_price
+
+if strategy.position_size < 0
+    tp_level = entry_price * (1 - profit_pct)
+    strategy.exit("TP -2%", from_entry="Short", limit=tp_level)
+
+// ────────────────────────────────────────────────
+// Wizualizacja
+// ────────────────────────────────────────────────
+plotshape(overbought, title="SHORT", 
+     style=shape.triangledown, 
+     location=location.abovebar, 
+     color=color.fuchsia, 
+     size=size.small)

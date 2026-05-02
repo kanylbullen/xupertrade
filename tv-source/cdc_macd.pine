@@ -1,0 +1,40 @@
+//@version=5
+strategy(" CDC Backtest (MACD) Fix Amount ",
+  overlay=true,
+  initial_capital=400000,        // เงินเริ่มต้น 400,000 USD
+  currency=currency.USD,
+  default_qty_type=strategy.cash, // ใช้มูลค่าเงินต่อไม้
+  default_qty_value=200000,       // ลงเงิน $200,000 ต่อไม้
+  pyramiding=1,                   // เปิดได้สูงสุด 1 ไม้
+  commission_type=strategy.commission.percent,
+  commission_value=0.1)           // ค่าคอมมิชชั่น 0.1%
+
+// === INPUTS ===
+emaFastLength = input.int(12, "EMA Fast (12)")
+emaSlowLength = input.int(26, "EMA Slow (26)")
+startDate = input.time(timestamp("1970-01-01"), "Start Date")  // ค่า default = 1970-01-01
+
+// === INDICATORS ===
+emaFast = ta.ema(close, emaFastLength)
+emaSlow = ta.ema(close, emaSlowLength)
+
+// === SIGNALS ===
+buySignal  = ta.crossover(emaFast, emaSlow)
+sellSignal = ta.crossunder(emaFast, emaSlow)
+
+// === BACKTEST DATE FILTER ===
+inTradePeriod = time >= startDate
+
+// === STRATEGY LOGIC ===
+if (inTradePeriod)
+    if (buySignal and strategy.position_size == 0)
+        strategy.entry("Long", strategy.long)
+    if (sellSignal and strategy.position_size > 0)
+        strategy.close("Long")
+
+// === PLOTS ===
+plot(emaFast, title="EMA 12", color=color.new(color.green, 0))
+plot(emaSlow, title="EMA 26", color=color.new(color.red, 0))
+
+plotshape(buySignal and inTradePeriod, title="Buy", location=location.belowbar, style=shape.triangleup, color=color.new(color.green, 0), size=size.small)
+plotshape(sellSignal and inTradePeriod, title="Sell", location=location.abovebar, style=shape.triangledown, color=color.new(color.red, 0), size=size.small)

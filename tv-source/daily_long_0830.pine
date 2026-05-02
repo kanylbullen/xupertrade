@@ -1,0 +1,19 @@
+//@version=5
+strategy("Options test Daily Long 08:30 → Exit 08:00", overlay=true, margin_long=100, margin_short=100)
+
+// Get current time in UTC
+currentHour   = hour(time, "UTC")
+currentMinute = minute(time, "UTC")
+
+// Entry condition: exactly 08:30 UTC
+enterLong = (currentHour == 8 and currentMinute == 30)
+
+// Exit condition: exactly 08:00 UTC
+exitLong = (currentHour == 8 and currentMinute == 0)
+
+// Submit orders
+if (enterLong)
+    strategy.entry("Long", strategy.long)
+
+if (exitLong)
+    strategy.close("Long")

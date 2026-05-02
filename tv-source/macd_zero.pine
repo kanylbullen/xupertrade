@@ -1,0 +1,43 @@
+//@version=6
+strategy(
+     "BTC MACD Zero-Line Strategy (Long Only)",
+     overlay = false,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,      // 0.1% fee per trade – ปรับตามค่าฟีของ exchange
+     pyramiding = 0,
+     process_orders_on_close = true
+)
+
+// === Inputs ===
+fastLen = input.int(12, "MACD Fast Length")
+slowLen = input.int(26, "MACD Slow Length")
+sigLen  = input.int(9, "MACD Signal Length")
+src     = input.source(close, "Source")
+
+// === MACD Calculation (built-in) ===
+[macd, signal, hist] = ta.macd(src, fastLen, slowLen, sigLen)
+
+// Zero line
+zero = 0.0
+
+// === Entry / Exit Conditions ===
+// เข้าเมื่อ MACD ตัดขึ้นผ่าน 0
+macdCrossUp   = ta.crossover(macd, zero)
+
+// ออกเมื่อ MACD ตัดลงผ่าน 0
+macdCrossDown = ta.crossunder(macd, zero)
+
+// === Strategy Logic ===
+if macdCrossUp and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+
+if macdCrossDown and strategy.position_size > 0
+    strategy.close("Long")
+
+// === Plot ===
+plot(macd,   color = color.new(color.teal, 0),   title = "MACD")
+plot(signal, color = color.new(color.orange, 0), title = "Signal")
+hline(zero, "Zero Line", color = color.new(color.gray, 60))

@@ -1,0 +1,132 @@
+// © waranyu.trkm — MIT License
+// Educational use only. Not financial advice.
+// Copyright (c) [2025] [waranyu.trkm]
+
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+//@version=5
+strategy("Penguin Volatility State Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_value=0.075)
+
+// ===================================================================
+//                             INPUTS
+// ===================================================================
+// --- Indicator Settings ---
+string group_indicators = "Indicator Settings"
+bb_len = input.int(20, "BB/KC Length", group=group_indicators)
+bb_mult = input.float(2.0, "BB Multiplier", group=group_indicators)
+kc_mult = input.float(2.0, "KC Multiplier", group=group_indicators)
+ema_fast_len = input.int(12, "Fast EMA Length", group=group_indicators)
+ema_slow_len = input.int(26, "Slow EMA Length", group=group_indicators)
+rsi_diff_len = input.int(14, "RSI of Diff Length", group=group_indicators)
+rsi_avg_len = input.int(7, "SMA of RSI Length", group=group_indicators)
+
+// --- Strategy Filter Settings ---
+string group_filters = "Strategy Filters"
+trade_direction = input.string("Long Only", "Trade Direction", options=["Both", "Long Only", "Short Only"], group=group_filters)
+use_regime_filter = input.bool(false, "RULE 1: Filter Sideways Markets (Yellow & Blue)?", group=group_filters)
+use_strength_filter = input.bool(false, "RULE 2: Trade Only on Strong Momentum (RSI Accel)?", group=group_filters)
+use_timing_filter = input.bool(false, "RULE 3: Enter/Exit on Exact Transition?", group=group_filters)
+// --- NEW INPUT ---
+use_diff_filter = input.bool(false, "RULE 4: Trade only when Volatility Expanding (diff > 0)?", group=group_filters)
+
+
+// ===================================================================
+//                       INDICATOR CALCULATIONS
+// ===================================================================
+// --- Bollinger Bands & Keltner Channel ---
+basisBB = ta.sma(close, bb_len)
+dev = bb_mult * ta.stdev(close, bb_len)
+upperBB = basisBB + dev
+lowerBB = basisBB - dev
+atr = ta.atr(bb_len)
+upperKC = basisBB + kc_mult * atr
+lowerKC = basisBB - kc_mult * atr
+
+// --- Diff & RSI of Diff Calculation ---
+diff = (upperBB - upperKC) / upperKC * 100
+diff_change = ta.change(diff)
+up = ta.rma(math.max(diff_change, 0), rsi_diff_len)
+down = ta.rma(-math.min(diff_change, 0), rsi_diff_len)
+rsi_diff = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+rsi_diff2 = ta.sma(rsi_diff, rsi_avg_len)
+
+// --- EMAs for Market State ---
+fast_ma = ta.ema(close, ema_fast_len)
+slow_ma = ta.ema(close, ema_slow_len)
+apcdc = ta.ema(ohlc4, 2)
+
+// ===================================================================
+//                         STATE DEFINITIONS
+// ===================================================================
+isBullishTrend = fast_ma > slow_ma
+isBearishTrend = fast_ma < slow_ma
+isGreen = isBullishTrend and apcdc > fast_ma
+isRed = isBearishTrend and apcdc < fast_ma
+isYellow = isBullishTrend and apcdc < fast_ma
+isBlue = isBearishTrend and apcdc > fast_ma
+isRsiAccel = rsi_diff > rsi_diff2
+
+// --- NEW CONDITION ---
+isVolatilityExpanding = diff > 0
+
+// ===================================================================
+//                         STRATEGY LOGIC
+// ===================================================================
+// --- Apply Filters to define tradable conditions ---
+can_long_base = use_regime_filter ? isGreen : (isGreen or isYellow)
+can_short_base = use_regime_filter ? isRed : (isRed or isBlue)
+
+// --- MODIFIED LOGIC ---
+long_condition_filtered = use_strength_filter ? can_long_base and isRsiAccel : can_long_base
+short_condition_filtered = use_strength_filter ? can_short_base and isRsiAccel : can_short_base
+long_condition = use_diff_filter ? long_condition_filtered and isVolatilityExpanding : long_condition_filtered
+short_condition = use_diff_filter ? short_condition_filtered and isVolatilityExpanding : short_condition_filtered
+
+entry_long_timing = ta.crossunder(rsi_diff2, rsi_diff) and can_long_base and (use_diff_filter ? isVolatilityExpanding : true)
+exit_long_timing = ta.crossunder(rsi_diff, rsi_diff2)
+entry_short_timing = ta.crossunder(rsi_diff2, rsi_diff) and can_short_base and (use_diff_filter ? isVolatilityExpanding : true)
+exit_short_timing = ta.crossunder(rsi_diff, rsi_diff2)
+
+// --- Determine Final Entry/Exit Conditions ---
+final_entry_long = use_timing_filter ? entry_long_timing : long_condition
+final_exit_long = use_timing_filter ? exit_long_timing : not long_condition
+final_entry_short = use_timing_filter ? entry_short_timing : short_condition
+final_exit_short = use_timing_filter ? exit_short_timing : not short_condition
+
+// --- Check Trade Direction permission ---
+allow_long = trade_direction == "Both" or trade_direction == "Long Only"
+allow_short = trade_direction == "Both" or trade_direction == "Short Only"
+
+// --- Execute Trades ---
+if (final_entry_long and allow_long)
+    strategy.entry("Long", strategy.long)
+
+if (final_exit_long)
+    strategy.close("Long")
+
+if (final_entry_short and allow_short)
+    strategy.entry("Short", strategy.short)
+
+if (final_exit_short)
+    strategy.close("Short")
+
+// ===================================================================
+//                           VISUALIZATION
+// ===================================================================
+bgcolor(isGreen ? color.new(color.green, 85) : isRed ? color.new(color.red, 85) : isYellow ? color.new(color.yellow, 85) : isBlue ? color.new(color.blue, 85) : na)

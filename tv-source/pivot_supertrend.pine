@@ -1,0 +1,120 @@
+//@version=5
+strategy("Pivot Point SuperTrend", overlay = true)
+
+
+
+
+//================ EQUITY MULTIPLIER =================
+eqMult = input.float(3.0, "Equity Multiplier per Trade/Leverage ", minval=0.1, step=0.5)
+
+//================ BTC FILTER =================
+tradeBasis = input.string("BTCUSDT.P", "Trade Direction Based On BTC or Independent",
+     options = ["Chart Coin", "BTCUSDT.P"])
+//================ STOP LOSS =================
+slPerc = input.float(1.0, "Stop Loss %", minval=0.1, step=0.1)
+
+
+
+
+//================ INPUTS =================
+//prd = input.int(2, "Pivot Point Period", minval=1, maxval=50)
+//Factor = input.float(3, "ATR Factor", minval=1, step=0.1)
+//Pd = input.int(10, "ATR Period", minval=1)
+
+showpivot = input(false, "Show Pivot Points")
+showlabel = input(true, "Show Buy/Sell Labels")
+
+//================ SOURCE =================
+src = input.source(close, "Source")
+
+//================ MA SETTINGS =================
+maLen = input.int(200, "MA Length")
+maType = input.string("EMA", "MA Type for Trade Filter",
+     options = ["SMA", "EMA", "WMA", "VWMA", "RMA", "HMA"])
+
+
+
+//================ MA CALCULATIONS =================
+sma  = ta.sma(src, maLen)
+ema  = ta.ema(src, maLen)
+wma  = ta.wma(src, maLen)
+vwma = ta.vwma(src, maLen)
+rma  = ta.rma(src, maLen)
+hma  = ta.hma(src, maLen)
+
+selectedMA =
+     maType == "SMA"  ? sma  :
+     maType == "EMA"  ? ema  :
+     maType == "WMA"  ? wma  :
+     maType == "VWMA" ? vwma :
+     maType == "RMA"  ? rma  : hma
+
+plot(selectedMA, title="Selected MA", color=color.orange, linewidth=2)
+
+//================ PIVOT POINTS =================
+//ph = ta.pivothigh(prd, prd)
+//pl = ta.pivotlow(prd, prd)
+
+ph = ta.pivothigh(2, 2)
+pl = ta.pivotlow(2, 2)
+
+plotshape(ph and showpivot, text="H", style=shape.labeldown, location=location.abovebar, offset=-2)
+plotshape(pl and showpivot, text="L", style=shape.labelup, location=location.belowbar, offset=-2)
+
+//================ CENTER LINE =================
+var float center = na
+lastpp = ph ? ph : pl ? pl : na
+if not na(lastpp)
+    center := na(center) ? lastpp : (center * 2 + lastpp) / 3
+
+//Up = center - Factor * ta.atr(Pd)
+//Dn = center + Factor * ta.atr(Pd)
+Up = center - 3 * ta.atr(10)
+Dn = center + 3 * ta.atr(10)
+
+//================ TREND =================
+var float TUp = na
+var float TDown = na
+var int Trend = 1
+
+TUp   := close[1] > nz(TUp[1])   ? math.max(Up, nz(TUp[1]))   : Up
+TDown := close[1] < nz(TDown[1]) ? math.min(Dn, nz(TDown[1])) : Dn
+
+Trend := close > nz(TDown[1]) ? 1 :
+         close < nz(TUp[1])   ? -1 :
+         nz(Trend[1], 1)
+
+Trailingsl = Trend == 1 ? TUp : TDown
+plot(Trailingsl, color = Trend == 1 ? color.lime : color.red, linewidth = 2)
+
+//================ SIGNALS =================
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+
+plotshape(bsignal and showlabel, text="Buy",  style=shape.labelup,   location=location.belowbar)
+plotshape(ssignal and showlabel, text="Sell", style=shape.labeldown, location=location.abovebar)
+
+//================ BTC TREND =================
+btcTrend = request.security("BINANCE:BTCUSDT.P", timeframe.period, Trend)
+
+//================ MA FILTER =================
+longCondition  = bsignal and close > selectedMA
+shortCondition = ssignal and close < selectedMA
+
+//================ FINAL TRADE FILTER =================
+finalLong  = tradeBasis == "Chart Coin" ? longCondition  : longCondition  and btcTrend == 1
+finalShort = tradeBasis == "Chart Coin" ? shortCondition : shortCondition and btcTrend == -1
+
+//================ EQUITY-BASED POSITION SIZE =================
+tradeQty = (strategy.equity * eqMult) / close
+
+//================ ENTRIES =================
+strategy.entry("Long",  strategy.long,  qty = tradeQty, when = finalLong)
+strategy.entry("Short", strategy.short, qty = tradeQty, when = finalShort)
+
+//================ STOP LOSS =================
+longSL  = strategy.position_avg_price * (1 - slPerc / 100)
+shortSL = strategy.position_avg_price * (1 + slPerc / 100)
+
+strategy.exit("Long SL",  from_entry="Long",  stop=longSL)
+strategy.exit("Short SL", from_entry="Short", stop=shortSL)

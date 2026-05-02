@@ -1,0 +1,150 @@
+x-bot-base: &bot-base
+  build: ./bot
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "curl -sf http://localhost:${API_PORT:-8000}/health || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+
+x-bot-env: &bot-env
+  PAPER_INITIAL_BALANCE: "10000"
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/hypertrade
+  REDIS_URL: redis://redis:6379/0
+  POLL_INTERVAL_SECONDS: "60"
+  MAX_POSITION_SIZE_USD: "200"
+  MAX_DAILY_LOSS_USD: "100"
+  KILL_SWITCH: "false"
+  API_KEY: "${API_KEY:-}"
+  DASHBOARD_URL: "${DASHBOARD_URL:-http://localhost:3000}"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hypertrade
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres  # change before internet-facing deployment
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hypertrade"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot-paper:
+    <<: *bot-base
+    container_name: hypertrade-bot-paper
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *bot-env
+      EXCHANGE_MODE: paper
+      API_PORT: "8000"
+      TELEGRAM_ENABLED: "false"
+
+  bot-testnet:
+    <<: *bot-base
+    container_name: hypertrade-bot-testnet
+    ports:
+      - "8001:8001"
+    environment:
+      <<: *bot-env
+      EXCHANGE_MODE: testnet
+      API_PORT: "8001"
+      HYPERLIQUID_PRIVATE_KEY: "${HYPERLIQUID_PRIVATE_KEY:-}"
+      HYPERLIQUID_ACCOUNT_ADDRESS: "${HYPERLIQUID_ACCOUNT_ADDRESS:-}"
+      # Telegram lives on the testnet bot — it subscribes to all 3 modes'
+      # event channels and routes commands per-mode internally.
+      TELEGRAM_ENABLED: "${TELEGRAM_ENABLED:-true}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      TELEGRAM_EVENTS: "${TELEGRAM_EVENTS:-signal.generated,trade.executed,position.closed,error}"
+
+  bot-mainnet:
+    <<: *bot-base
+    container_name: hypertrade-bot-mainnet
+    profiles: [mainnet]   # only starts when --profile mainnet is given
+    ports:
+      - "8002:8002"
+    environment:
+      <<: *bot-env
+      EXCHANGE_MODE: mainnet
+      API_PORT: "8002"
+      HYPERLIQUID_PRIVATE_KEY: "${HYPERLIQUID_MAINNET_PRIVATE_KEY:-}"
+      HYPERLIQUID_ACCOUNT_ADDRESS: "${HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS:-}"
+      TELEGRAM_ENABLED: "false"
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hypertrade
+      REDIS_URL: redis://redis:6379/0
+      BOT_API_URL_PAPER: http://bot-paper:8000
+      BOT_API_URL_TESTNET: http://bot-testnet:8001
+      BOT_API_URL_MAINNET: http://bot-mainnet:8002
+      DASHBOARD_URL: "${DASHBOARD_URL:-http://localhost:3000}"
+      # Used as base for OIDC redirect_uri. If unset, falls back to
+      # DASHBOARD_URL, then to the request's origin (which inside Docker
+      # resolves to the container hostname — breaks OIDC).
+      PUBLIC_URL: "${PUBLIC_URL:-${DASHBOARD_URL:-http://localhost:3000}}"
+      API_KEY: "${API_KEY:-}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  caddy:
+    build: ./caddy
+    container_name: hypertrade-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    environment:
+      # Default host the bootstrap Caddyfile issues a self-signed cert
+      # for. Set in .env to match your dashboard hostname so browsers
+      # don't get a name-mismatch warning on top of the self-signed one.
+      CADDY_HOST: "${CADDY_HOST:-localhost}"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+    depends_on:
+      dashboard:
+        condition: service_started
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

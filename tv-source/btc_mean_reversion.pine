@@ -1,0 +1,162 @@
+//@version=5
+strategy("Optimized BTC Mean Reversion (RSI 20/65)", 
+     overlay=true, 
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.04,
+     pyramiding=0,
+     calc_on_every_tick=false)
+
+// ================================================================================
+// STRATEGY PARAMETERS - UNIVERSAL RSI 20/65 FOR ALL COINS
+// ================================================================================
+
+// EMA Settings
+emaLength = input.int(200, "EMA Period", minval=1, group="Indicator Settings")
+
+// RSI Settings - UNIVERSAL 20/65
+rsiPeriod = input.int(14, "RSI Period", minval=1, group="RSI Settings")
+rsiBullLevel = input.float(20, "RSI Oversold Level (BUY)", minval=10, maxval=50, group="RSI Settings")
+rsiBearLevel = input.float(65, "RSI Overbought Level (SELL)", minval=50, maxval=90, group="RSI Settings")
+
+// Stochastic Settings
+stochLength = input.int(14, "Stochastic K Period", minval=1, group="Stochastic")
+stochSmooth = input.int(3, "Stochastic D Period", minval=1, group="Stochastic")
+stochOverbought = input.float(75, "Stochastic Overbought", minval=50, maxval=100, group="Stochastic")
+stochOversold = input.float(25, "Stochastic Oversold", minval=0, maxval=50, group="Stochastic")
+
+// Fixed Risk/Reward Settings
+stopLossPct = input.float(4.0, "Stop Loss %", minval=0.1, maxval=20.0, step=0.1, group="Risk Management") / 100
+takeProfitPct = input.float(6.0, "Take Profit %", minval=0.1, maxval=30.0, step=0.1, group="Risk Management") / 100
+
+// Backtest Date Range
+startDate = input(timestamp("2025-01-01 00:00"), "Start Date", group="Backtest Range")
+endDate = input(timestamp("2099-12-31 23:59"), "End Date", group="Backtest Range")
+inDateRange = true
+
+// ================================================================================
+// INDICATOR CALCULATIONS
+// ================================================================================
+
+// EMA
+ema = ta.ema(close, emaLength)
+
+// RSI
+rsi = ta.rsi(close, rsiPeriod)
+
+// Stochastic
+stochK = ta.stoch(close, high, low, stochLength)
+stochD = ta.sma(stochK, stochSmooth)
+
+// Distance from EMA
+distPct = ((close - ema) / ema) * 100
+
+// ================================================================================
+// ENTRY SIGNALS
+// ================================================================================
+
+// LONG: RSI < 20 + Stochastic < 25 + Price above EMA
+longSignal = rsi < rsiBullLevel and 
+             stochK < stochOversold and close > ema  * 0.9
+
+// SHORT: RSI > 65 + Stochastic > 75 + Price below EMA
+shortSignal = rsi > rsiBearLevel and 
+              stochK > stochOverbought and 
+              close < ema
+
+// ================================================================================
+// POSITION MANAGEMENT WITH PLOTTED LINES
+// ================================================================================
+
+var float entryPrice = na
+var float longStopPrice = na
+var float longTargetPrice = na
+var float shortStopPrice = na
+var float shortTargetPrice = na
+
+inLongPosition = strategy.position_size > 0
+inShortPosition = strategy.position_size < 0
+noPosition = strategy.position_size == 0
+
+// ================================================================================
+// ENTRY ORDERS
+// ================================================================================
+
+if inDateRange and noPosition
+    if longSignal
+        entryPrice := close
+        longStopPrice := entryPrice * (1 - stopLossPct)
+        longTargetPrice := entryPrice * (1 + takeProfitPct)
+        strategy.entry("Long", strategy.long, comment="Long: RSI 16")
+    
+    if shortSignal
+        entryPrice := close
+        shortStopPrice := entryPrice * (1 + stopLossPct)
+        shortTargetPrice := entryPrice * (1 - takeProfitPct)
+        strategy.entry("Short", strategy.short, comment="Short: RSI 65")
+
+// ================================================================================
+// EXIT ORDERS
+// ================================================================================
+
+if inLongPosition
+    strategy.exit("Exit Long", 
+         from_entry="Long",
+         stop=longStopPrice, 
+         limit=longTargetPrice,
+         comment_loss="SL Hit",
+         comment_profit="TP Hit")
+
+if inShortPosition
+    strategy.exit("Exit Short",
+         from_entry="Short",
+         stop=shortStopPrice,
+         limit=shortTargetPrice,
+         comment_loss="SL Hit",
+         comment_profit="TP Hit")
+
+// ================================================================================
+// VISUALIZATION - WITH SL/TP LINES
+// ================================================================================
+
+// Plot EMA
+plot(ema, "EMA 200", color=color.new(color.yellow, 0), linewidth=2)
+
+// Plot Stop Loss and Take Profit Lines
+plot(inLongPosition ? longStopPrice : na, "Long Stop Loss", 
+     color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(inLongPosition ? longTargetPrice : na, "Long Take Profit", 
+     color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+
+plot(inShortPosition ? shortStopPrice : na, "Short Stop Loss", 
+     color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+plot(inShortPosition ? shortTargetPrice : na, "Short Take Profit", 
+     color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+
+// Plot entry price line when in position
+plot(inLongPosition or inShortPosition ? entryPrice : na, "Entry Price",
+     color=color.new(color.blue, 0), linewidth=1, style=plot.style_circles)
+
+// Plot entry signals
+plotshape(longSignal and noPosition, "Long Entry", 
+     shape.triangleup, location.belowbar, 
+     color=color.new(color.green, 0), size=size.small)
+     
+plotshape(shortSignal and noPosition, "Short Entry",
+     shape.triangledown, location.abovebar,
+     color=color.new(color.red, 0), size=size.small)
+
+
+
+// ================================================================================
+// ALERTS
+// ================================================================================
+
+alertcondition(longSignal and noPosition, "Long Entry Signal", 
+     "RSI 16 Oversold - LONG at {{close}}")
+     
+alertcondition(shortSignal and noPosition, "Short Entry Signal",
+     "RSI 65 Overbought - SHORT at {{close}}")
+

@@ -1,0 +1,25 @@
+# Bootstrap Caddyfile — self-signed HTTPS for the configured host.
+#
+# Caddy auto-generates a local CA + leaf cert for {$CADDY_HOST} and serves
+# HTTPS immediately. Browser will warn the first time — accept the cert
+# to proceed. Default host is 'localhost' which works for SSH-tunneled
+# access; override via CADDY_HOST env to issue for your actual domain.
+#
+# Once a domain + Cloudflare API token are saved on the Options page,
+# the bot POSTs a full Let's Encrypt config to Caddy's admin API on
+# :2019 which replaces this entirely. Real cert, no browser warning.
+
+{
+    admin 0.0.0.0:2019
+}
+
+# HTTPS on 443 with auto self-signed cert for the configured host.
+{$CADDY_HOST:localhost} {
+    tls internal
+    reverse_proxy dashboard:3000
+}
+
+# Redirect plain HTTP to HTTPS (works for any host)
+:80 {
+    redir https://{host}{uri} 308
+}

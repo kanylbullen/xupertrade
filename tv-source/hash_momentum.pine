@@ -1,0 +1,281 @@
+//@version=6
+strategy("Hash Momentum Strategy", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100,
+         initial_capital=10000,
+         commission_type=strategy.commission.percent,
+         commission_value=0.075,
+         slippage=5,
+         margin_long=0,
+         margin_short=0,
+         pyramiding=0,
+         process_orders_on_close=true)
+
+// ============================================
+// 📊 CORE STRATEGY SETTINGS
+// ============================================
+// Momentum Settings
+momLength = input.int(13, "Momentum Length", minval=6, maxval=60, group="Core Strategy", tooltip="Higher = stronger signals, fewer trades")
+momThreshold = input.float(2.25, "Momentum Threshold (ATR Multiplier)", minval=0.5, maxval=5.0, step=0.25, group="Core Strategy", tooltip="Higher = only strongest momentum moves")
+
+// EMA Trend Filter
+useTrendFilter = input.bool(true, "Use EMA Trend Filter", group="Core Strategy", tooltip="Only trade with EMA trend direction")
+emaLength = input.int(28, "EMA Length", minval=20, maxval=200, group="Core Strategy", tooltip="Trend reference - stay above for longs, below for shorts")
+
+// Session Filters
+useSessionFilter = input.bool(false, "Use Trading Session Filter", group="Filters", tooltip="Only trade during specific sessions")
+allowTokyo = input.bool(false, "Tokyo Session (00:00-09:00 JST)", group="Filters", tooltip="Asian session - lower volatility")
+allowLondon = input.bool(false, "London Session (08:00-17:00 GMT)", group="Filters", tooltip="European session - high volume")
+allowNewYork = input.bool(false, "New York Session (08:00-17:00 EST)", group="Filters", tooltip="US session - highest liquidity")
+
+// Weekend Filter
+useWeekendOff = input.bool(false, "Weekend Off (No Trading)", group="Filters", tooltip="Disable trading on weekends (Sat-Sun) to avoid low liquidity")
+
+// ============================================
+// 💰 RISK MANAGEMENT - PERCENTAGE BASED
+// ============================================
+stopLossPerc = input.float(2.2, "Stop Loss %", minval=0.5, maxval=10, step=0.1, group="Risk Management", tooltip="Fixed percentage stop loss")
+
+// Risk:Reward Ratio
+riskRewardRatio = input.float(2.5, "Risk:Reward Ratio", minval=1.0, maxval=5.0, step=0.5, group="Risk Management", tooltip="1.5 = 1.5x reward for 1x risk | 2.0 = 2x reward | 3.0 = 3x reward")
+
+// Partial Profit Taking
+usePartialTp = input.bool(true, "Use Partial Profit Taking", group="Risk Management", tooltip="Take profits in stages to lock in gains")
+tp1Ratio = input.float(2.0, "First TP R:R", minval=0.5, maxval=3.0, step=0.5, group="Risk Management", tooltip="First target as multiple of risk")
+tp1Percent = input.int(50, "First TP Size %", minval=10, maxval=90, group="Risk Management")
+tp2Ratio = input.float(2.5, "Second TP R:R", minval=0.5, maxval=4.0, step=0.5, group="Risk Management")
+tp2Percent = input.int(40, "Second TP Size %", minval=10, maxval=90, group="Risk Management")
+
+// Trade Management
+useCooldown = input.bool(true, "Use Trade Cooldown", group="Trade Management", tooltip="Prevent overtrading")
+cooldownBars = input.int(6, "Cooldown Bars", minval=1, maxval=24, group="Trade Management")
+
+// ============================================
+// 📈 CALCULATIONS
+// ============================================
+// Momentum
+momentum(src, len) => src - src[len]
+mom0 = momentum(close, momLength)
+mom1 = momentum(mom0, 1)
+momStdev = ta.stdev(mom0, momLength * 3)
+momNormalized = momStdev > 0 ? mom0 / momStdev : 0
+
+// EMA Trend
+ema = ta.ema(close, emaLength)
+bullishTrend = close > ema
+bearishTrend = close < ema
+
+// ATR for momentum threshold only
+atr = ta.atr(14)
+dynamicThreshold = atr * momThreshold
+
+// Cooldown tracking
+var int lastTradeBar = 0
+var bool inCooldown = false
+if strategy.closedtrades > strategy.closedtrades[1]
+    lastTradeBar := bar_index
+inCooldown := useCooldown and (bar_index - lastTradeBar) < cooldownBars
+
+// Session detection (using hour in UTC)
+// Tokyo: 00:00-09:00 JST = 15:00-00:00 UTC (previous day) 
+// London: 08:00-17:00 GMT = 08:00-17:00 UTC
+// New York: 08:00-17:00 EST = 13:00-22:00 UTC
+tokyoSession = (hour >= 15 or hour < 0)  // 15:00 UTC - 00:00 UTC (next day)
+londonSession = (hour >= 8 and hour < 17)
+newYorkSession = (hour >= 13 and hour < 22)
+
+// Check if current time matches allowed sessions
+validSession = true
+if useSessionFilter
+    validSession := (allowTokyo and tokyoSession) or (allowLondon and londonSession) or (allowNewYork and newYorkSession)
+
+// Weekend detection (Saturday = 7, Sunday = 1 in Pine Script)
+isWeekend = dayofweek == 7 or dayofweek == 1
+allowWeekend = useWeekendOff ? not isWeekend : true
+
+// ============================================
+// 🎯 SIGNAL LOGIC
+// ============================================
+// Core momentum conditions
+longMomentum = mom0 > dynamicThreshold and mom1 > 0 and momNormalized > 0.5 and close > close[1]
+shortMomentum = mom0 < -dynamicThreshold and mom1 < 0 and momNormalized < -0.5 and close < close[1]
+
+// Apply trend filter
+trendCheck = useTrendFilter ? (longMomentum ? bullishTrend : shortMomentum ? bearishTrend : false) : true
+
+// Apply session filter
+sessionCheck = useSessionFilter ? validSession : true
+
+// Apply weekend filter
+weekendCheck = allowWeekend
+
+// Final signals
+longSignal = longMomentum and trendCheck and sessionCheck and weekendCheck and not inCooldown and strategy.position_size == 0
+shortSignal = shortMomentum and trendCheck and sessionCheck and weekendCheck and not inCooldown and strategy.position_size == 0
+
+// ============================================
+// 💵 POSITION MANAGEMENT
+// ============================================
+var float entryPrice = 0.0
+var float stopLoss = 0.0
+var float takeProfit = 0.0
+var float riskAmount = 0.0
+
+// Calculate stops and targets (percentage-based)
+calcLongStop() => close * (1 - stopLossPerc / 100)
+calcShortStop() => close * (1 + stopLossPerc / 100)
+
+// ============================================
+// 📍 ENTRY LOGIC
+// ============================================
+if longSignal
+    entryPrice := close
+    stopLoss := calcLongStop()
+    riskAmount := entryPrice - stopLoss
+    takeProfit := entryPrice + (riskAmount * riskRewardRatio)
+    
+    strategy.entry("Long", strategy.long, comment="LONG")
+    
+    if usePartialTp
+        tp1Price = entryPrice + (riskAmount * tp1Ratio)
+        tp2Price = entryPrice + (riskAmount * tp2Ratio)
+        
+        strategy.exit("TP1", "Long", qty_percent=tp1Percent, limit=tp1Price, stop=stopLoss, comment="TP1")
+        strategy.exit("TP2", "Long", qty_percent=tp2Percent, limit=tp2Price, stop=stopLoss, comment="TP2")
+        strategy.exit("TP Final", "Long", limit=takeProfit, stop=stopLoss, comment="TP Final")
+    else
+        strategy.exit("Exit", "Long", limit=takeProfit, stop=stopLoss, comment="Exit")
+
+if shortSignal
+    entryPrice := close
+    stopLoss := calcShortStop()
+    riskAmount := stopLoss - entryPrice
+    takeProfit := entryPrice - (riskAmount * riskRewardRatio)
+    
+    strategy.entry("Short", strategy.short, comment="SHORT")
+    
+    if usePartialTp
+        tp1Price = entryPrice - (riskAmount * tp1Ratio)
+        tp2Price = entryPrice - (riskAmount * tp2Ratio)
+        
+        strategy.exit("TP1", "Short", qty_percent=tp1Percent, limit=tp1Price, stop=stopLoss, comment="TP1")
+        strategy.exit("TP2", "Short", qty_percent=tp2Percent, limit=tp2Price, stop=stopLoss, comment="TP2")
+        strategy.exit("TP Final", "Short", limit=takeProfit, stop=stopLoss, comment="TP Final")
+    else
+        strategy.exit("Exit", "Short", limit=takeProfit, stop=stopLoss, comment="Exit")
+
+// Exit on opposite signals
+var bool longExited = false
+var bool shortExited = false
+
+if strategy.position_size > 0 and shortSignal
+    strategy.close("Long", comment="Reverse")
+    longExited := true
+else
+    longExited := false
+
+if strategy.position_size < 0 and longSignal
+    strategy.close("Short", comment="Reverse")
+    shortExited := true
+else
+    shortExited := false
+
+// Track regular exits (TP/SL)
+if strategy.position_size == 0 and strategy.position_size[1] > 0
+    longExited := true
+if strategy.position_size == 0 and strategy.position_size[1] < 0
+    shortExited := true
+
+// ============================================
+// 🎨 VISUAL ENHANCEMENTS
+// ============================================
+// EMA with gradient color based on trend strength
+emaColor = bullishTrend ? color.new(#00ff41, 30) : bearishTrend ? color.new(#ff1744, 30) : color.new(color.gray, 50)
+plot(ema, "EMA Trend", color=emaColor, linewidth=2)
+
+// Entry signals - tiny fluorescent dots
+plotshape(longSignal, "Long Entry", shape.circle, location.belowbar, color.new(#00ff41, 0), size=size.tiny)
+plotshape(shortSignal, "Short Entry", shape.circle, location.abovebar, color.new(#ff1744, 0), size=size.tiny)
+
+// Exit signals - X markers
+plotshape(longExited, "Long Exit", shape.xcross, location.abovebar, color.new(#00bfff, 0), size=size.tiny)
+plotshape(shortExited, "Short Exit", shape.xcross, location.belowbar, color.new(#ffa500, 0), size=size.tiny)
+
+// Position lines
+isLong = strategy.position_size > 0
+isShort = strategy.position_size < 0
+plot(isLong or isShort ? entryPrice : na, "Entry", color.new(color.white, 40), style=plot.style_linebr, linewidth=1)
+plot(isLong or isShort ? stopLoss : na, "Stop Loss", color.new(color.red, 20), style=plot.style_linebr, linewidth=2)
+plot(isLong or isShort ? takeProfit : na, "Take Profit", color.new(color.lime, 20), style=plot.style_linebr, linewidth=2)
+
+// Partial TP levels - calculate outside if blocks
+tp1Price = (isLong or isShort) ? (isLong ? entryPrice + (riskAmount * tp1Ratio) : entryPrice - (riskAmount * tp1Ratio)) : na
+tp2Price = (isLong or isShort) ? (isLong ? entryPrice + (riskAmount * tp2Ratio) : entryPrice - (riskAmount * tp2Ratio)) : na
+
+// Plot TP levels (only show when partial TP is enabled and in position)
+plot(usePartialTp and (isLong or isShort) ? tp1Price : na, "TP1", color.new(color.green, 50), style=plot.style_linebr, linewidth=1)
+plot(usePartialTp and (isLong or isShort) ? tp2Price : na, "TP2", color.new(color.green, 50), style=plot.style_linebr, linewidth=1)
+
+// ============================================
+// 📊 DASHBOARD (Hidden when "On every tick" is enabled)
+// ============================================
+var table dashboard = table.new(position.top_right, 2, 11, border_width=1)
+
+// Only show dashboard when NOT calculating on every tick
+if barstate.islast and not barstate.isrealtime
+    // Header
+    table.cell(dashboard, 0, 0, "Hash Momentum", bgcolor=color.new(#1e1e1e, 10), text_color=#00ff41, text_size=size.normal)
+    table.cell(dashboard, 1, 0, "", bgcolor=color.new(#1e1e1e, 10))
+    
+    // Position
+    table.cell(dashboard, 0, 1, "Position", text_color=color.gray, text_size=size.small)
+    posText = isLong ? "LONG" : isShort ? "SHORT" : "FLAT"
+    posColor = isLong ? #00ff41 : isShort ? #ff1744 : color.gray
+    table.cell(dashboard, 1, 1, posText, text_color=posColor, text_size=size.small)
+    
+    row_offset = 0
+    
+    if isLong or isShort
+        table.cell(dashboard, 0, 2 + row_offset, "Entry", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 2 + row_offset, str.tostring(math.round(entryPrice, 2)), text_color=color.white, text_size=size.small)
+        
+        // Stop Loss
+        table.cell(dashboard, 0, 3 + row_offset, "Stop Loss", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 3 + row_offset, str.tostring(math.round(stopLoss, 2)), text_color=color.red, text_size=size.small)
+        
+        // Take Profit
+        table.cell(dashboard, 0, 4 + row_offset, "Take Profit", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 4 + row_offset, str.tostring(math.round(takeProfit, 2)), text_color=color.lime, text_size=size.small)
+        
+        // Risk:Reward
+        table.cell(dashboard, 0, 5 + row_offset, "R:R Ratio", text_color=color.gray, text_size=size.small)
+        table.cell(dashboard, 1, 5 + row_offset, "1:" + str.tostring(riskRewardRatio), text_color=#00ff41, text_size=size.small)
+    
+    // Momentum
+    table.cell(dashboard, 0, 6 + row_offset, "Momentum", text_color=color.gray, text_size=size.small)
+    momText = str.tostring(math.round(momNormalized, 2)) + "σ"
+    momColor = math.abs(momNormalized) > 0.5 ? (momNormalized > 0 ? #00ff41 : #ff1744) : color.gray
+    table.cell(dashboard, 1, 6 + row_offset, momText, text_color=momColor, text_size=size.small)
+    
+    // Stats
+    table.cell(dashboard, 0, 7 + row_offset, "Trades", text_color=color.gray, text_size=size.small)
+    table.cell(dashboard, 1, 7 + row_offset, str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.small)
+    
+    winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    table.cell(dashboard, 0, 8 + row_offset, "Win Rate", text_color=color.gray, text_size=size.small)
+    winColor = winRate >= 50 ? #00ff41 : winRate >= 40 ? color.yellow : #ff1744
+    table.cell(dashboard, 1, 8 + row_offset, str.tostring(math.round(winRate, 1)) + "%", text_color=winColor, text_size=size.small)
+    
+    netProfitPerc = strategy.initial_capital > 0 ? (strategy.netprofit / strategy.initial_capital) * 100 : 0
+    table.cell(dashboard, 0, 9 + row_offset, "Profit", text_color=color.gray, text_size=size.small)
+    profitColor = netProfitPerc > 0 ? #00ff41 : #ff1744
+    table.cell(dashboard, 1, 9 + row_offset, str.tostring(math.round(netProfitPerc, 1)) + "%", text_color=profitColor, text_size=size.small)
+
+// ============================================
+// 🔔 ALERTS
+// ============================================
+alertcondition(longSignal, title="Long Signal", message="LONG: {{ticker}} @ {{close}}")
+alertcondition(shortSignal, title="Short Signal", message="SHORT: {{ticker}} @ {{close}}")
+alertcondition(strategy.position_size > strategy.position_size[1], title="Position Opened", message="Position opened on {{ticker}}")
+alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0, title="Position Closed", message="Position closed on {{ticker}}")

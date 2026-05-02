@@ -1,0 +1,293 @@
+//@version=5
+strategy("7/19 EMA Crypto", overlay=true, initial_capital=1000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=0, calc_on_every_tick=false, process_orders_on_close=true, commission_type=strategy.commission.percent, commission_value=0.04, max_lines_count=500, max_labels_count=500)
+
+// ==================== INPUTS ====================
+fastLen = input.int(7, "Fast EMA")
+slowLen = input.int(19, "Slow EMA")
+riskType = input.string("% of Account", "Risk Type", options=["Fixed $", "% of Account"])
+riskAmount = input.float(50.0, "Risk Per Trade $")
+riskPercent = input.float(5.0, "Risk Per Trade %", minval=0.1, maxval=100)
+useStopLoss = input.bool(true, "Use Stop Loss")
+slCandles = input.int(4, "SL Candles Lookback", options=[3, 4])
+useMinSL = input.bool(false, "Use Minimum SL Filter")
+minSLPercent = input.float(0.5, "Minimum SL %", minval=0.1, maxval=10, step=0.1, tooltip="If SL distance is less than this %, skip the trade. If in a position, close it but don't enter new trade.")
+useMaxSL = input.bool(false, "Use Maximum SL Filter")
+maxSLPercent = input.float(3.0, "Maximum SL %", minval=0.1, maxval=20, step=0.1, tooltip="If SL distance is greater than this %, skip the trade. If in a position, close it but don't enter new trade.")
+useTP1 = input.bool(false, "Use TP1")
+tp1RR = input.float(1.0, "TP1 R:R", minval=0.1, step=0.1)
+tp1Size = input.float(50.0, "TP1 Close %", minval=1, maxval=100)
+skipSaturday = input.bool(true, "Skip Saturday")
+
+// ==================== EMAs ====================
+ema7 = ta.ema(close, fastLen)
+ema19 = ta.ema(close, slowLen)
+
+// ==================== SIGNALS ====================
+bullishCross = ta.crossover(ema7, ema19)
+bearishCross = ta.crossunder(ema7, ema19)
+
+// ==================== DAY FILTER ====================
+canTrade = skipSaturday ? dayofweek != dayofweek.saturday : true
+
+// ==================== POSITION STATE ====================
+inLong = strategy.position_size > 0
+inShort = strategy.position_size < 0
+flat = strategy.position_size == 0
+
+// ==================== STOP LOSS CALCULATIONS ====================
+lowestLow3 = math.min(low, math.min(low[1], low[2]))
+lowestLow4 = math.min(low, math.min(low[1], math.min(low[2], low[3])))
+highestHigh3 = math.max(high, math.max(high[1], high[2]))
+highestHigh4 = math.max(high, math.max(high[1], math.max(high[2], high[3])))
+
+// ==================== CALCULATE SL PERCENTAGES ====================
+longSL = slCandles == 3 ? lowestLow3 : lowestLow4
+shortSL = slCandles == 3 ? highestHigh3 : highestHigh4
+longSLPercent = ((close - longSL) / close) * 100
+shortSLPercent = ((shortSL - close) / close) * 100
+
+// ==================== MINIMUM SL CHECK ====================
+// If useMinSL is false, always consider SL as valid (not too small)
+longSLNotTooSmall = useMinSL ? longSLPercent >= minSLPercent : true
+shortSLNotTooSmall = useMinSL ? shortSLPercent >= minSLPercent : true
+
+// ==================== MAXIMUM SL CHECK ====================
+// If useMaxSL is false, always consider SL as valid (not too big)
+longSLNotTooBig = useMaxSL ? longSLPercent <= maxSLPercent : true
+shortSLNotTooBig = useMaxSL ? shortSLPercent <= maxSLPercent : true
+
+// ==================== COMBINED SL VALIDITY ====================
+longSLValid = longSLNotTooSmall and longSLNotTooBig
+shortSLValid = shortSLNotTooSmall and shortSLNotTooBig
+
+// ==================== RISK CALCULATION ====================
+riskDollar = riskType == "Fixed $" ? riskAmount : strategy.equity * (riskPercent / 100)
+
+// ==================== ENTRY CONDITIONS ====================
+longSignal = bullishCross and canTrade
+shortSignal = bearishCross and canTrade
+
+// Valid entries (signal + SL meets all requirements)
+longEntry = longSignal and longSLValid
+shortEntry = shortSignal and shortSLValid
+
+// Signals where SL is too small (close existing position but don't enter) - only when filter is enabled
+longSkipSmallSL = useMinSL and longSignal and not longSLNotTooSmall
+shortSkipSmallSL = useMinSL and shortSignal and not shortSLNotTooSmall
+
+// Signals where SL is too big (close existing position but don't enter) - only when filter is enabled
+longSkipBigSL = useMaxSL and longSignal and not longSLNotTooBig and longSLNotTooSmall
+shortSkipBigSL = useMaxSL and shortSignal and not shortSLNotTooBig and shortSLNotTooSmall
+
+// Combined skip signals (for closing positions)
+longSkipSL = longSkipSmallSL or longSkipBigSL
+shortSkipSL = shortSkipSmallSL or shortSkipBigSL
+
+// ==================== VISUAL SL/ENTRY TRACKING ====================
+var float currentSL = na
+var float currentEntry = na
+var float currentTP1 = na
+var line slLine = na
+var line entryLine = na
+var line tp1Line = na
+var label slLabel = na
+var label entryLabel = na
+
+// ==================== CLOSE POSITION ON OPPOSITE SIGNAL WITH INVALID SL ====================
+if longSkipSmallSL and inShort
+    strategy.close("Short", comment="Close - New SL < " + str.tostring(minSLPercent) + "%")
+    label.new(bar_index, close, "⚠ CLOSE ONLY\nSL: " + str.tostring(longSLPercent, "#.##") + "% < " + str.tostring(minSLPercent) + "%", style=label.style_label_down, color=color.yellow, textcolor=color.black, size=size.small)
+    slLine := na
+    entryLine := na
+    tp1Line := na
+    currentSL := na
+    currentEntry := na
+    currentTP1 := na
+
+if shortSkipSmallSL and inLong
+    strategy.close("Long", comment="Close - New SL < " + str.tostring(minSLPercent) + "%")
+    label.new(bar_index, close, "⚠ CLOSE ONLY\nSL: " + str.tostring(shortSLPercent, "#.##") + "% < " + str.tostring(minSLPercent) + "%", style=label.style_label_up, color=color.yellow, textcolor=color.black, size=size.small)
+    slLine := na
+    entryLine := na
+    tp1Line := na
+    currentSL := na
+    currentEntry := na
+    currentTP1 := na
+
+if longSkipBigSL and inShort
+    strategy.close("Short", comment="Close - New SL > " + str.tostring(maxSLPercent) + "%")
+    label.new(bar_index, close, "⚠ CLOSE ONLY\nSL: " + str.tostring(longSLPercent, "#.##") + "% > " + str.tostring(maxSLPercent) + "%", style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+    slLine := na
+    entryLine := na
+    tp1Line := na
+    currentSL := na
+    currentEntry := na
+    currentTP1 := na
+
+if shortSkipBigSL and inLong
+    strategy.close("Long", comment="Close - New SL > " + str.tostring(maxSLPercent) + "%")
+    label.new(bar_index, close, "⚠ CLOSE ONLY\nSL: " + str.tostring(shortSLPercent, "#.##") + "% > " + str.tostring(maxSLPercent) + "%", style=label.style_label_up, color=color.orange, textcolor=color.white, size=size.small)
+    slLine := na
+    entryLine := na
+    tp1Line := na
+    currentSL := na
+    currentEntry := na
+    currentTP1 := na
+
+// ==================== EXECUTE LONG ====================
+if longEntry
+    sl = longSL
+    risk = close - sl
+    
+    if risk > 0
+        posSize = riskDollar / risk
+        tp1 = close + (risk * tp1RR)
+        
+        // Store values for drawing
+        currentSL := sl
+        currentEntry := close
+        currentTP1 := tp1
+        
+        strategy.entry("Long", strategy.long, qty=posSize)
+        
+        if useTP1 and useStopLoss
+            strategy.exit("Long TP1", "Long", qty_percent=tp1Size, limit=tp1, stop=sl)
+            strategy.exit("Long SL", "Long", stop=sl)
+        else if useTP1
+            strategy.exit("Long TP1", "Long", qty_percent=tp1Size, limit=tp1)
+        else if useStopLoss
+            strategy.exit("Long SL", "Long", stop=sl)
+        
+        // Draw entry line
+        entryLine := line.new(bar_index, close, bar_index, close, color=color.green, width=2, style=line.style_solid)
+        entryLabelText = (useMinSL or useMaxSL) ? "▶ LONG: " + str.tostring(close, "#.##") + "\nSL%: " + str.tostring(longSLPercent, "#.##") + "%" : "▶ LONG: " + str.tostring(close, "#.##")
+        label.new(bar_index, close, entryLabelText, style=label.style_label_right, color=color.green, textcolor=color.white, size=size.small)
+        
+        // Draw SL line
+        if useStopLoss
+            slLine := line.new(bar_index, sl, bar_index, sl, color=color.red, width=2, style=line.style_dashed)
+            slLabel := label.new(bar_index, sl, "SL: " + str.tostring(sl, "#.##"), style=label.style_label_right, color=color.red, textcolor=color.white, size=size.small)
+        
+        // Draw TP1 line
+        if useTP1
+            tp1Line := line.new(bar_index, tp1, bar_index, tp1, color=color.lime, width=1, style=line.style_dotted)
+            label.new(bar_index, tp1, "TP1: " + str.tostring(tp1, "#.##") + " (" + str.tostring(tp1RR) + "R)", style=label.style_label_right, color=color.lime, textcolor=color.black, size=size.tiny)
+
+// ==================== EXECUTE SHORT ====================
+if shortEntry
+    sl = shortSL
+    risk = sl - close
+    
+    if risk > 0
+        posSize = riskDollar / risk
+        tp1 = close - (risk * tp1RR)
+        
+        // Store values for drawing
+        currentSL := sl
+        currentEntry := close
+        currentTP1 := tp1
+        
+        strategy.entry("Short", strategy.short, qty=posSize)
+        
+        if useTP1 and useStopLoss
+            strategy.exit("Short TP1", "Short", qty_percent=tp1Size, limit=tp1, stop=sl)
+            strategy.exit("Short SL", "Short", stop=sl)
+        else if useTP1
+            strategy.exit("Short TP1", "Short", qty_percent=tp1Size, limit=tp1)
+        else if useStopLoss
+            strategy.exit("Short SL", "Short", stop=sl)
+        
+        // Draw entry line
+        entryLine := line.new(bar_index, close, bar_index, close, color=color.orange, width=2, style=line.style_solid)
+        entryLabelText = (useMinSL or useMaxSL) ? "▼ SHORT: " + str.tostring(close, "#.##") + "\nSL%: " + str.tostring(shortSLPercent, "#.##") + "%" : "▼ SHORT: " + str.tostring(close, "#.##")
+        label.new(bar_index, close, entryLabelText, style=label.style_label_right, color=color.orange, textcolor=color.white, size=size.small)
+        
+        // Draw SL line
+        if useStopLoss
+            slLine := line.new(bar_index, sl, bar_index, sl, color=color.red, width=2, style=line.style_dashed)
+            slLabel := label.new(bar_index, sl, "SL: " + str.tostring(sl, "#.##"), style=label.style_label_right, color=color.red, textcolor=color.white, size=size.small)
+        
+        // Draw TP1 line
+        if useTP1
+            tp1Line := line.new(bar_index, tp1, bar_index, tp1, color=color.lime, width=1, style=line.style_dotted)
+            label.new(bar_index, tp1, "TP1: " + str.tostring(tp1, "#.##") + " (" + str.tostring(tp1RR) + "R)", style=label.style_label_right, color=color.lime, textcolor=color.black, size=size.tiny)
+
+// ==================== EXTEND LINES WHILE IN POSITION ====================
+if strategy.position_size != 0
+    if not na(slLine)
+        line.set_x2(slLine, bar_index)
+    if not na(entryLine)
+        line.set_x2(entryLine, bar_index)
+    if not na(tp1Line)
+        line.set_x2(tp1Line, bar_index)
+
+// ==================== CLEAR LINES WHEN POSITION CLOSES ====================
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    // Position just closed - add exit marker
+    if not na(currentSL)
+        if (strategy.position_size[1] > 0 and low <= currentSL) or (strategy.position_size[1] < 0 and high >= currentSL)
+            label.new(bar_index, currentSL, "⛔ STOPPED", style=label.style_label_left, color=color.red, textcolor=color.white, size=size.small)
+        else
+            label.new(bar_index, close, "✕ EXIT", style=label.style_label_left, color=color.gray, textcolor=color.white, size=size.small)
+    
+    slLine := na
+    entryLine := na
+    tp1Line := na
+    currentSL := na
+    currentEntry := na
+    currentTP1 := na
+
+// ==================== PLOTS ====================
+plot(ema7, "7 EMA", color.lime, 2)
+plot(ema19, "19 EMA", color.red, 2)
+
+plotshape(longEntry, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal, text="LONG")
+plotshape(shortEntry, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal, text="SHORT")
+plotshape(bullishCross and not canTrade, "Skip Long Sat", shape.xcross, location.belowbar, color.gray, size=size.small, text="SKIP")
+plotshape(bearishCross and not canTrade, "Skip Short Sat", shape.xcross, location.abovebar, color.gray, size=size.small, text="SKIP")
+plotshape(longSkipSmallSL and flat, "Skip Long Small SL", shape.xcross, location.belowbar, color.yellow, size=size.small, text="SL<MIN")
+plotshape(shortSkipSmallSL and flat, "Skip Short Small SL", shape.xcross, location.abovebar, color.yellow, size=size.small, text="SL<MIN")
+plotshape(longSkipBigSL and flat, "Skip Long Big SL", shape.xcross, location.belowbar, color.orange, size=size.small, text="SL>MAX")
+plotshape(shortSkipBigSL and flat, "Skip Short Big SL", shape.xcross, location.abovebar, color.orange, size=size.small, text="SL>MAX")
+
+bgcolor(ema7 > ema19 ? color.new(color.green, 93) : color.new(color.red, 93))
+
+// ==================== INFO TABLE ====================
+var table t = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(t, 0, 0, "7/19 EMA CRYPTO", text_color=color.white, bgcolor=color.blue)
+    table.cell(t, 1, 0, "", bgcolor=color.blue)
+    table.cell(t, 0, 1, "Trend:", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 1, ema7 > ema19 ? "BULLISH" : "BEARISH", text_color=ema7 > ema19 ? color.lime : color.red, text_size=size.small)
+    table.cell(t, 0, 2, "Position:", text_color=color.white, text_size=size.small)
+    pos = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posCol = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(t, 1, 2, pos, text_color=posCol, text_size=size.small)
+    table.cell(t, 0, 3, "Risk/Trade:", text_color=color.white, text_size=size.small)
+    riskText = riskType == "Fixed $" ? "$" + str.tostring(riskAmount) : str.tostring(riskPercent) + "% ($" + str.tostring(riskDollar, "#.##") + ")"
+    table.cell(t, 1, 3, riskText, text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 4, "Equity:", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 4, "$" + str.tostring(strategy.equity, "#.##"), text_color=color.aqua, text_size=size.small)
+    table.cell(t, 0, 5, "Min SL %:", text_color=color.white, text_size=size.small)
+    minSLText = useMinSL ? str.tostring(minSLPercent) + "%" : "OFF"
+    table.cell(t, 1, 5, minSLText, text_color=useMinSL ? color.purple : color.gray, text_size=size.small)
+    table.cell(t, 0, 6, "Max SL %:", text_color=color.white, text_size=size.small)
+    maxSLText = useMaxSL ? str.tostring(maxSLPercent) + "%" : "OFF"
+    table.cell(t, 1, 6, maxSLText, text_color=useMaxSL ? color.fuchsia : color.gray, text_size=size.small)
+    table.cell(t, 0, 7, "TP1:", text_color=color.white, text_size=size.small)
+    tp1Text = useTP1 ? str.tostring(tp1RR) + "R (" + str.tostring(tp1Size) + "% close)" : "OFF"
+    table.cell(t, 1, 7, tp1Text, text_color=useTP1 ? color.green : color.gray, text_size=size.small)
+    table.cell(t, 0, 8, "TP2:", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 8, "Crossover", text_color=color.green, text_size=size.small)
+    table.cell(t, 0, 9, "SL:", text_color=color.white, text_size=size.small)
+    slText = not useStopLoss ? "OFF" : str.tostring(slCandles) + " Candles"
+    table.cell(t, 1, 9, slText, text_color=useStopLoss ? color.orange : color.gray, text_size=size.small)
+
+// ==================== ALERTS ====================
+alertcondition(longEntry, "Long Entry", "7/19 EMA: Go LONG")
+alertcondition(shortEntry, "Short Entry", "7/19 EMA: Go SHORT")
+alertcondition(longSkipSmallSL, "Long Skipped - Small SL", "7/19 EMA: Long signal skipped - SL too small")
+alertcondition(shortSkipSmallSL, "Short Skipped - Small SL", "7/19 EMA: Short signal skipped - SL too small")
+alertcondition(longSkipBigSL, "Long Skipped - Big SL", "7/19 EMA: Long signal skipped - SL too big")
+alertcondition(shortSkipBigSL, "Short Skipped - Big SL", "7/19 EMA: Short signal skipped - SL too big")

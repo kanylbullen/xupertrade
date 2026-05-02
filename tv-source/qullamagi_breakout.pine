@@ -1,0 +1,744 @@
+//@version=6
+//@strategy_alert_message {{strategy.order.alert_message}};TICKER={{ticker}};TF={{interval}};PRICE={{strategy.order.price}};QTY={{strategy.order.contracts}};TIME={{timenow}}
+strategy("Qullamaggie MA Breakout L+S v2.5",
+     overlay = true,
+     initial_capital = 100000,
+     pyramiding = 0,
+     calc_on_order_fills = false,
+     calc_on_every_tick = false,
+     max_labels_count = 500)
+
+// ========= Quick Preset =========
+grpPreset   = "Quick Preset"
+preset      = input.string("Loose (Intraday)", "Mode", options = ["Strict (Daily)", "Loose (Intraday)"], group = grpPreset)
+showDebug   = input.bool(true, "Show Entry/Exit Markers", group = grpPreset)
+showStats   = input.bool(true, "Show Performance Stats Table", group = grpPreset)
+
+// ========= Backtest Date Range =========
+grpDate = "Backtest Date Range"
+useStartDate = input.bool(true, "Use Start Date", group = grpDate)
+startYear = input.int(2018, "Start Year", minval=2000, maxval=2100, group=grpDate)
+startMonth = input.int(1, "Start Month", minval=1, maxval=12, group=grpDate)
+startDay = input.int(1, "Start Day", minval=1, maxval=31, group=grpDate)
+
+useEndDate = input.bool(false, "Use End Date", group = grpDate)
+endYear = input.int(2025, "End Year", minval=2000, maxval=2100, group=grpDate)
+endMonth = input.int(12, "End Month", minval=1, maxval=12, group=grpDate)
+endDay = input.int(31, "End Day", minval=1, maxval=31, group=grpDate)
+
+// ========= Moving Averages =========
+grpMA    = "Moving Averages"
+len10    = input.int(10,  "1st MA (Fastest)",  group = grpMA, minval = 1)
+len20    = input.int(20,  "2nd MA",            group = grpMA, minval = 1)
+len50    = input.int(50,  "3rd MA",            group = grpMA, minval = 1)
+len100   = input.int(100, "4th MA",            group = grpMA, minval = 1)
+len200   = input.int(200, "5th MA (Slowest)",  group = grpMA, minval = 1)
+
+// ========= Trend Filter =========
+grpFilt         = "Trend Filter"
+usePerfectOrder = input.bool(true,  "Require Perfect Order (Long: 1>2>3>4>5 / Short: Reverse)", group = grpFilt)
+requireSlope    = input.bool(true,  "Require All MA Slopes Aligned (Long=Up, Short=Down)",  group = grpFilt)
+
+// ========= ADX Trend Strength Filter =========
+grpADX       = "ADX Trend Strength Filter"
+useADX       = input.bool(true, "Use ADX Filter", group = grpADX)
+adxLen       = input.int(14, "ADX Length", group = grpADX, minval = 1)
+adxMinLong   = input.float(20.0, "Min ADX for Long", group = grpADX, minval = 0, step = 1)
+adxMinShort  = input.float(25.0, "Min ADX for Short (Stricter)", group = grpADX, minval = 0, step = 1)
+adxMaxEntry  = input.float(50.0, "Max ADX (Exclude Overheated)", group = grpADX, minval = 30, step = 1)
+
+// ========= RSI Filter =========
+grpRSI       = "RSI Filter"
+useRSI       = input.bool(false, "Use RSI Filter", group = grpRSI)
+rsiLen       = input.int(14, "RSI Length", group = grpRSI, minval = 1)
+rsiOBLevel   = input.float(70.0, "Exclude Long Above RSI (Overbought)", group = grpRSI, minval = 50, step = 1)
+rsiOSLevel   = input.float(30.0, "Exclude Short Below RSI (Oversold)", group = grpRSI, minval = 10, step = 1)
+
+// ========= Higher Timeframe Trend Filter =========
+grpHTF       = "Higher Timeframe Trend Filter"
+useHtfTrend  = input.bool(false, "Use HTF Trend Filter", group = grpHTF)
+htfTf        = input.timeframe("D", "HTF Timeframe", group = grpHTF)
+htfMaLen     = input.int(200, "HTF MA Length", group = grpHTF, minval = 1)
+
+// ========= Box (Base) & Breakout =========
+grpBase          = "Box (Base) & Breakout"
+useBaseFilter    = input.bool(false,  "Use Box/Contraction Filter", group = grpBase)
+baseLen          = input.int(10,      "Box Length (Bars)",      group = grpBase, minval = 5)
+baseAtrLen       = input.int(14,      "ATR Length",           group = grpBase, minval = 1)
+baseAtrMult      = input.float(2.0,   "Box Height <= ATR x",   group = grpBase, step = 0.1)
+mustHoldAbove50  = input.bool(false,  "Box Must Hold Above 3rd MA (Long)", group = grpBase)
+useBreakoutClose = input.bool(true,   "Confirm Breakout on Close", group = grpBase)
+
+// ========= Pullback Entry =========
+grpPullback       = "Pullback Entry"
+usePullbackEntry  = input.bool(true, "Allow Pullback Entry", group = grpPullback)
+pullbackMA        = input.string("2nd MA", "Pullback Reference Line", options = ["1st MA","2nd MA","3rd MA"], group = grpPullback)
+pullbackLookback  = input.int(20, "Recent Breakout Lookback (Bars)", group = grpPullback, minval = 5, maxval = 50)
+requireBounce     = input.bool(true, "Require Bounce Candle (Close > Open)", group = grpPullback)
+pullbackAtrMult   = input.float(0.5, "MA Proximity Tolerance (ATR x)", group = grpPullback, step = 0.1)
+
+// ========= Volume Filter =========
+grpVol        = "Volume Filter"
+useVolFilter  = input.bool(true,   "Use Volume Filter", group = grpVol)
+volLen        = input.int(20,      "Volume SMA Length", group = grpVol, minval = 1)
+volMult       = input.float(1.2,   "Volume Spike Multiplier (> SMA x)", group = grpVol, step = 0.1)
+pullbackVolMult = input.float(0.8, "Pullback Volume Multiplier (Lower)", group = grpVol, step = 0.1)
+
+// ========= Entry Additional Filter =========
+grpEntry          = "Entry Additional Filter"
+useWideCandleFilt = input.bool(true, "Exclude Wide Breakout Candles (ATR Based)", group = grpEntry)
+maxBreakoutAtr    = input.float(2.5, "Max Breakout Candle Range <= ATR x", group = grpEntry, step = 0.1)
+
+// ========= Entry & Exit (Risk) =========
+grpRisk        = "Entry & Exit"
+trailMALen     = input.int(20, "Trailing Stop MA Length", group = grpRisk, minval = 1)
+trailMAType    = input.string("EMA", "Trailing Stop MA Type", options = ["EMA", "SMA"], group = grpRisk)
+stopBufferPct  = input.float(0.3,  "Stop Buffer (Long=Below, Short=Above, %)", step = 0.1, group = grpRisk)
+useScaleOut    = input.bool(true,  "Use Partial Take Profit (Scale Out)", group = grpRisk)
+scaleRR        = input.float(1.0,  "Scale Out RR (Risk Multiple)", step = 0.1, group = grpRisk)
+scaleQtyPct    = input.float(10.0, "Scale Out Qty (%)", step = 1, group = grpRisk, minval = 1, maxval = 100)
+posSizePct     = input.float(20.0, "Position Size (% of Equity)", step = 1, group = grpRisk, minval = 1, maxval = 100)
+
+// ========= Hard Stop (Max Loss) =========
+grpHardStop      = "Hard Stop (Max Loss)"
+useHardStop      = input.bool(true, "Use Hard Stop", group = grpHardStop)
+hardStopPct      = input.float(2.5, "Max Loss % (From Entry)", group = grpHardStop, step = 0.1)
+
+// ========= Time Based Exit =========
+grpTimeExit     = "Time Based Exit"
+useTimeExit     = input.bool(false, "Use Time Based Exit", group = grpTimeExit)
+maxBarsInTrade  = input.int(48, "Max Bars in Trade (If Losing)", group = grpTimeExit, minval = 10)
+
+// ========= Breakeven Stop =========
+grpBE          = "Breakeven Stop"
+useBreakeven   = input.bool(true,  "Use Breakeven Stop", group = grpBE)
+beActivateRR   = input.float(0.8,  "BE Activation RR", step = 0.1, group = grpBE)
+beOffsetPct    = input.float(0.1,  "BE Offset (%)", step = 0.05, group = grpBE)
+
+// ========= Position Direction & Cooldown =========
+grpRisk2      = "Position Direction & Cooldown"
+tradeLong     = input.bool(true,  "Allow Long", group = grpRisk2)
+tradeShort    = input.bool(true,  "Allow Short", group = grpRisk2)
+cooldownBars  = input.int(3, "Cooldown After Exit (Bars, 0=Disabled)", group = grpRisk2, minval = 0)
+
+// ========= Short Only Strict Filter =========
+grpShortFilter      = "Short Only Strict Filter"
+shortRequireHTF     = input.bool(false, "Short Requires HTF Downtrend", group = grpShortFilter)
+shortMinConsecRed   = input.int(2, "Min Consecutive Red Candles Before Short", group = grpShortFilter, minval = 0, maxval = 5)
+shortRequireMA5Below = input.bool(false, "Short Requires Price Below 5th MA", group = grpShortFilter)
+
+// ========= Calculate Moving Averages =========
+ma1  = ta.ema(close, len10)
+ma2  = ta.ema(close, len20)
+ma3  = ta.sma(close, len50)
+ma4  = ta.sma(close, len100)
+ma5  = ta.sma(close, len200)
+
+// ========= ADX Calculation =========
+[diPlus, diMinus, adxValue] = ta.dmi(adxLen, adxLen)
+adxOK_long  = (not useADX) or (adxValue >= adxMinLong and adxValue <= adxMaxEntry)
+adxOK_short = (not useADX) or (adxValue >= adxMinShort and adxValue <= adxMaxEntry)
+
+// ========= RSI Calculation =========
+rsiValue = ta.rsi(close, rsiLen)
+rsiOK_long  = (not useRSI) or (rsiValue < rsiOBLevel)
+rsiOK_short = (not useRSI) or (rsiValue > rsiOSLevel)
+
+// ========= Trend / Perfect Order =========
+perfectOrder_long_strict = close > ma1 and ma1 > ma2 and ma2 > ma3 and ma3 > ma4 and ma4 > ma5
+slopeUpAll               = ma1 > ma1[1] and ma2 > ma2[1] and ma3 > ma3[1] and ma4 > ma4[1] and ma5 > ma5[1]
+trendOK_long_strict      = (not usePerfectOrder or perfectOrder_long_strict) and (not requireSlope or slopeUpAll)
+
+perfectOrder_short_strict = close < ma1 and ma1 < ma2 and ma2 < ma3 and ma3 < ma4 and ma4 < ma5
+slopeDownAll              = ma1 < ma1[1] and ma2 < ma2[1] and ma3 < ma3[1] and ma4 < ma4[1] and ma5 < ma5[1]
+trendOK_short_strict      = (not usePerfectOrder or perfectOrder_short_strict) and (not requireSlope or slopeDownAll)
+
+perfectOrder_long_loose  = close > ma1 and ma1 > ma2 and ma2 > ma3
+trendOK_long_loose       = perfectOrder_long_loose
+
+perfectOrder_short_loose = close < ma1 and ma1 < ma2 and ma2 < ma3
+trendOK_short_loose      = perfectOrder_short_loose
+
+// ========= Pullback Relaxed Trend Conditions =========
+perfectOrder_long_pullback  = ma1 > ma2 and ma2 > ma3 and ma3 > ma4 and ma4 > ma5
+trendOK_long_pullback       = (not usePerfectOrder or perfectOrder_long_pullback)
+
+perfectOrder_short_pullback = ma1 < ma2 and ma2 < ma3 and ma3 < ma4 and ma4 < ma5
+trendOK_short_pullback      = (not usePerfectOrder or perfectOrder_short_pullback)
+
+perfectOrder_long_pullback_loose  = ma1 > ma2 and ma2 > ma3
+trendOK_long_pullback_loose       = perfectOrder_long_pullback_loose
+
+perfectOrder_short_pullback_loose = ma1 < ma2 and ma2 < ma3
+trendOK_short_pullback_loose      = perfectOrder_short_pullback_loose
+
+// ========= Higher Timeframe Trend Filter =========
+htfClose = request.security(syminfo.tickerid, htfTf, close)
+htfMa    = ta.sma(htfClose, htfMaLen)
+htfUp    = htfClose > htfMa
+htfDown  = htfClose < htfMa
+
+htfOK_long  = (not useHtfTrend) or htfUp
+htfOK_short = (not useHtfTrend) or htfDown
+
+// ========= Short Only Extra Filter =========
+consecRedCandles = 0
+for i = 1 to shortMinConsecRed
+    if close[i] < open[i]
+        consecRedCandles += 1
+
+shortConsecRedOK = shortMinConsecRed == 0 or consecRedCandles >= shortMinConsecRed
+shortBelowMA5 = (not shortRequireMA5Below) or close < ma5
+shortHTFRequired = (not shortRequireHTF) or htfDown
+shortExtraFilter = shortConsecRedOK and shortBelowMA5 and shortHTFRequired
+
+// ========= Box & Breakout =========
+boxHi   = ta.highest(high, baseLen)[1]
+boxLo   = ta.lowest(low,  baseLen)[1]
+boxHgt  = boxHi - boxLo
+atrVal  = ta.atr(baseAtrLen)
+tightBox = boxHgt <= atrVal * baseAtrMult
+holdAbove50 = ta.lowest(low, baseLen)[1] > ma3[1]
+
+breakoutCrossUp    = ta.crossover(close, boxHi)
+breakoutIntraUp    = (high > boxHi) and (nz(close[1]) <= boxHi)
+
+breakoutCrossDown  = ta.crossunder(close, boxLo)
+breakoutIntraDown  = (low < boxLo) and (nz(close[1]) >= boxLo)
+
+baseOK_strict = (not useBaseFilter) or (tightBox and (not mustHoldAbove50 or holdAbove50))
+baseOK_loose  = true
+
+// ========= Pullback Reference Line =========
+pullbackLine = pullbackMA == "1st MA" ? ma1 : pullbackMA == "2nd MA" ? ma2 : ma3
+
+// ========= Recent Breakout Check =========
+hadRecentBreakoutUp   = ta.highest(high, pullbackLookback) > boxHi
+hadRecentBreakoutDown = ta.lowest(low, pullbackLookback) < boxLo
+
+// ========= Pullback Conditions =========
+nearPullbackLineLong  = low <= pullbackLine * (1 + pullbackAtrMult * atrVal / close) and low >= pullbackLine * (1 - pullbackAtrMult * atrVal / close)
+bounceUpCandle        = close > open
+pullbackBounceOK_long = (not requireBounce) or bounceUpCandle
+closeAbovePullbackLine = close > pullbackLine
+pullbackLongCond = usePullbackEntry and nearPullbackLineLong and pullbackBounceOK_long and closeAbovePullbackLine and hadRecentBreakoutUp
+
+nearPullbackLineShort  = high >= pullbackLine * (1 - pullbackAtrMult * atrVal / close) and high <= pullbackLine * (1 + pullbackAtrMult * atrVal / close)
+bounceDownCandle       = close < open
+pullbackBounceOK_short = (not requireBounce) or bounceDownCandle
+closeBelowPullbackLine = close < pullbackLine
+pullbackShortCond = usePullbackEntry and nearPullbackLineShort and pullbackBounceOK_short and closeBelowPullbackLine and hadRecentBreakoutDown
+
+// ========= Volume Filter =========
+volSma       = ta.sma(volume, volLen)
+volOK_strict = (not useVolFilter) or (volume > volSma * volMult)
+volOK_loose  = (not useVolFilter) or (volume > volSma * 1.1)
+volOK_pullback = (not useVolFilter) or (volume > volSma * pullbackVolMult)
+
+// ========= Wide Candle Filter =========
+candleRange   = high - low
+wideCandleOK  = (not useWideCandleFilt) or (candleRange <= atrVal * maxBreakoutAtr)
+
+// ========= Cooldown =========
+var int lastFlatBar = na
+if strategy.position_size[1] != 0 and strategy.position_size == 0
+    lastFlatBar := bar_index
+
+cooldownOK = (cooldownBars == 0) or na(lastFlatBar) or (bar_index - lastFlatBar > cooldownBars)
+
+// ========= Date Range Filter =========
+startTime = timestamp(startYear, startMonth, startDay, 0, 0)
+endTime = timestamp(endYear, endMonth, endDay, 23, 59)
+inDateRange = (useStartDate ? time >= startTime : true) and (useEndDate ? time <= endTime : true)
+
+// ========= Entry Conditions by Mode =========
+enterLongBreakoutStrict = tradeLong and trendOK_long_strict and baseOK_strict and (useBreakoutClose ? breakoutCrossUp : breakoutIntraUp) and volOK_strict and htfOK_long and wideCandleOK and cooldownOK and adxOK_long and rsiOK_long and inDateRange
+enterLongBreakoutLoose  = tradeLong and trendOK_long_loose  and baseOK_loose  and breakoutIntraUp and volOK_loose and htfOK_long and wideCandleOK and cooldownOK and adxOK_long and rsiOK_long and inDateRange
+enterLongBreakout       = (preset == "Strict (Daily)" ? enterLongBreakoutStrict : enterLongBreakoutLoose)
+
+enterShortBreakoutStrict = tradeShort and trendOK_short_strict and baseOK_strict and (useBreakoutClose ? breakoutCrossDown : breakoutIntraDown) and volOK_strict and htfOK_short and wideCandleOK and cooldownOK and adxOK_short and rsiOK_short and shortExtraFilter and inDateRange
+enterShortBreakoutLoose  = tradeShort and trendOK_short_loose  and baseOK_loose  and breakoutIntraDown and volOK_loose and htfOK_short and wideCandleOK and cooldownOK and adxOK_short and rsiOK_short and shortExtraFilter and inDateRange
+enterShortBreakout       = (preset == "Strict (Daily)" ? enterShortBreakoutStrict : enterShortBreakoutLoose)
+
+enterLongPullbackStrict = tradeLong and trendOK_long_pullback and pullbackLongCond and volOK_pullback and htfOK_long and wideCandleOK and cooldownOK and adxOK_long and rsiOK_long and inDateRange
+enterLongPullbackLoose  = tradeLong and trendOK_long_pullback_loose and pullbackLongCond and volOK_pullback and htfOK_long and wideCandleOK and cooldownOK and adxOK_long and rsiOK_long and inDateRange
+enterLongPullback       = (preset == "Strict (Daily)" ? enterLongPullbackStrict : enterLongPullbackLoose)
+
+enterShortPullbackStrict = tradeShort and trendOK_short_pullback and pullbackShortCond and volOK_pullback and htfOK_short and wideCandleOK and cooldownOK and adxOK_short and rsiOK_short and shortExtraFilter and inDateRange
+enterShortPullbackLoose  = tradeShort and trendOK_short_pullback_loose and pullbackShortCond and volOK_pullback and htfOK_short and wideCandleOK and cooldownOK and adxOK_short and rsiOK_short and shortExtraFilter and inDateRange
+enterShortPullback       = (preset == "Strict (Daily)" ? enterShortPullbackStrict : enterShortPullbackLoose)
+
+enterLong  = (enterLongBreakout or enterLongPullback) and strategy.position_size == 0
+enterShort = (enterShortBreakout or enterShortPullback) and strategy.position_size == 0
+
+// ========= Trailing Stop Line =========
+trailLine = trailMAType == "EMA" ? ta.ema(close, trailMALen) : ta.sma(close, trailMALen)
+
+stopLineLong  = trailLine * (1.0 - stopBufferPct / 100.0)
+stopLineShort = trailLine * (1.0 + stopBufferPct / 100.0)
+
+// ========= State Variables =========
+var float entryPriceLong      = na
+var float initStopLong        = na
+var bool  scaledLong          = false
+var string entryTypeLong      = na
+var bool  beActivatedLong     = false
+var int   barsInTradeLong     = 0
+
+var float entryPriceShort     = na
+var float initStopShort       = na
+var bool  scaledShort         = false
+var string entryTypeShort     = na
+var bool  beActivatedShort    = false
+var int   barsInTradeShort    = 0
+
+// ========= Performance Tracking Variables =========
+var int long_wins = 0
+var int long_losses = 0
+var int short_wins = 0
+var int short_losses = 0
+var float[] trade_returns = array.new_float(0)
+var float[] daily_returns = array.new_float(0)
+var float start_price = na
+var float prev_day_equity = strategy.initial_capital
+var int prev_day = 0
+
+// 시작 가격 저장
+if na(start_price) and strategy.position_size != 0
+    start_price := close
+
+// 거래 종료 시 수익률 기록
+if strategy.closedtrades > strategy.closedtrades[1]
+    float exit_price = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    float entry_price = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+    float trade_size = strategy.closedtrades.size(strategy.closedtrades - 1)
+    
+    float trade_pct = 0.0
+    if trade_size > 0  // 롱
+        trade_pct := entry_price != 0 ? (exit_price - entry_price) / entry_price * 100 : 0.0
+        if trade_pct > 0
+            long_wins += 1
+        else
+            long_losses += 1
+    else  // 숏
+        trade_pct := entry_price != 0 ? (entry_price - exit_price) / entry_price * 100 : 0.0
+        if trade_pct > 0
+            short_wins += 1
+        else
+            short_losses += 1
+    
+    array.push(trade_returns, trade_pct)
+
+// 일간 수익률 기록
+int current_day = dayofmonth(time)
+if current_day != prev_day
+    if prev_day != 0 and prev_day_equity > 0
+        float daily_ret = (strategy.equity - prev_day_equity) / prev_day_equity
+        array.push(daily_returns, daily_ret)
+    prev_day_equity := strategy.equity
+    prev_day := current_day
+
+// ========= Entry Orders =========
+if enterLong and strategy.position_size == 0
+    qty_value = strategy.equity * (posSizePct / 100.0) / close
+    entryType = enterLongBreakout ? "BREAKOUT" : "PULLBACK"
+    strategy.entry("LONG", strategy.long, qty = qty_value,
+                   alert_message = "EVENT=ENTRY;SIDE=LONG;TYPE=" + entryType + ";STRATEGY=Qullamaggie_MA")
+    entryTypeLong := entryType
+
+if enterShort and strategy.position_size == 0
+    qty_value = strategy.equity * (posSizePct / 100.0) / close
+    entryType = enterShortBreakout ? "BREAKOUT" : "PULLBACK"
+    strategy.entry("SHORT", strategy.short, qty = qty_value,
+                   alert_message = "EVENT=ENTRY;SIDE=SHORT;TYPE=" + entryType + ";STRATEGY=Qullamaggie_MA")
+    entryTypeShort := entryType
+
+// ========= Position Entry Variable Setup =========
+justEnteredLong = strategy.position_size > 0 and strategy.position_size[1] == 0
+if justEnteredLong
+    entryPriceLong  := strategy.position_avg_price
+    initStopLong    := stopLineLong
+    scaledLong      := false
+    beActivatedLong := false
+    barsInTradeLong := 0
+
+justEnteredShort = strategy.position_size < 0 and strategy.position_size[1] == 0
+if justEnteredShort
+    entryPriceShort  := strategy.position_avg_price
+    initStopShort    := stopLineShort
+    scaledShort      := false
+    beActivatedShort := false
+    barsInTradeShort := 0
+
+// ========= Bars in Trade Counter =========
+if strategy.position_size > 0
+    barsInTradeLong += 1
+
+if strategy.position_size < 0
+    barsInTradeShort += 1
+
+// Reset on Position Close
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entryPriceLong   := na
+    initStopLong     := na
+    scaledLong       := false
+    entryTypeLong    := na
+    beActivatedLong  := false
+    barsInTradeLong  := 0
+
+    entryPriceShort  := na
+    initStopShort    := na
+    scaledShort      := false
+    entryTypeShort   := na
+    beActivatedShort := false
+    barsInTradeShort := 0
+
+// ========= Breakeven Stop Activation =========
+riskLong  = not na(entryPriceLong) and not na(initStopLong) ? entryPriceLong - initStopLong : na
+riskShort = not na(entryPriceShort) and not na(initStopShort) ? initStopShort - entryPriceShort : na
+
+beTargetLong  = not na(riskLong) ? entryPriceLong + riskLong * beActivateRR : na
+beTargetShort = not na(riskShort) ? entryPriceShort - riskShort * beActivateRR : na
+
+if useBreakeven and strategy.position_size > 0 and not beActivatedLong and not na(beTargetLong)
+    if high >= beTargetLong
+        beActivatedLong := true
+
+if useBreakeven and strategy.position_size < 0 and not beActivatedShort and not na(beTargetShort)
+    if low <= beTargetShort
+        beActivatedShort := true
+
+// ========= Breakeven Applied Stop Line =========
+beStopLong  = not na(entryPriceLong) ? entryPriceLong * (1 + beOffsetPct / 100) : na
+beStopShort = not na(entryPriceShort) ? entryPriceShort * (1 - beOffsetPct / 100) : na
+
+finalStopLong  = beActivatedLong and not na(beStopLong) ? math.max(stopLineLong, beStopLong) : stopLineLong
+finalStopShort = beActivatedShort and not na(beStopShort) ? math.min(stopLineShort, beStopShort) : stopLineShort
+
+// ========= Hard Stop Calculation =========
+hardStopLong  = not na(entryPriceLong) ? entryPriceLong * (1 - hardStopPct / 100) : na
+hardStopShort = not na(entryPriceShort) ? entryPriceShort * (1 + hardStopPct / 100) : na
+
+effectiveStopLong  = useHardStop and not na(hardStopLong) ? math.max(finalStopLong, hardStopLong) : finalStopLong
+effectiveStopShort = useHardStop and not na(hardStopShort) ? math.min(finalStopShort, hardStopShort) : finalStopShort
+
+// ========= Partial Take Profit (Long) =========
+canScaleLong   = useScaleOut and strategy.position_size > 0 and not na(entryPriceLong) and not na(initStopLong) and (not scaledLong) and not na(riskLong) and riskLong > 0
+target1Long    = not na(riskLong) ? entryPriceLong + riskLong * scaleRR : na
+scaleCondLong  = canScaleLong and not na(target1Long) and close >= target1Long
+
+if scaleCondLong
+    strategy.close("LONG", qty_percent = scaleQtyPct,
+                   alert_message = "EVENT=SCALE_OUT;SIDE=LONG;STRATEGY=Qullamaggie_MA")
+    scaledLong := true
+
+// ========= Partial Take Profit (Short) =========
+canScaleShort  = useScaleOut and strategy.position_size < 0 and not na(entryPriceShort) and not na(initStopShort) and (not scaledShort) and not na(riskShort) and riskShort > 0
+target1Short   = not na(riskShort) ? entryPriceShort - riskShort * scaleRR : na
+scaleCondShort = canScaleShort and not na(target1Short) and close <= target1Short
+
+if scaleCondShort
+    strategy.close("SHORT", qty_percent = scaleQtyPct,
+                   alert_message = "EVENT=SCALE_OUT;SIDE=SHORT;STRATEGY=Qullamaggie_MA")
+    scaledShort := true
+
+// ========= Time Based Exit =========
+timeExitLong  = useTimeExit and strategy.position_size > 0 and barsInTradeLong >= maxBarsInTrade and not na(entryPriceLong) and close < entryPriceLong
+timeExitShort = useTimeExit and strategy.position_size < 0 and barsInTradeShort >= maxBarsInTrade and not na(entryPriceShort) and close > entryPriceShort
+
+// ========= Final Exit =========
+exitLong  = strategy.position_size > 0 and (close < effectiveStopLong or timeExitLong)
+exitShort = strategy.position_size < 0 and (close > effectiveStopShort or timeExitShort)
+
+if exitLong
+    strategy.close("LONG",
+                   alert_message = "EVENT=EXIT;SIDE=LONG;STRATEGY=Qullamaggie_MA")
+
+if exitShort
+    strategy.close("SHORT",
+                   alert_message = "EVENT=EXIT;SIDE=SHORT;STRATEGY=Qullamaggie_MA")
+
+// ========= Exit Type Classification =========
+exitLongTP   = exitLong  and not na(entryPriceLong)  and close >= entryPriceLong
+exitLongSL   = exitLong  and not na(entryPriceLong)  and close <  entryPriceLong
+exitShortTP  = exitShort and not na(entryPriceShort) and close <= entryPriceShort
+exitShortSL  = exitShort and not na(entryPriceShort) and close >  entryPriceShort
+
+// ========= Statistics Functions =========
+f_avg(arr) =>
+    array.size(arr) > 0 ? array.avg(arr) : 0.0
+
+f_stdev(arr) =>
+    array.size(arr) > 1 ? array.stdev(arr) : 0.0
+
+f_downside_std(arr) =>
+    cnt = array.size(arr)
+    if cnt > 1
+        neg_arr = array.new_float(0)
+        for i = 0 to cnt - 1
+            val = array.get(arr, i)
+            if val < 0
+                array.push(neg_arr, val)
+        array.size(neg_arr) > 1 ? array.stdev(neg_arr) : 0.0
+    else
+        0.0
+
+f_skewness(arr, avg, std) =>
+    cnt = array.size(arr)
+    if cnt > 0 and std > 0.000001
+        sum_cube_diff = 0.0
+        for i = 0 to cnt - 1
+            diff = array.get(arr, i) - avg
+            sum_cube_diff += math.pow(diff, 3)
+        (sum_cube_diff / cnt) / math.pow(std, 3)
+    else
+        0.0
+
+f_sharpe(arr) =>
+    cnt = array.size(arr)
+    if cnt > 1
+        avg_ret = array.avg(arr)
+        std_ret = array.stdev(arr)
+        std_ret > 0 ? (avg_ret / std_ret) * math.sqrt(252.0) : 0.0
+    else
+        0.0
+
+f_sortino(arr) =>
+    cnt = array.size(arr)
+    if cnt > 1
+        avg_ret = array.avg(arr)
+        down_std = f_downside_std(arr)
+        down_std > 0 ? (avg_ret / down_std) * math.sqrt(252.0) : 0.0
+    else
+        0.0
+
+// ========= Plots =========
+plot(ma1,  "1st MA (Fast)",  color = #00C853, linewidth = 2)
+plot(ma2,  "2nd MA",         color = #1DE9B6, linewidth = 2)
+plot(ma3,  "3rd MA",         color = #2962FF, linewidth = 2)
+plot(ma4,  "4th MA",         color = #7C4DFF, linewidth = 2)
+plot(ma5,  "5th MA (Slow)",  color = #FF6D00, linewidth = 2)
+
+plot(useBaseFilter ? boxHi : na, "Box High", color = color.new(color.gray, 40), style = plot.style_linebr)
+plot(useBaseFilter ? boxLo : na, "Box Low",  color = color.new(color.gray, 70), style = plot.style_linebr)
+
+stopLinePlot = strategy.position_size > 0 ? effectiveStopLong : strategy.position_size < 0 ? effectiveStopShort : na
+plot(stopLinePlot, "Trailing Stop", color = color.new(color.red, 0), linewidth = 2)
+
+hardStopPlot = strategy.position_size > 0 ? hardStopLong : strategy.position_size < 0 ? hardStopShort : na
+plot(useHardStop ? hardStopPlot : na, "Hard Stop", color = color.new(color.orange, 0), style = plot.style_linebr, linewidth = 1)
+
+bePlot = strategy.position_size > 0 and beActivatedLong ? beStopLong : 
+         strategy.position_size < 0 and beActivatedShort ? beStopShort : na
+plot(bePlot, "BE Stop", color = color.new(color.lime, 0), style = plot.style_circles, linewidth = 2)
+
+tp1Plot = strategy.position_size > 0 and not scaledLong ? target1Long :
+          strategy.position_size < 0 and not scaledShort ? target1Short : na
+plot(tp1Plot, "TP1 Target", color = color.new(color.yellow, 0), style = plot.style_linebr, linewidth = 1)
+
+plot(usePullbackEntry ? pullbackLine : na, "Pullback Line", color = color.new(color.aqua, 50), style = plot.style_circles)
+
+// ========= Markers =========
+plotshape(enterLongBreakout and strategy.position_size[1] == 0 and showDebug,
+          title = "ENTRY LONG BREAKOUT", style = shape.triangleup, location = location.belowbar,
+          text = "BRK", size = size.large, color = color.new(color.lime, 0), textcolor = color.black)
+
+plotshape(enterShortBreakout and strategy.position_size[1] == 0 and showDebug,
+          title = "ENTRY SHORT BREAKOUT", style = shape.triangledown, location = location.abovebar,
+          text = "BRK", size = size.large, color = color.new(color.red, 0), textcolor = color.white)
+
+plotshape(enterLongPullback and strategy.position_size[1] == 0 and showDebug,
+          title = "ENTRY LONG PULLBACK", style = shape.triangleup, location = location.belowbar,
+          text = "PB", size = size.large, color = color.new(color.aqua, 0), textcolor = color.black)
+
+plotshape(enterShortPullback and strategy.position_size[1] == 0 and showDebug,
+          title = "ENTRY SHORT PULLBACK", style = shape.triangledown, location = location.abovebar,
+          text = "PB", size = size.large, color = color.new(color.fuchsia, 0), textcolor = color.white)
+
+plotshape(scaleCondLong and showDebug,
+          title = "TP1 LONG", style = shape.diamond, location = location.abovebar,
+          text = "TP1", size = size.small, color = color.new(color.yellow, 0), textcolor = color.black)
+
+plotshape(scaleCondShort and showDebug,
+          title = "TP1 SHORT", style = shape.diamond, location = location.belowbar,
+          text = "TP1", size = size.small, color = color.new(color.yellow, 0), textcolor = color.black)
+
+plotshape(beActivatedLong and beActivatedLong[1] == false and showDebug,
+          title = "BE ACTIVATED LONG", style = shape.circle, location = location.abovebar,
+          text = "BE", size = size.tiny, color = color.new(color.lime, 0), textcolor = color.white)
+
+plotshape(beActivatedShort and beActivatedShort[1] == false and showDebug,
+          title = "BE ACTIVATED SHORT", style = shape.circle, location = location.belowbar,
+          text = "BE", size = size.tiny, color = color.new(color.lime, 0), textcolor = color.white)
+
+plotshape(exitLongTP and showDebug,
+          title = "TP2 LONG", style = shape.flag, location = location.abovebar,
+          text = "TP2", size = size.small, color = color.new(color.teal, 0), textcolor = color.white)
+
+plotshape(exitShortTP and showDebug,
+          title = "TP2 SHORT", style = shape.flag, location = location.belowbar,
+          text = "TP2", size = size.small, color = color.new(color.teal, 0), textcolor = color.white)
+
+plotshape(exitLongSL and showDebug,
+          title = "SL LONG", style = shape.xcross, location = location.belowbar,
+          text = "SL", size = size.tiny, color = color.new(color.orange, 0), textcolor = color.white)
+
+plotshape(exitShortSL and showDebug,
+          title = "SL SHORT", style = shape.xcross, location = location.abovebar,
+          text = "SL", size = size.tiny, color = color.new(color.orange, 0), textcolor = color.white)
+
+plotshape(timeExitLong and showDebug,
+          title = "TIME EXIT LONG", style = shape.xcross, location = location.belowbar,
+          text = "TIME", size = size.tiny, color = color.new(color.purple, 0), textcolor = color.white)
+
+plotshape(timeExitShort and showDebug,
+          title = "TIME EXIT SHORT", style = shape.xcross, location = location.abovebar,
+          text = "TIME", size = size.tiny, color = color.new(color.purple, 0), textcolor = color.white)
+
+// ========= Debug Table (Right Side - Middle) =========
+var table debugTable = table.new(position.bottom_right, 2, 14, bgcolor = color.new(color.black, 80))
+
+if barstate.islast and showDebug
+    table.cell(debugTable, 0, 0, "Entry Type", text_color = color.white)
+    table.cell(debugTable, 1, 0, strategy.position_size > 0 ? (na(entryTypeLong) ? "N/A" : entryTypeLong) : strategy.position_size < 0 ? (na(entryTypeShort) ? "N/A" : entryTypeShort) : "None", text_color = color.aqua)
+    
+    table.cell(debugTable, 0, 1, "Entry Price", text_color = color.white)
+    table.cell(debugTable, 1, 1, strategy.position_size > 0 ? str.tostring(entryPriceLong, "#.##") : strategy.position_size < 0 ? str.tostring(entryPriceShort, "#.##") : "N/A", text_color = color.lime)
+    
+    table.cell(debugTable, 0, 2, "Init Stop", text_color = color.white)
+    table.cell(debugTable, 1, 2, strategy.position_size > 0 ? str.tostring(initStopLong, "#.##") : strategy.position_size < 0 ? str.tostring(initStopShort, "#.##") : "N/A", text_color = color.red)
+    
+    table.cell(debugTable, 0, 3, "Risk (R)", text_color = color.white)
+    table.cell(debugTable, 1, 3, strategy.position_size > 0 ? str.tostring(riskLong, "#.##") : strategy.position_size < 0 ? str.tostring(riskShort, "#.##") : "N/A", text_color = color.yellow)
+    
+    table.cell(debugTable, 0, 4, "TP1 Target", text_color = color.white)
+    table.cell(debugTable, 1, 4, strategy.position_size > 0 ? str.tostring(target1Long, "#.##") : strategy.position_size < 0 ? str.tostring(target1Short, "#.##") : "N/A", text_color = color.yellow)
+    
+    table.cell(debugTable, 0, 5, "Scaled Out", text_color = color.white)
+    table.cell(debugTable, 1, 5, strategy.position_size > 0 ? str.tostring(scaledLong) : strategy.position_size < 0 ? str.tostring(scaledShort) : "N/A", text_color = color.yellow)
+    
+    table.cell(debugTable, 0, 6, "BE Active", text_color = color.white)
+    table.cell(debugTable, 1, 6, strategy.position_size > 0 ? str.tostring(beActivatedLong) : strategy.position_size < 0 ? str.tostring(beActivatedShort) : "N/A", text_color = color.lime)
+    
+    table.cell(debugTable, 0, 7, "Current Price", text_color = color.white)
+    table.cell(debugTable, 1, 7, str.tostring(close, "#.##"), text_color = color.white)
+    
+    table.cell(debugTable, 0, 8, "Current Stop", text_color = color.white)
+    table.cell(debugTable, 1, 8, strategy.position_size > 0 ? str.tostring(effectiveStopLong, "#.##") : strategy.position_size < 0 ? str.tostring(effectiveStopShort, "#.##") : "N/A", text_color = color.red)
+    
+    table.cell(debugTable, 0, 9, "Hard Stop", text_color = color.white)
+    table.cell(debugTable, 1, 9, strategy.position_size > 0 ? str.tostring(hardStopLong, "#.##") : strategy.position_size < 0 ? str.tostring(hardStopShort, "#.##") : "N/A", text_color = color.orange)
+    
+    table.cell(debugTable, 0, 10, "Bars in Trade", text_color = color.white)
+    table.cell(debugTable, 1, 10, strategy.position_size > 0 ? str.tostring(barsInTradeLong) : strategy.position_size < 0 ? str.tostring(barsInTradeShort) : "0", text_color = color.white)
+    
+    table.cell(debugTable, 0, 11, "ADX", text_color = color.white)
+    table.cell(debugTable, 1, 11, str.tostring(adxValue, "#.#"), text_color = color.yellow)
+    
+    table.cell(debugTable, 0, 12, "RSI", text_color = color.white)
+    table.cell(debugTable, 1, 12, str.tostring(rsiValue, "#.#"), text_color = color.yellow)
+    
+    table.cell(debugTable, 0, 13, "ATR", text_color = color.white)
+    table.cell(debugTable, 1, 13, str.tostring(atrVal, "#.##"), text_color = color.yellow)
+
+// ========= Performance Stats Table (Right Side) =========
+var table statsTable = na
+if showStats and na(statsTable)
+    statsTable := table.new(position.top_right, 4, 12, bgcolor = color.new(color.black, 80), border_width = 1, border_color = color.new(color.gray, 0))
+
+if showStats and not na(statsTable)
+    // 통계 계산
+    float mdd = strategy.max_drawdown_percent
+    float avg_trade = f_avg(trade_returns)
+    float std_trade = f_stdev(trade_returns)
+    float pf = strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : 0
+    
+    float sharpe = f_sharpe(daily_returns)
+    float sortino = f_sortino(daily_returns)
+    float skew = f_skewness(trade_returns, avg_trade, std_trade)
+    
+    // CAGR 계산 (안전하게)
+    float total_days = 0.0
+    float total_years = 0.0
+    if strategy.closedtrades > 0
+        total_days := (timenow - strategy.closedtrades.entry_time(0)) / (1000 * 60 * 60 * 24)
+        total_years := total_days / 365.0
+    
+    float total_return = strategy.equity / strategy.initial_capital
+    float cagr = (total_years > 0.1 and total_return > 0) ? (math.pow(total_return, 1.0 / total_years) - 1.0) * 100 : 0.0
+    
+    float bh_return = not na(start_price) and start_price > 0 ? close / start_price : 1.0
+    float bh_cagr = (total_years > 0.1 and bh_return > 0) ? (math.pow(bh_return, 1.0 / total_years) - 1.0) * 100 : 0.0
+    
+    float calmar = mdd != 0 ? cagr / mdd : 0.0
+    
+    // 승률
+    int total_wins = long_wins + short_wins
+    int total_losses = long_losses + short_losses
+    float winRate = (total_wins + total_losses) > 0 ? total_wins / (total_wins + total_losses) * 100.0 : 0.0
+    float long_winRate = (long_wins + long_losses) > 0 ? long_wins / (long_wins + long_losses) * 100.0 : 0.0
+    float short_winRate = (short_wins + short_losses) > 0 ? short_wins / (short_wins + short_losses) * 100.0 : 0.0
+    
+    // 기준 충족 여부
+    bool winRate_ok = winRate >= 50
+    bool cagr_ok = cagr > bh_cagr
+    bool pf_ok = pf >= 1.5
+    bool calmar_ok = calmar >= 2
+    bool mdd_ok = mdd < 30
+    bool sharpe_ok = sharpe >= 1
+    bool sortino_ok = sortino >= 2
+    bool skew_ok = skew > 2.5
+    bool avg_ok = avg_trade >= 1.2
+    
+    color bg1 = color.new(color.black, 20)
+    color bg2 = color.new(color.black, 35)
+    color c_value = color.new(color.white, 0)
+    color c_label = color.new(color.white, 20)
+    
+    // 헤더
+    table.cell(statsTable, 0, 0, "Performance Stats", text_color = color.white, text_halign = text.align_center, bgcolor = color.new(color.blue, 35))
+    table.cell(statsTable, 1, 0, "Total", text_color = color.white, text_halign = text.align_center, bgcolor = color.new(color.blue, 35))
+    
+    // 1. 승/패
+    table.cell(statsTable, 0, 1, "Win/Loss", text_color = c_label, text_halign = text.align_left, bgcolor = bg1)
+    table.cell(statsTable, 1, 1, str.tostring(total_wins) + "/" + str.tostring(total_losses), text_color = c_value, text_halign = text.align_center, bgcolor = bg1)
+    
+    // 2. 승률
+    table.cell(statsTable, 0, 2, "Win Rate", text_color = c_label, text_halign = text.align_left, bgcolor = bg2)
+    table.cell(statsTable, 1, 2, str.tostring(winRate, "#.#") + "% " + (winRate_ok ? "✓" : "✗"), text_color = winRate_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg2)
+    
+    // 3. CAGR
+    table.cell(statsTable, 0, 3, "CAGR", text_color = c_label, text_halign = text.align_left, bgcolor = bg1)
+    table.cell(statsTable, 1, 3, str.tostring(cagr, "#.#") + "% " + (cagr_ok ? "✓" : "✗"), text_color = cagr_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg1)
+    
+    // 4. Profit Factor
+    table.cell(statsTable, 0, 4, "Profit Factor", text_color = c_label, text_halign = text.align_left, bgcolor = bg2)
+    table.cell(statsTable, 1, 4, str.tostring(pf, "#.##") + " " + (pf_ok ? "✓" : "✗"), text_color = pf_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg2)
+    
+    // 5. Calmar
+    table.cell(statsTable, 0, 5, "Calmar Ratio", text_color = c_label, text_halign = text.align_left, bgcolor = bg1)
+    table.cell(statsTable, 1, 5, str.tostring(calmar, "#.##") + " " + (calmar_ok ? "✓" : "✗"), text_color = calmar_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg1)
+    
+    // 6. MDD
+    table.cell(statsTable, 0, 6, "MDD", text_color = c_label, text_halign = text.align_left, bgcolor = bg2)
+    table.cell(statsTable, 1, 6, str.tostring(mdd, "#.##") + "% " + (mdd_ok ? "✓" : "✗"), text_color = mdd_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg2)
+    
+    // 7. Sharpe
+    table.cell(statsTable, 0, 7, "Sharpe Ratio", text_color = c_label, text_halign = text.align_left, bgcolor = bg1)
+    table.cell(statsTable, 1, 7, str.tostring(sharpe, "#.##") + " " + (sharpe_ok ? "✓" : "✗"), text_color = sharpe_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg1)
+    
+    // 8. Sortino
+    table.cell(statsTable, 0, 8, "Sortino Ratio", text_color = c_label, text_halign = text.align_left, bgcolor = bg2)
+    table.cell(statsTable, 1, 8, str.tostring(sortino, "#.##") + " " + (sortino_ok ? "✓" : "✗"), text_color = sortino_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg2)
+    
+    // 9. Skewness
+    table.cell(statsTable, 0, 9, "Skewness", text_color = c_label, text_halign = text.align_left, bgcolor = bg1)
+    table.cell(statsTable, 1, 9, str.tostring(skew, "#.##") + " " + (skew_ok ? "✓" : "✗"), text_color = skew_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg1)
+    
+    // 10. Avg Trade
+    table.cell(statsTable, 0, 10, "Avg Trade %", text_color = c_label, text_halign = text.align_left, bgcolor = bg2)
+    table.cell(statsTable, 1, 10, str.tostring(avg_trade, "#.##") + "% " + (avg_ok ? "✓" : "✗"), text_color = avg_ok ? color.lime : color.yellow, text_halign = text.align_center, bgcolor = bg2)
+    
+    // 11. Total Equity
+    table.cell(statsTable, 0, 11, "Total Equity", text_color = c_label, text_halign = text.align_left, bgcolor = bg1)
+    table.cell(statsTable, 1, 11, "$" + str.tostring(strategy.equity, "#,###"), text_color = c_value, text_halign = text.align_center, bgcolor = bg1)

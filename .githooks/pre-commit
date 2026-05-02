@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Block commits that contain known secret patterns.
+#
+# Setup (per clone):
+#     git config --local core.hooksPath .githooks
+#     chmod +x .githooks/pre-commit
+#
+# Bypass is intentionally annoying — only use --no-verify when you're
+# 100% sure a match is a false positive.
+
+set -u
+
+# Get the staged diff (added lines only)
+diff_added() {
+    git diff --cached --no-color --diff-filter=AM -U0 -- \
+        ':(exclude)*.lock' ':(exclude)*-lock.json' ':(exclude).git/**' \
+        ':(exclude).venv/**' ':(exclude)node_modules/**' \
+        | grep -E '^\+' | grep -vE '^\+\+\+' || true
+}
+
+CONTENT="$(diff_added)"
+if [[ -z "$CONTENT" ]]; then
+    exit 0
+fi
+
+violations=0
+
+block() {
+    local label="$1"
+    local pattern="$2"
+    local matches
+    matches=$(printf '%s\n' "$CONTENT" | grep -E -- "$pattern" || true)
+    if [[ -n "$matches" ]]; then
+        echo "❌ pre-commit: blocked — $label"
+        echo "   Pattern: $pattern"
+        echo "   Matched lines:"
+        printf '%s\n' "$matches" | head -5 | sed 's/^/     /'
+        echo
+        violations=$((violations + 1))
+    fi
+}
+
+# === HARD BLOCKS — these are real credentials, no ambiguity ===
+
+# Telegram bot token: 8-12 digit ID, colon, 35 base64-ish chars.
+block "Telegram bot token" \
+    '\b[0-9]{8,12}:[A-Za-z0-9_-]{30,}\b'
+
+# Ethereum/HyperLiquid private key (64 hex chars after 0x).
+# Use case-insensitive whole-word match.
+block "Ethereum/HyperLiquid private key (0x + 64 hex)" \
+    '\b0x[a-fA-F0-9]{64}\b'
+
+# Cloudflare API token: 40 chars of base64 alphabet, often near "cloudflare"
+# or assigned to CF_TOKEN/CLOUDFLARE_API_TOKEN. Match conservatively to
+# avoid false positives — require neighboring context.
+block "Cloudflare API token (heuristic)" \
+    '(CF|CLOUDFLARE)_(API_)?TOKEN[ =:]+["'"'"']?[A-Za-z0-9_-]{30,}'
+
+# AWS access key
+block "AWS access key" 'AKIA[0-9A-Z]{16}\b'
+
+# Generic high-entropy SECRET_KEY/API_KEY assignment (only with literal value)
+block "Hardcoded SECRET_KEY/API_KEY/PASSWORD literal" \
+    '(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*=[ ]*["'"'"'][A-Za-z0-9_+/=-]{16,}["'"'"']'
+
+# === SOFT BLOCKS — likely sensitive but high false positives. Warn-only ===
+
+soft_warn() {
+    local label="$1"
+    local pattern="$2"
+    local matches
+    matches=$(printf '%s\n' "$CONTENT" | grep -E -- "$pattern" || true)
+    if [[ -n "$matches" ]]; then
+        echo "⚠️  pre-commit: heads-up — $label"
+        printf '%s\n' "$matches" | head -3 | sed 's/^/     /'
+        echo "   (commit allowed, but verify it's intentional)"
+        echo
+    fi
+}
+
+# Private LAN IPs (192.168.x, 10.x). Often deployment-specific.
+soft_warn "private LAN IP" \
+    '\b(192\.168|10\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]+\.[0-9]+\b'
+
+# Personal email
+soft_warn "personal email address" \
+    '[a-zA-Z0-9._%+-]+@(gmail|outlook|hotmail|protonmail|yahoo|icloud)\.com'
+
+if [[ $violations -gt 0 ]]; then
+    echo "Blocked $violations secret pattern(s) — refusing commit."
+    echo
+    echo "If this is genuinely a false positive:"
+    echo "  1. Verify the value is NOT a real credential."
+    echo "  2. Rephrase to avoid the pattern (e.g. 'TOKEN_LIKE_THIS' instead of a literal-shaped value)."
+    echo "  3. Last resort: git commit --no-verify  (use with extreme caution)."
+    exit 1
+fi
+
+exit 0
