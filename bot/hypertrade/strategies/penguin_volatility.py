@@ -63,6 +63,9 @@ class PenguinVolatilityStrategy(Strategy):
     def restore_state(self, side: str, entry_price: float) -> None:
         self._in_position = True
 
+    def reset_state(self) -> None:
+        self._in_position = False
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         warmup = self.ema_slow_len + self.rsi_diff_len + self.rsi_avg_len + 20
         if len(candles) < warmup:

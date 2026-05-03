@@ -46,6 +46,9 @@ class SMARSIStrategy(Strategy):
     def restore_state(self, side: str, entry_price: float) -> None:
         self._in_position = True
 
+    def reset_state(self) -> None:
+        self._in_position = False
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.sma_slow + 10:
             return None

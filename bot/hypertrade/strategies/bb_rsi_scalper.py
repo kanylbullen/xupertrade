@@ -107,6 +107,11 @@ class BBRsiScalperStrategy(Strategy):
         else:
             self._entry_time = datetime.now(timezone.utc)
 
+    def reset_state(self) -> None:
+        self._in_position = False
+        self._entry_price = None
+        self._entry_time = None
+
     def _reset(self) -> None:
         self._in_position = False
         self._entry_price = None

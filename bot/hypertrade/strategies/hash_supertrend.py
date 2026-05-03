@@ -77,6 +77,9 @@ class HashSupertrendStrategy(Strategy):
         self._position_side = None
         self._entry_price = None
 
+    def reset_state(self) -> None:
+        self._reset()
+
     def _is_in_session(self, bar_time: datetime) -> bool:
         if not self.use_time_filter:
             return True

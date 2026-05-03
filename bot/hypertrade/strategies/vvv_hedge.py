@@ -122,6 +122,11 @@ class VVVHedgeStrategy(Strategy):
         self._entry_price = state.get("entry_price", entry_price)
         self._sl = state.get("sl")
 
+    def reset_state(self) -> None:
+        self._in_short = False
+        self._entry_price = None
+        self._sl = None
+
     def _bars_per_day(self) -> int:
         """Approximate bars per day for the active timeframe."""
         tf = self.timeframe.lower()

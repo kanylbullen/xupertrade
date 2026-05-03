@@ -87,6 +87,10 @@ class KalmanBreakoutStrategy(Strategy):
         self._in_long = bool(state.get("in_long", side == "long"))
         self._in_short = bool(state.get("in_short", side == "short"))
 
+    def reset_state(self) -> None:
+        self._in_long = False
+        self._in_short = False
+
     def _kalman_series(self, closes: np.ndarray) -> np.ndarray:
         """Run the 2-state Kalman filter over closes; return per-bar x_p estimate."""
         n = len(closes)

@@ -328,7 +328,8 @@ class Repository:
             return list(result.scalars().all())
 
     async def reconcile_positions(
-        self, exchange, close_exchange_orphans: bool = True
+        self, exchange, close_exchange_orphans: bool = True,
+        on_strategy_close=None,
     ) -> list[str]:
         """Compare DB open positions vs exchange reality:
 
@@ -383,6 +384,8 @@ class Repository:
                         )
                         actions.append(msg)
                         logger.warning("Reconcile: %s", msg)
+                        if on_strategy_close:
+                            on_strategy_close(p.strategy_name)
                     continue
 
                 for p in db_pos_list:
@@ -397,6 +400,8 @@ class Repository:
                         )
                         actions.append(msg)
                         logger.warning("Reconcile: %s", msg)
+                        if on_strategy_close:
+                            on_strategy_close(p.strategy_name)
 
                 # Size mismatch detection. Only flag if the diff is more
                 # than 0.5% of the position OR more than 0.1% absolute —

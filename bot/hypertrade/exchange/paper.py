@@ -25,9 +25,14 @@ Implementation choice:
   = cash - position_size * current_price.
 """
 
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
+import redis.asyncio as redis
+
+from hypertrade.config import settings
 from hypertrade.exchange.base import (
     Balance,
     Exchange,
@@ -37,15 +42,80 @@ from hypertrade.exchange.base import (
     Position,
 )
 
+logger = logging.getLogger(__name__)
+
+_STATE_KEY = "paper_exchange:state"
+
 
 class PaperExchange(Exchange):
-    """Simulated exchange for paper trading."""
+    """Simulated exchange for paper trading.
+
+    State (balance + open positions) persists to Redis so positions survive
+    container restarts. Without this, reconcile_positions() at startup would
+    treat every DB-tracked position as an orphan (exchange empty) and close
+    it, then strategies re-enter on the next signal — creating duplicate
+    entries until the same loop repeats.
+    """
 
     def __init__(self, initial_balance: float = 10_000.0):
         self._balance = initial_balance
         self._positions: dict[str, Position] = {}
         self._orders: list[Order] = []
         self._prices: dict[str, float] = {}
+        self._initial_balance = initial_balance
+        self._redis: redis.Redis | None = None
+
+    async def load_state(self) -> None:
+        """Load balance + positions from Redis. Call once at startup, before
+        any reconcile or order placement."""
+        try:
+            self._redis = redis.from_url(settings.redis_url, decode_responses=True)
+            raw = await self._redis.get(_STATE_KEY)
+        except Exception as e:
+            logger.warning("PaperExchange: Redis unavailable, running ephemeral (%s)", e)
+            self._redis = None
+            return
+        if not raw:
+            logger.info("PaperExchange: no persisted state, fresh balance $%.2f", self._balance)
+            return
+        try:
+            data = json.loads(raw)
+            self._balance = float(data.get("balance", self._initial_balance))
+            self._positions = {
+                sym: Position(
+                    symbol=p["symbol"],
+                    side=p["side"],
+                    size=float(p["size"]),
+                    entry_price=float(p["entry_price"]),
+                )
+                for sym, p in data.get("positions", {}).items()
+            }
+            logger.info(
+                "PaperExchange: restored balance=$%.2f positions=%d",
+                self._balance, len(self._positions),
+            )
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning("PaperExchange: malformed state, ignoring (%s)", e)
+
+    async def _persist(self) -> None:
+        if self._redis is None:
+            return
+        data = {
+            "balance": self._balance,
+            "positions": {
+                sym: {
+                    "symbol": p.symbol,
+                    "side": p.side,
+                    "size": p.size,
+                    "entry_price": p.entry_price,
+                }
+                for sym, p in self._positions.items()
+            },
+        }
+        try:
+            await self._redis.set(_STATE_KEY, json.dumps(data))
+        except Exception:
+            logger.exception("PaperExchange: persist failed")
 
     def set_price(self, symbol: str, price: float) -> None:
         self._prices[symbol] = price
@@ -100,6 +170,7 @@ class PaperExchange(Exchange):
         else:
             self._handle_sell(symbol, size, fill_price, fee)
 
+        await self._persist()
         return order
 
     def _handle_buy(self, symbol: str, size: float, price: float, fee: float) -> None:

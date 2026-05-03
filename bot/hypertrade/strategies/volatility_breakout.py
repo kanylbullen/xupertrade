@@ -116,6 +116,9 @@ class VolatilityBreakoutStrategy(Strategy):
         self._trail_active = False
         self._trail_extreme = None
 
+    def reset_state(self) -> None:
+        self._reset_position_state()
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         # Need enough history for the longest indicator (ema_len + a buffer)
         if len(candles) < self.ema_len + 5:

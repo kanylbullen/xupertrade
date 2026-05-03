@@ -33,6 +33,17 @@ class Strategy(ABC):
     def restore_state(self, side: str, entry_price: float) -> None:
         """Restore in-memory position state after restart. Override in stateful strategies."""
 
+    def reset_state(self) -> None:
+        """Clear in-memory position state. Called by the engine when a position
+        is closed outside the normal signal path (reconcile orphan close,
+        manual flat, exchange-side liquidation). Without this, _in_position
+        stays True in RAM while DB shows closed, and the strategy refuses to
+        re-enter (or worse, the next restart re-enters duplicately).
+
+        Default no-op. Stateful strategies must override and reset their
+        flags (_in_position, _stop_loss, etc.) to a clean uninitialized state.
+        """
+
     def export_state(self) -> dict | None:
         """Return a JSON-serializable dict of internal state at signal time.
 

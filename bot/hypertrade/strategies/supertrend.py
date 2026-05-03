@@ -131,6 +131,9 @@ class SuperTrendStrategy(Strategy):
         self._trail_extreme = None
         self._trail_offset = None
 
+    def reset_state(self) -> None:
+        self._reset_position_state()
+
     def _compute_adaptive_supertrend(self, df: pd.DataFrame) -> pd.DataFrame:
         """Compute regime, adaptive multiplier, and SuperTrend bands/direction."""
         atr = pta.atr(df["high"], df["low"], df["close"], length=self.atr_length)

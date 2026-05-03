@@ -94,6 +94,9 @@ class BTCMeanReversionStrategy(Strategy):
         self._stop_loss = None
         self._take_profit = None
 
+    def reset_state(self) -> None:
+        self._reset_position_state()
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.ema_length + 5:
             return None

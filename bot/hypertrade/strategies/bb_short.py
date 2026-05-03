@@ -49,6 +49,10 @@ class BBShortStrategy(Strategy):
         self._entry_price = entry_price
         self._tp_level = entry_price * (1 - self.take_profit_pct)
 
+    def reset_state(self) -> None:
+        self._entry_price = None
+        self._tp_level = None
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.bb_period + 5:
             return None

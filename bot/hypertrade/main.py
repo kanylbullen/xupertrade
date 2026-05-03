@@ -39,6 +39,7 @@ async def main() -> None:
     # Set up exchange
     if settings.is_paper:
         exchange = PaperExchange(settings.paper_initial_balance)
+        await exchange.load_state()
         logger.info("Running in PAPER mode (balance: $%.2f)", settings.paper_initial_balance)
     elif settings.is_testnet:
         from hypertrade.exchange.hyperliquid import HyperLiquidExchange

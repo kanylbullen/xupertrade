@@ -208,6 +208,9 @@ class OlegAryukovStrategy(Strategy):
         self._take_profit = None
         self._trail_extreme = None
 
+    def reset_state(self) -> None:
+        self._reset()
+
     # ----- main loop --------------------------------------------------------
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         warmup = max(

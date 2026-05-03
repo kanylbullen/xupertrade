@@ -36,6 +36,9 @@ class DailyLong0830Strategy(Strategy):
     def restore_state(self, side: str, entry_price: float) -> None:
         self._in_position = side == "long"
 
+    def reset_state(self) -> None:
+        self._in_position = False
+
     def export_state(self) -> dict | None:
         if not self._in_position:
             return None

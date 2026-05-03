@@ -168,6 +168,14 @@ class QullamagiBreakoutStrategy(Strategy):
         self._be_activated = False
         self._bars_in_trade = 0
 
+    def reset_state(self) -> None:
+        self._position_side = None
+        self._entry_price = None
+        self._init_stop = None
+        self._scaled = False
+        self._be_activated = False
+        self._bars_in_trade = 0
+
     def export_state(self) -> dict | None:
         if self._position_side is None:
             return None

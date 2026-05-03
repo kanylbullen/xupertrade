@@ -144,6 +144,11 @@ class PivotSuperTrendStrategy(Strategy):
         self._in_short = bool(state.get("in_short", side == "short"))
         self._sl = state.get("sl")
 
+    def reset_state(self) -> None:
+        self._in_long = False
+        self._in_short = False
+        self._sl = None
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.ma_len + 20:
             return None

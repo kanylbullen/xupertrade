@@ -66,6 +66,11 @@ class EMACrossoverStrategy(Strategy):
         self._in_short = bool(state.get("in_short", side == "short"))
         self._sl = state.get("sl")
 
+    def reset_state(self) -> None:
+        self._in_long = False
+        self._in_short = False
+        self._sl = None
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.slow_len + self.sl_candles + 5:
             return None

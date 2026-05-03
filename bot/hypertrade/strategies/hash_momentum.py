@@ -84,6 +84,14 @@ class HashMomentumStrategy(Strategy):
         self._sl = state.get("sl")
         self._tp = state.get("tp")
 
+    def reset_state(self) -> None:
+        self._in_long = False
+        self._in_short = False
+        self._entry = None
+        self._sl = None
+        self._tp = None
+        self._bars_since_close = 999
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         warmup = self.mom_length * 3 + 20
         if len(candles) < warmup:

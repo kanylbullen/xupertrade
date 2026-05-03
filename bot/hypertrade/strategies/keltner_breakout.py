@@ -73,6 +73,12 @@ class KeltnerBreakoutStrategy(Strategy):
         self._sl = state.get("sl")
         self._tp = state.get("tp", entry_price * (1 + self.tp_pct))
 
+    def reset_state(self) -> None:
+        self._in_position = False
+        self._entry = 0.0
+        self._sl = None
+        self._tp = 0.0
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.ema_len + 20:
             return None

@@ -93,6 +93,24 @@ class EngineRunner:
                 restored, len(positions),
             )
 
+    def _reset_strategy_state(self, strategy_name: str) -> None:
+        """Called by reconcile when it closes a DB position outside the
+        normal signal path. Without this, the strategy keeps _in_position=True
+        in RAM while DB shows closed → no re-entry possible, and on next
+        restart the strategy reads no open position → re-enters duplicately.
+        """
+        for s in self.strategies:
+            if s.name == strategy_name:
+                try:
+                    s.reset_state()
+                    logger.info(
+                        "Reset in-memory state for %s (DB position was orphan-closed)",
+                        strategy_name,
+                    )
+                except Exception:
+                    logger.exception("reset_state failed for %s", strategy_name)
+                return
+
     async def tick(self) -> None:
         """Run one cycle: fetch data, evaluate strategies, execute signals."""
         # Heartbeat first — even if downstream work fails, we want the
@@ -108,7 +126,10 @@ class EngineRunner:
         # divergence between DB and exchange.
         if self.repo and (time.time() - self._last_reconcile) > 300:
             try:
-                actions = await self.repo.reconcile_positions(self.exchange)
+                actions = await self.repo.reconcile_positions(
+                    self.exchange,
+                    on_strategy_close=self._reset_strategy_state,
+                )
                 if actions:
                     logger.warning(
                         "Periodic reconcile: %d action(s) — %s",

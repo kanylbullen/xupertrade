@@ -78,6 +78,11 @@ class MoonPhasesStrategy(Strategy):
         self._sl = state.get("sl")
         self._tp = state.get("tp")
 
+    def reset_state(self) -> None:
+        self._in_position = False
+        self._sl = None
+        self._tp = None
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < 35:
             return None
