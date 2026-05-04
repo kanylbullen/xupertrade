@@ -25,6 +25,34 @@ type SignalState = {
   error: string | null;
 };
 
+type ManualLevels = {
+  id: number;
+  recorded_at: string | null;
+  sth_cost_basis_usd: number | null;
+  lth_cost_basis_usd: number | null;
+  realized_price_usd: number | null;
+  cvdd_usd: number | null;
+  source: string | null;
+  notes: string | null;
+};
+
+type Purchase = {
+  id: number;
+  purchased_at: string | null;
+  asset: string;
+  exchange: string | null;
+  amount_local: number;
+  local_currency: string;
+  btc_amount: number;
+  btc_price_usd: number;
+  btc_price_local: number | null;
+  fx_rate: number | null;
+  zone: string | null;
+  cold_storage_at: string | null;
+  cold_storage_address: string | null;
+  notes: string | null;
+};
+
 export default async function HodlPage({
   searchParams,
 }: {
@@ -43,13 +71,27 @@ export default async function HodlPage({
   const botApiUrl = botApiUrls[mode];
 
   let signals: SignalState[] = [];
+  let levels: ManualLevels | null = null;
+  let purchases: Purchase[] = [];
   let botApiOnline = false;
   try {
-    const res = await fetch(`${botApiUrl}/api/hodl/signals`, { cache: "no-store" });
-    if (res.ok) {
-      const data = (await res.json()) as { signals: SignalState[] };
+    const [signalsRes, levelsRes, purchasesRes] = await Promise.all([
+      fetch(`${botApiUrl}/api/hodl/signals`, { cache: "no-store" }),
+      fetch(`${botApiUrl}/api/hodl/levels`, { cache: "no-store" }),
+      fetch(`${botApiUrl}/api/hodl/purchases?limit=20`, { cache: "no-store" }),
+    ]);
+    if (signalsRes.ok) {
+      const data = (await signalsRes.json()) as { signals: SignalState[] };
       signals = data.signals;
       botApiOnline = true;
+    }
+    if (levelsRes.ok) {
+      const data = (await levelsRes.json()) as { latest: ManualLevels | null };
+      levels = data.latest;
+    }
+    if (purchasesRes.ok) {
+      const data = (await purchasesRes.json()) as { purchases: Purchase[] };
+      purchases = data.purchases;
     }
   } catch {
     // bot offline
@@ -91,7 +133,171 @@ export default async function HodlPage({
           <SignalCard key={s.name} signal={s} />
         ))}
       </div>
+
+      <ManualLevelsCard levels={levels} />
+      <PurchasesCard purchases={purchases} />
     </div>
+  );
+}
+
+function ManualLevelsCard({ levels }: { levels: ManualLevels | null }) {
+  const ageDays = levels?.recorded_at
+    ? Math.floor(
+        (Date.now() - new Date(levels.recorded_at).getTime()) / 86_400_000,
+      )
+    : null;
+  const stale = ageDays !== null && ageDays > 14;
+
+  return (
+    <Card className="mt-6">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle>Manual on-chain levels</CardTitle>
+          {ageDays !== null && (
+            <Badge variant={stale ? "destructive" : "outline"}>
+              {ageDays === 0 ? "today" : `${ageDays}d old`}
+              {stale && " — stale"}
+            </Badge>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!levels ? (
+          <p className="text-sm text-muted-foreground">
+            No manual levels recorded yet. Run{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">
+              uv run python -m scripts.record_levels --sth 81000 --realized 54300 --cvdd 44200
+            </code>{" "}
+            after reading the latest Roots newsletter to feed the
+            btc_accumulation_zone signal with ground-truth data instead of
+            SMA proxies.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            <Metric label="STH cost basis" value={levels.sth_cost_basis_usd} />
+            <Metric label="Realized Price" value={levels.realized_price_usd} />
+            <Metric label="LTH cost basis" value={levels.lth_cost_basis_usd} />
+            <Metric label="CVDD" value={levels.cvdd_usd} />
+            {(levels.source || levels.notes) && (
+              <p className="col-span-full text-xs text-muted-foreground">
+                {levels.source}
+                {levels.notes ? ` — ${levels.notes}` : ""}
+              </p>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: number | null }) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="font-mono text-base font-semibold">
+        {value === null || value === undefined ? "—" : `$${value.toLocaleString()}`}
+      </div>
+    </div>
+  );
+}
+
+function PurchasesCard({ purchases }: { purchases: Purchase[] }) {
+  if (purchases.length === 0) {
+    return (
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle>Recent HODL purchases</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            No HODL purchases logged yet. Use{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-xs">
+              uv run python -m scripts.record_purchase --amount-sek 5000 --btc 0.005 --btc-usd 80100 --zone yellow
+            </code>{" "}
+            after each spot buy. K4 cost-basis (SEK/BTC at purchase time) is
+            stored automatically.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const totalBtc = purchases.reduce((s, p) => s + p.btc_amount, 0);
+  const totalLocal = purchases.reduce((s, p) => s + p.amount_local, 0);
+  const avgCostLocal = totalBtc > 0 ? totalLocal / totalBtc : 0;
+  const ccy = purchases[0]?.local_currency ?? "SEK";
+
+  return (
+    <Card className="mt-6">
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <CardTitle>Recent HODL purchases</CardTitle>
+          <div className="text-right text-xs text-muted-foreground">
+            <div>{totalBtc.toFixed(6)} BTC</div>
+            <div>
+              {totalLocal.toLocaleString()} {ccy} ·{" "}
+              {avgCostLocal.toLocaleString(undefined, {
+                maximumFractionDigits: 0,
+              })}{" "}
+              {ccy}/BTC avg
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="text-left text-xs uppercase text-muted-foreground">
+              <tr className="border-b">
+                <th className="py-2 pr-3">Date</th>
+                <th className="py-2 pr-3">BTC</th>
+                <th className="py-2 pr-3">Spent</th>
+                <th className="py-2 pr-3">Cost basis</th>
+                <th className="py-2 pr-3">Zone</th>
+                <th className="py-2 pr-3">Cold</th>
+              </tr>
+            </thead>
+            <tbody>
+              {purchases.map((p) => {
+                const date = p.purchased_at
+                  ? new Date(p.purchased_at).toISOString().slice(0, 10)
+                  : "—";
+                const cold = p.cold_storage_at
+                  ? new Date(p.cold_storage_at).toISOString().slice(0, 10)
+                  : "—";
+                return (
+                  <tr key={p.id} className="border-b last:border-0">
+                    <td className="py-2 pr-3 font-mono text-xs">{date}</td>
+                    <td className="py-2 pr-3 font-mono">
+                      {p.btc_amount.toFixed(6)}
+                    </td>
+                    <td className="py-2 pr-3 font-mono">
+                      {p.amount_local.toLocaleString()} {p.local_currency}
+                    </td>
+                    <td className="py-2 pr-3 font-mono">
+                      {p.btc_price_local
+                        ? `${p.btc_price_local.toLocaleString(undefined, {
+                            maximumFractionDigits: 0,
+                          })} ${p.local_currency}/BTC`
+                        : `$${p.btc_price_usd.toLocaleString()}`}
+                    </td>
+                    <td className="py-2 pr-3">
+                      {p.zone ? (
+                        <Badge variant="outline">{p.zone}</Badge>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 font-mono text-xs">{cold}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

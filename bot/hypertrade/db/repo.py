@@ -12,6 +12,8 @@ from hypertrade.db.models import (
     BacktestRun,
     EquitySnapshot,
     FundingPayment,
+    HodlPurchase,
+    ManualOnchainLevel,
     PositionRecord,
     Trade,
 )
@@ -454,6 +456,91 @@ class Repository:
                     )
 
         return actions
+
+    # ------------------------------------------------------------------
+    # HODL: manual on-chain levels + spot accumulation purchases
+    # ------------------------------------------------------------------
+
+    async def latest_onchain_level(self) -> ManualOnchainLevel | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ManualOnchainLevel)
+                .order_by(ManualOnchainLevel.recorded_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def record_onchain_level(
+        self,
+        sth_cost_basis_usd: float | None = None,
+        lth_cost_basis_usd: float | None = None,
+        realized_price_usd: float | None = None,
+        cvdd_usd: float | None = None,
+        source: str = "roots_newsletter",
+        notes: str = "",
+    ) -> int:
+        async with self._session_factory() as session:
+            row = ManualOnchainLevel(
+                sth_cost_basis_usd=sth_cost_basis_usd,
+                lth_cost_basis_usd=lth_cost_basis_usd,
+                realized_price_usd=realized_price_usd,
+                cvdd_usd=cvdd_usd,
+                source=source,
+                notes=notes,
+            )
+            session.add(row)
+            await session.commit()
+            return int(row.id)
+
+    async def record_hodl_purchase(
+        self,
+        amount_local: float,
+        btc_amount: float,
+        btc_price_usd: float,
+        local_currency: str = "SEK",
+        btc_price_local: float | None = None,
+        fx_rate: float | None = None,
+        zone: str | None = None,
+        exchange: str = "kraken",
+        notes: str = "",
+    ) -> int:
+        async with self._session_factory() as session:
+            row = HodlPurchase(
+                amount_local=amount_local,
+                local_currency=local_currency,
+                btc_amount=btc_amount,
+                btc_price_usd=btc_price_usd,
+                btc_price_local=btc_price_local,
+                fx_rate=fx_rate,
+                zone=zone,
+                exchange=exchange,
+                notes=notes,
+            )
+            session.add(row)
+            await session.commit()
+            return int(row.id)
+
+    async def mark_hodl_purchase_cold(
+        self, purchase_id: int, address: str | None = None
+    ) -> bool:
+        async with self._session_factory() as session:
+            row = await session.get(HodlPurchase, purchase_id)
+            if row is None:
+                return False
+            row.cold_storage_at = datetime.now(timezone.utc)
+            if address:
+                row.cold_storage_address = address
+            await session.commit()
+            return True
+
+    async def list_hodl_purchases(self, limit: int = 50) -> list[HodlPurchase]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(HodlPurchase)
+                .order_by(HodlPurchase.purchased_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
 
     async def close(self) -> None:
         await self._engine.dispose()

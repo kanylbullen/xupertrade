@@ -452,7 +452,57 @@ def _control_routes(
                 })
         return _cors({"signals": results})
 
+    async def hodl_levels(_request: web.Request) -> web.Response:
+        if repo is None:
+            return _cors({"latest": None})
+        try:
+            latest = await repo.latest_onchain_level()
+        except Exception as e:
+            return _cors({"latest": None, "error": str(e)}, status=500)
+        if latest is None:
+            return _cors({"latest": None})
+        return _cors({"latest": {
+            "id": latest.id,
+            "recorded_at": latest.recorded_at.isoformat() if latest.recorded_at else None,
+            "sth_cost_basis_usd": latest.sth_cost_basis_usd,
+            "lth_cost_basis_usd": latest.lth_cost_basis_usd,
+            "realized_price_usd": latest.realized_price_usd,
+            "cvdd_usd": latest.cvdd_usd,
+            "source": latest.source,
+            "notes": latest.notes,
+        }})
+
+    async def hodl_purchases(request: web.Request) -> web.Response:
+        if repo is None:
+            return _cors({"purchases": []})
+        try:
+            limit = int(request.query.get("limit", "20"))
+        except (ValueError, TypeError):
+            limit = 20
+        try:
+            rows = await repo.list_hodl_purchases(limit=limit)
+        except Exception as e:
+            return _cors({"purchases": [], "error": str(e)}, status=500)
+        return _cors({"purchases": [{
+            "id": p.id,
+            "purchased_at": p.purchased_at.isoformat() if p.purchased_at else None,
+            "asset": p.asset,
+            "exchange": p.exchange,
+            "amount_local": p.amount_local,
+            "local_currency": p.local_currency,
+            "btc_amount": p.btc_amount,
+            "btc_price_usd": p.btc_price_usd,
+            "btc_price_local": p.btc_price_local,
+            "fx_rate": p.fx_rate,
+            "zone": p.zone,
+            "cold_storage_at": p.cold_storage_at.isoformat() if p.cold_storage_at else None,
+            "cold_storage_address": p.cold_storage_address,
+            "notes": p.notes,
+        } for p in rows]})
+
     app.router.add_get("/api/hodl/signals", hodl_signals)
+    app.router.add_get("/api/hodl/levels", hodl_levels)
+    app.router.add_get("/api/hodl/purchases", hodl_purchases)
     app.router.add_route("OPTIONS", "/api/hodl/{tail:.*}", options_handler)
     app.router.add_get("/api/tls/config", tls_get_config)
     app.router.add_post("/api/tls/configure", tls_configure)

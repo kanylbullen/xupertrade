@@ -43,6 +43,8 @@ class EngineRunner:
         self.portfolio = PortfolioManager(exchange)
         self._last_reconcile = 0.0  # epoch seconds
         self._last_funding_poll = 0.0
+        self._last_hodl_check = 0.0
+        self._last_hodl_zones: dict[str, str] = {}  # signal_name -> last verdict
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart."""
@@ -147,6 +149,16 @@ class EngineRunner:
             except Exception:
                 logger.exception("Funding poll failed")
             self._last_funding_poll = time.time()
+
+        # HODL signal evaluation every 6h. Notify Telegram on verdict change
+        # (e.g. green→yellow, yellow→red). Only the testnet bot has Telegram
+        # configured, so other modes evaluate silently.
+        if (time.time() - self._last_hodl_check) > 6 * 3600:
+            try:
+                await self._evaluate_hodl_signals()
+            except Exception:
+                logger.exception("HODL signal evaluation failed")
+            self._last_hodl_check = time.time()
 
         # Honor flat-all request before everything else
         if self.control:
@@ -601,6 +613,46 @@ class EngineRunner:
                     order_id=order.id,
                     reason=signal.reason,
                 )
+            )
+
+    async def _evaluate_hodl_signals(self) -> None:
+        """Run all HODL signals; on verdict change vs last tick, push a Telegram
+        notification (if configured). HODL signals are advisory-only — they
+        never trade. We just want a heads-up when conditions shift.
+        """
+        from hypertrade.hodl.registry import all_signals, load_all
+        load_all()
+        for sig in all_signals():
+            try:
+                state = await sig.evaluate()
+            except Exception:
+                logger.exception("HODL signal %s failed", sig.name)
+                continue
+
+            prev = self._last_hodl_zones.get(sig.name)
+            self._last_hodl_zones[sig.name] = state.verdict
+
+            if prev is None or prev == state.verdict:
+                continue
+
+            # Verdict changed → emit event so Telegram forwards it
+            if self.event_bus:
+                try:
+                    await self.event_bus.publish(
+                        ErrorOccurred(
+                            strategy=f"hodl/{sig.name}",
+                            message=(
+                                f"HODL verdict changed for {sig.asset}: "
+                                f"{prev} → {state.verdict}"
+                            ),
+                        )
+                    )
+                except Exception:
+                    logger.exception("HODL notify publish failed")
+
+            logger.info(
+                "[hodl/%s] verdict change: %r → %r (score %.2f)",
+                sig.name, prev, state.verdict, state.score,
             )
 
     async def _poll_funding(self) -> None:

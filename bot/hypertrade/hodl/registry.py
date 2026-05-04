@@ -30,3 +30,4 @@ def load_all() -> None:
     """Import all signal modules so they self-register."""
     import hypertrade.hodl.hype_accumulation  # noqa: F401
     import hypertrade.hodl.altseason  # noqa: F401
+    import hypertrade.hodl.btc_accumulation_zone  # noqa: F401

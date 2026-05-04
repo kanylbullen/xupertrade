@@ -146,6 +146,62 @@ class BacktestRun(Base):
     )
 
 
+class ManualOnchainLevel(Base):
+    """Manually-recorded on-chain level snapshot (e.g. from Roots' weekly newsletter).
+
+    HODL signals can use these as ground-truth when fresh (≤14 days old) and
+    fall back to proxy approximations otherwise. One row per reading.
+    Insert via `record_levels.py` CLI or future dashboard form.
+    """
+
+    __tablename__ = "manual_onchain_levels"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    recorded_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+    sth_cost_basis_usd = Column(Float, nullable=True)
+    lth_cost_basis_usd = Column(Float, nullable=True)
+    realized_price_usd = Column(Float, nullable=True)
+    cvdd_usd = Column(Float, nullable=True)
+    source = Column(String(64), default="roots_newsletter")
+    notes = Column(Text, default="")
+
+
+class HodlPurchase(Base):
+    """Manually-logged spot accumulation purchase, separate from algo trades.
+
+    Tracks anskaffningsvärde (SEK cost basis) per purchase for K4 reporting,
+    plus cold-storage status. Not touched by the bot — purely human-entered
+    via record_purchase.py CLI.
+    """
+
+    __tablename__ = "hodl_purchases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    purchased_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+    asset = Column(String(16), nullable=False, default="BTC", index=True)
+    exchange = Column(String(32), default="kraken")
+    amount_local = Column(Float, nullable=False)        # how much local currency spent
+    local_currency = Column(String(8), default="SEK")
+    btc_amount = Column(Float, nullable=False)          # how much BTC received
+    btc_price_usd = Column(Float, nullable=False)       # spot at purchase time
+    btc_price_local = Column(Float, nullable=True)      # spot in local currency
+    fx_rate = Column(Float, nullable=True)              # local per USD at purchase
+    zone = Column(String(16), nullable=True)            # green/yellow/red/deep at the time
+    cold_storage_at = Column(DateTime(timezone=True), nullable=True)
+    cold_storage_address = Column(String(128), nullable=True)
+    notes = Column(Text, default="")
+
+
 class StrategyConfig(Base):
     __tablename__ = "strategy_configs"
 
