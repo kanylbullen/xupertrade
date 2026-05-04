@@ -28,6 +28,7 @@ import pandas as pd
 import pandas_ta as pta
 
 from hypertrade.data.feed import fetch_candles
+from hypertrade.data import roots_local
 from hypertrade.db.repo import Repository
 from hypertrade.hodl.base import Check, Signal, SignalState
 from hypertrade.hodl.registry import register
@@ -67,6 +68,10 @@ class BtcAccumulationZoneSignal(Signal):
     btc_long_sma: int = 200
     cvdd_proxy_factor: float = 0.85   # CVDD ≈ 0.85 × Realized Price (rough)
 
+    # 90d change of Realized Price: when |value| < this threshold, RP is
+    # essentially flat → historically a bottom-formation signal (per Roots).
+    rp_change_flat_threshold: float = 0.10
+
     def _verdict(self, score: float) -> str:
         # We override score-to-verdict mapping in evaluate(); this is
         # only used when build_state runs without explicit verdict override.
@@ -104,14 +109,57 @@ class BtcAccumulationZoneSignal(Signal):
         )
         cvdd_proxy_now = sma_realized_now * self.cvdd_proxy_factor
 
-        # Try to load manual override
+        # Data source priority:
+        #   1. Local Roots CSV export (most accurate, may be days old)
+        #   2. Manual newsletter snapshot from DB (≤14d old)
+        #   3. SMA-based proxies (fallback)
         manual_age_days: float | None = None
         manual_source = "proxy"
         sth = sma_sth_now
         realized = sma_realized_now
         cvdd = cvdd_proxy_now
         manual_notes = ""
+        rp_90d_change: float | None = None
+        rp_90d_change_age_days: int | None = None
 
+        # Layer 1: local Roots CSVs (if extracted)
+        try:
+            rp_series = roots_local.load_realized_price()
+            if rp_series:
+                latest_rp = roots_local.latest(rp_series)
+                if latest_rp:
+                    rp_date, rp_val = latest_rp
+                    age = (datetime.now(timezone.utc).date() - rp_date).days
+                    if age <= 7:
+                        realized = rp_val
+                        manual_source = f"roots_csv ({age}d old)"
+
+            sth_series = roots_local.load_sth_cost_basis()
+            if sth_series:
+                latest_sth = roots_local.latest(sth_series)
+                if latest_sth:
+                    sth = latest_sth[1]
+
+            cvdd_series = roots_local.load_cvdd()
+            if cvdd_series:
+                latest_cvdd = roots_local.latest(cvdd_series)
+                if latest_cvdd:
+                    cvdd = latest_cvdd[1]
+
+            change_series = roots_local.load_rp_90d_change()
+            if change_series:
+                latest_change = roots_local.latest(change_series)
+                if latest_change:
+                    change_date, change_val = latest_change
+                    rp_90d_change = change_val
+                    rp_90d_change_age_days = (
+                        datetime.now(timezone.utc).date() - change_date
+                    ).days
+        except Exception:
+            logger.exception("btc_accumulation_zone: Roots CSV lookup failed")
+
+        # Layer 2: DB-backed manual snapshot (overrides only fields we don't
+        # already have from Roots CSV)
         try:
             repo = Repository()
             try:
@@ -119,7 +167,7 @@ class BtcAccumulationZoneSignal(Signal):
                 if level is not None and level.recorded_at is not None:
                     age = datetime.now(timezone.utc) - level.recorded_at
                     manual_age_days = age.total_seconds() / 86400.0
-                    if manual_age_days <= self.manual_max_age_days:
+                    if manual_age_days <= self.manual_max_age_days and manual_source == "proxy":
                         if level.sth_cost_basis_usd:
                             sth = float(level.sth_cost_basis_usd)
                         if level.realized_price_usd:
@@ -167,6 +215,21 @@ class BtcAccumulationZoneSignal(Signal):
             ),
         ]
 
+        # Optional 5th check: Realized Price 90d-change (Roots' bottom-formation
+        # signal). Only present if we have local Roots CSV data.
+        if rp_90d_change is not None:
+            is_flat = abs(rp_90d_change) <= self.rp_change_flat_threshold
+            checks.append(Check(
+                name="RP 90d change near zero (bottom-formation)",
+                passed=is_flat,
+                value=(
+                    f"{rp_90d_change*100:+.1f}% over 90d"
+                    + (f" ({rp_90d_change_age_days}d old data)"
+                       if rp_90d_change_age_days else "")
+                ),
+                threshold=f"|change| ≤ {self.rp_change_flat_threshold*100:.0f}%",
+            ))
+
         # Score: 0 in green, 0.5 in yellow, 0.75 in red, 1.0 in deep
         score_map = {"green": 0.0, "yellow": 0.5, "red": 0.75, "deep": 1.0}
         score = score_map[zone]
@@ -178,17 +241,19 @@ class BtcAccumulationZoneSignal(Signal):
         }
 
         notes_parts = []
-        if manual_source == "proxy":
+        if manual_source.startswith("roots_csv"):
+            notes_parts.append(f"Realized Price from {manual_source}.")
+        elif manual_source == "proxy":
             notes_parts.append(
-                "Using SMA-based proxies for STH/Realized/CVDD — record fresh "
-                "values via `record_levels.py` for ground-truth accuracy."
+                "Using SMA-based proxies — extract Roots CSVs via "
+                "`scripts/import_roots_har.py` or record manual snapshots."
             )
         else:
             age_str = f"{manual_age_days:.1f}d old" if manual_age_days is not None else "fresh"
             notes_parts.append(f"Using manual levels from {manual_source} ({age_str}).")
             if manual_notes:
                 notes_parts.append(f"Note: {manual_notes}")
-        if manual_age_days is not None and manual_age_days > self.manual_max_age_days:
+        if manual_age_days is not None and manual_age_days > self.manual_max_age_days and not manual_source.startswith("roots_csv"):
             notes_parts.append(
                 f"⚠ Manual levels are {manual_age_days:.1f}d old — exceeds "
                 f"{self.manual_max_age_days}d freshness window; using proxies."

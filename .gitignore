@@ -6,6 +6,9 @@ bot/data/historical/
 bot/data/private/
 docs/*cookies*
 docs/*roots*
+docs/*bitcoinstrategyplatform*
+docs/*.har
+docs/*.csv
 docs/bitcoin_hodl_strategy_plan.md
 
 # Python

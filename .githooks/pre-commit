@@ -69,7 +69,7 @@ block "Hardcoded SECRET_KEY/API_KEY/PASSWORD literal" \
 # known paid-data patterns even if .gitignore was edited away.
 staged_files=$(git diff --cached --name-only --diff-filter=AM 2>/dev/null || true)
 forbidden_files=$(printf '%s\n' "$staged_files" | grep -E \
-    '^(bot/data/private/|docs/.*cookies|docs/.*roots|docs/bitcoin_hodl_strategy)' || true)
+    '^(bot/data/private/|docs/.*cookies|docs/.*roots|docs/.*bitcoinstrategyplatform|docs/.*\.har|docs/.*\.csv|docs/bitcoin_hodl_strategy)' || true)
 if [[ -n "$forbidden_files" ]]; then
     echo "❌ pre-commit: blocked — paid/personal data file(s) staged"
     echo "   These paths are gitignored AND blocked by the hook:"
