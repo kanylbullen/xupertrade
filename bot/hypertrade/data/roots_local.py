@@ -79,6 +79,15 @@ def load_mvrv() -> dict[date, float] | None:
     return _load_csv("mvrv.csv")
 
 
+def load_sth_lth_ratio() -> dict[date, float] | None:
+    """STH cost basis / LTH cost basis ratio. From /sth-lth-ratio chart.
+
+    Per Roots' framework: ratio < 1.0 has historically coincided with
+    cycle bottoms (STH cohort capitulating below LTH baseline).
+    """
+    return _load_csv("sth_lth_ratio.csv")
+
+
 def load_cvdd() -> dict[date, float] | None:
     return _load_csv("cvdd.csv")
 

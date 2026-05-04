@@ -81,6 +81,10 @@ class BtcAccumulationZoneSignal(Signal):
     # with deeper bottoms going negative (~-0.15 in 2023, ~0.18 in 2020).
     mvrv_bottom_threshold: float = 0.5
 
+    # STH/LTH ratio bottom threshold. Per Roots: ratio < 1.0 has marked
+    # every major cycle bottom (STH cohort underwater vs LTH baseline).
+    sth_lth_ratio_bottom_threshold: float = 1.0
+
     def _verdict(self, score: float) -> str:
         # We override score-to-verdict mapping in evaluate(); this is
         # only used when build_state runs without explicit verdict override.
@@ -136,6 +140,8 @@ class BtcAccumulationZoneSignal(Signal):
         lth_cost_basis_age_days: int | None = None
         mvrv: float | None = None
         mvrv_age_days: int | None = None
+        sth_lth_ratio: float | None = None
+        sth_lth_ratio_age_days: int | None = None
 
         # Layer 1: local Roots CSVs (if extracted)
         try:
@@ -175,6 +181,16 @@ class BtcAccumulationZoneSignal(Signal):
                     mvrv = mvrv_val
                     mvrv_age_days = (
                         datetime.now(timezone.utc).date() - mvrv_date
+                    ).days
+
+            ratio_series = roots_local.load_sth_lth_ratio()
+            if ratio_series:
+                latest_ratio = roots_local.latest(ratio_series)
+                if latest_ratio:
+                    ratio_date, ratio_val = latest_ratio
+                    sth_lth_ratio = ratio_val
+                    sth_lth_ratio_age_days = (
+                        datetime.now(timezone.utc).date() - ratio_date
                     ).days
 
             zscore_series = roots_local.load_sth_zscore()
@@ -291,6 +307,21 @@ class BtcAccumulationZoneSignal(Signal):
                        if sth_zscore_age_days else "")
                 ),
                 threshold=f"≤ {self.sth_zscore_bottom_threshold:+.2f}σ",
+            ))
+
+        # Optional check: STH/LTH cost basis ratio. Per Roots: < 1.0 has
+        # marked every cycle bottom (STH cohort cap-bias underwater vs LTH).
+        if sth_lth_ratio is not None:
+            in_bottom = sth_lth_ratio <= self.sth_lth_ratio_bottom_threshold
+            checks.append(Check(
+                name="STH/LTH ratio in bottom zone",
+                passed=in_bottom,
+                value=(
+                    f"STH/LTH = {sth_lth_ratio:.2f}"
+                    + (f" ({sth_lth_ratio_age_days}d old data)"
+                       if sth_lth_ratio_age_days else "")
+                ),
+                threshold=f"≤ {self.sth_lth_ratio_bottom_threshold:.2f}",
             ))
 
         # Optional check: MVRV (Z-style) in bottom zone. Universal on-chain
