@@ -11,6 +11,12 @@ x-bot-base: &bot-base
     interval: 30s
     timeout: 10s
     retries: 3
+  volumes:
+    # Local extracted Roots data for HODL signals. Read-only — files are
+    # written by scripts/import_roots_har.py on the host (or rsync'd from
+    # a workstation) and never modified by the container. Gitignored on
+    # both sides — this is paid/personal data.
+    - ./bot/data/private:/app/data/private:ro
 
 x-bot-env: &bot-env
   PAPER_INITIAL_BALANCE: "10000"
