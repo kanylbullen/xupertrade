@@ -128,6 +128,8 @@ class BtcAccumulationZoneSignal(Signal):
         rp_90d_change_age_days: int | None = None
         sth_zscore: float | None = None
         sth_zscore_age_days: int | None = None
+        lth_cost_basis: float | None = None
+        lth_cost_basis_age_days: int | None = None
 
         # Layer 1: local Roots CSVs (if extracted)
         try:
@@ -148,6 +150,16 @@ class BtcAccumulationZoneSignal(Signal):
                     sth = latest_sth[1]
                     if manual_source == "proxy":
                         manual_source = "roots_csv"
+
+            lth_series = roots_local.load_lth_cost_basis()
+            if lth_series:
+                latest_lth = roots_local.latest(lth_series)
+                if latest_lth:
+                    lth_date, lth_val = latest_lth
+                    lth_cost_basis = lth_val
+                    lth_cost_basis_age_days = (
+                        datetime.now(timezone.utc).date() - lth_date
+                    ).days
 
             zscore_series = roots_local.load_sth_zscore()
             if zscore_series:
@@ -263,6 +275,23 @@ class BtcAccumulationZoneSignal(Signal):
                        if sth_zscore_age_days else "")
                 ),
                 threshold=f"≤ {self.sth_zscore_bottom_threshold:+.2f}σ",
+            ))
+
+        # Optional 7th check: BTC below LTH cost basis. Historically only
+        # touched at deep cycle bottoms (2018-12, 2020-03, 2022-11). When BTC
+        # < LTH, even long-term holders are underwater — strongest single
+        # bottom signal in Roots' framework.
+        if lth_cost_basis is not None:
+            below_lth = price < lth_cost_basis
+            checks.append(Check(
+                name="BTC below LTH cost basis (deep bottom)",
+                passed=below_lth,
+                value=(
+                    f"BTC ${price:,.0f} {'<' if below_lth else '≥'} LTH ${lth_cost_basis:,.0f}"
+                    + (f" ({lth_cost_basis_age_days}d old data)"
+                       if lth_cost_basis_age_days else "")
+                ),
+                threshold="BTC < LTH",
             ))
 
         # Score: 0 in green, 0.5 in yellow, 0.75 in red, 1.0 in deep

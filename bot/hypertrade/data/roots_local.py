@@ -57,6 +57,10 @@ def load_sth_cost_basis() -> dict[date, float] | None:
     return _load_csv("sth_cost_basis.csv")
 
 
+def load_lth_cost_basis() -> dict[date, float] | None:
+    return _load_csv("lth_cost_basis.csv")
+
+
 def load_sth_zscore() -> dict[date, float] | None:
     """Z-score of STH cost basis (Roots' standard-deviation oscillator).
 
