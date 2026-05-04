@@ -242,7 +242,6 @@ None currently.
 
 ### Open — Medium
 
-- [ ] **rsi_momentum stateless tracking.** Has no `_in_position` field; relies on engine dedup. Adding state would let the strategy short-circuit faster and remove dependence on engine internals.
 - [ ] **Volatility-adjusted sizing (option C from Kelly discussion).** Replace fixed `MAX_POSITION_SIZE_USD` with ATR-normalized sizing: `notional = RISK_BUDGET_USD / (atr × atr_mult)` so every trade has roughly the same dollar-risk regardless of asset volatility. Industry standard, no statistical estimation needed. Add `RISK_BUDGET_USD` config; keep `MAX_POSITION_SIZE_USD` as a hard cap. ~3-4h work, defensive change. Pair with the Kelly report for guidance on the budget level.
 - [ ] **Drawdown-based auto-scaling (option B from Kelly discussion).** Add `MAX_STRATEGY_DRAWDOWN_PCT` per strategy. When 80% of cap reached → halve effective margin until 7-day rolling PnL > 0. Limits exposure on degrading strategies without requiring stationary distribution assumptions like Kelly does.
 
@@ -334,6 +333,12 @@ None currently.
 #### Misc (2026-04-30 → 05-01)
 - [x] TradingView chart routes VVV to `COINBASE:VVVUSD` (not on Binance) — commit `12d6a45`.
 - [x] Dashboard `/strategies` page now lists all 21 strategies with descriptions — commit `22d7dd7`. Still hardcoded; should be data-driven (see Open — Low).
+
+#### Reconcile / state-sync hardening (2026-05-03 → 05-04)
+- [x] PaperExchange persists `{balance, positions}` to Redis after every fill; `load_state()` runs at startup before reconcile — commit `526d3cc`. Without this, every container restart wiped paper state, then startup-reconcile orphan-closed every DB row, then strategies re-entered duplicately on the next signal. Penguin_volatility paper showed 13 such cascade-entries on 2026-05-01.
+- [x] `Strategy.reset_state()` on base + override on all 13 stateful strategies; `repo.reconcile_positions(on_strategy_close=cb)` callback wired to `runner._reset_strategy_state` — commit `526d3cc`. When 5-min runtime reconcile orphan-closes a DB row, strategy `_in_position` is brought into sync. Eliminates "DB closed but strategy thinks it's still in" desync.
+- [x] DB cleanup of 28 orphan-closed positions + 28 buy-only trades from before fix — manual SQL on 2026-05-03. Real PnL trades preserved.
+- [x] `rsi_momentum` adds `_in_position` flag — commit `494aec8`. Was emitting CLOSE_LONG every tick where exit cond was true, even when flat. Engine ignored each but logged WARNING per tick (~50/hour). Closes Open-Medium item.
 
 ---
 
