@@ -452,7 +452,8 @@ def _control_routes(
                 })
         return _cors({"signals": results})
 
-    async def hodl_levels(_request: web.Request) -> web.Response:
+    async def hodl_levels(request: web.Request) -> web.Response:
+        repo: Repository | None = request.app.get("repo")
         if repo is None:
             return _cors({"latest": None})
         try:
@@ -473,6 +474,7 @@ def _control_routes(
         }})
 
     async def hodl_purchases(request: web.Request) -> web.Response:
+        repo: Repository | None = request.app.get("repo")
         if repo is None:
             return _cors({"purchases": []})
         try:
