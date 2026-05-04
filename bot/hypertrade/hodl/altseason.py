@@ -53,7 +53,9 @@ class AltseasonSignal(Signal):
     btc_short_sma: int = 30                # BTC > SMA30 = short-term stable
     btc_long_sma: int = 200                # BTC > SMA200 = risk-on macro
     ethbtc_ma_length: int = 14
-    breadth_alts: tuple[str, ...] = ("SOL", "AVAX", "DOGE")
+    # BNB is included as a proxy for Asia/CEX-driven flow — historically
+    # leads broader altseasons since Binance retail tends to rotate first.
+    breadth_alts: tuple[str, ...] = ("SOL", "BNB", "AVAX", "DOGE")
     breadth_min_outperformers: int = 2     # ≥ this many alts must beat BTC
 
     def _verdict(self, score: float) -> str:
