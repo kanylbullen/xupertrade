@@ -32,6 +32,26 @@ class RSIMomentumStrategy(Strategy):
     rsi_length: int = 14
     rsi_level: float = 70.0
 
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._in_position: bool = False
+
+    def restore_state(self, side: str, entry_price: float) -> None:
+        self._in_position = side == "long"
+
+    def reset_state(self) -> None:
+        self._in_position = False
+
+    def export_state(self) -> dict | None:
+        if not self._in_position:
+            return None
+        return {"in_position": self._in_position}
+
+    def restore_from_json(
+        self, side: str, entry_price: float, state: dict
+    ) -> None:
+        self._in_position = bool(state.get("in_position", side == "long"))
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.rsi_length + 5:
             return None
@@ -46,7 +66,8 @@ class RSIMomentumStrategy(Strategy):
             return None
 
         # longCondition = rsi > 70 AND rsi[1] <= 70
-        if prev <= self.rsi_level and cur > self.rsi_level:
+        if not self._in_position and prev <= self.rsi_level and cur > self.rsi_level:
+            self._in_position = True
             return Signal(
                 action=SignalAction.OPEN_LONG,
                 symbol=self.symbol,
@@ -55,7 +76,8 @@ class RSIMomentumStrategy(Strategy):
             )
 
         # exitCondition = ta.crossunder(rsi, 70) = rsi < 70 AND rsi[1] >= 70
-        if prev >= self.rsi_level and cur < self.rsi_level:
+        if self._in_position and prev >= self.rsi_level and cur < self.rsi_level:
+            self._in_position = False
             return Signal(
                 action=SignalAction.CLOSE_LONG,
                 symbol=self.symbol,

@@ -633,8 +633,9 @@ class TestRSIMomentumStrategy:
 
     @pytest.mark.asyncio
     async def test_exit_signal_fires(self):
-        """RSI cross below 70 fires CLOSE_LONG."""
+        """RSI cross below 70 fires CLOSE_LONG (when in position)."""
         strat = RSIMomentumStrategy()
+        strat.restore_state("long", 100.0)
         # Strong rally (RSI > 70), then a moderate drop so prev RSI >= 70 and cur < 70
         prices = list(np.linspace(80.0, 130.0, 30)) + [128.0, 120.0]
         df = _df_from_prices(prices)
@@ -642,6 +643,15 @@ class TestRSIMomentumStrategy:
         assert result is not None
         assert result.action == SignalAction.CLOSE_LONG
         assert "below" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_exit_silent_when_flat(self):
+        """RSI cross below 70 returns None when not in position (no spam)."""
+        strat = RSIMomentumStrategy()
+        prices = list(np.linspace(80.0, 130.0, 30)) + [128.0, 120.0]
+        df = _df_from_prices(prices)
+        result = await strat.on_candle(df)
+        assert result is None
 
 
 # ===========================================================================
