@@ -434,6 +434,26 @@ def _control_routes(
     async def options_handler(_request: web.Request) -> web.Response:
         return _cors({})
 
+    async def hodl_signals(_request: web.Request) -> web.Response:
+        from hypertrade.hodl.registry import all_signals, load_all
+        load_all()
+        results = []
+        for sig in all_signals():
+            try:
+                state = await sig.evaluate()
+                results.append(state.to_dict())
+            except Exception as e:
+                results.append({
+                    "name": sig.name, "asset": sig.asset,
+                    "description": sig.description,
+                    "triggered": False, "score": 0.0, "threshold": sig.threshold,
+                    "verdict": "Unknown — evaluation failed",
+                    "checks": [], "notes": "", "error": str(e),
+                })
+        return _cors({"signals": results})
+
+    app.router.add_get("/api/hodl/signals", hodl_signals)
+    app.router.add_route("OPTIONS", "/api/hodl/{tail:.*}", options_handler)
     app.router.add_get("/api/tls/config", tls_get_config)
     app.router.add_post("/api/tls/configure", tls_configure)
     app.router.add_route("OPTIONS", "/api/tls/{tail:.*}", options_handler)
