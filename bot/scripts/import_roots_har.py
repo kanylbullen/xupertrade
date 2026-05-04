@@ -49,11 +49,25 @@ def _find_page_html(har: dict, page_url_suffix: str) -> str | None:
     return None
 
 
-def _extract_start_date(html: str) -> datetime:
+def _extract_start_date(html: str) -> datetime | None:
+    """Try to find the chart's start date in the HTML. Returns None when
+    not present (some pages don't expose it explicitly — caller must
+    supply --start-date)."""
     m = re.search(r'new Date\("(\d{4}-\d{2}-\d{2})"\)', html)
-    if not m:
-        raise ValueError("Could not find chart start date in HTML")
-    return datetime.fromisoformat(m.group(1))
+    if m:
+        return datetime.fromisoformat(m.group(1))
+    return None
+
+
+# Known start dates per chart page, derived from the rendered x-axis labels
+# in each chart. Used as fallback when the HTML doesn't embed the anchor.
+KNOWN_START_DATES: dict[str, str] = {
+    "/realizedprice":             "2016-05-04",
+    "/sth-costbasis":             "2010-07-17",
+    "/sth-costbasis-trendline":   "2010-07-17",
+    "/lth-costbasis":             "2010-07-17",
+    "/cvdd":                      "2010-07-17",
+}
 
 
 def _extract_big_arrays(html: str, min_chars: int = 5000) -> list[str]:
@@ -131,6 +145,8 @@ def main() -> int:
                         help="URL suffix to find the chart page")
     parser.add_argument("--out-dir", default="data/private/roots/",
                         help="Where to write CSVs")
+    parser.add_argument("--start-date", default=None,
+                        help="ISO start date (overrides auto-detect / KNOWN_START_DATES)")
     parser.add_argument("--list-only", action="store_true",
                         help="Just describe what's in the HAR; don't write CSVs")
     args = parser.parse_args()
@@ -141,7 +157,22 @@ def main() -> int:
         print(f"No HAR entry matches page suffix {args.page!r}", file=sys.stderr)
         return 2
 
-    start = _extract_start_date(html)
+    start = None
+    if args.start_date:
+        start = datetime.fromisoformat(args.start_date)
+    else:
+        start = _extract_start_date(html)
+        if start is None and args.page in KNOWN_START_DATES:
+            start = datetime.fromisoformat(KNOWN_START_DATES[args.page])
+            print(f"(no anchor in HTML — using KNOWN_START_DATES[{args.page!r}])")
+    if start is None:
+        print(
+            f"error: no start date in HTML and no fallback for {args.page!r}; "
+            f"pass --start-date YYYY-MM-DD",
+            file=sys.stderr,
+        )
+        return 2
+
     today_idx = _today_index(start)
     print(f"chart start date: {start.date()}, today is index {today_idx}")
 

@@ -72,6 +72,11 @@ class BtcAccumulationZoneSignal(Signal):
     # essentially flat → historically a bottom-formation signal (per Roots).
     rp_change_flat_threshold: float = 0.10
 
+    # STH cost basis Z-score: bottom-zone when ≤ this value. Roots' historical
+    # bottoms have all been at -1.0 to -2.0, with cycle bottoms getting
+    # progressively shallower (current cycle projected ≈ -0.25).
+    sth_zscore_bottom_threshold: float = -0.5
+
     def _verdict(self, score: float) -> str:
         # We override score-to-verdict mapping in evaluate(); this is
         # only used when build_state runs without explicit verdict override.
@@ -121,6 +126,8 @@ class BtcAccumulationZoneSignal(Signal):
         manual_notes = ""
         rp_90d_change: float | None = None
         rp_90d_change_age_days: int | None = None
+        sth_zscore: float | None = None
+        sth_zscore_age_days: int | None = None
 
         # Layer 1: local Roots CSVs (if extracted)
         try:
@@ -139,6 +146,18 @@ class BtcAccumulationZoneSignal(Signal):
                 latest_sth = roots_local.latest(sth_series)
                 if latest_sth:
                     sth = latest_sth[1]
+                    if manual_source == "proxy":
+                        manual_source = "roots_csv"
+
+            zscore_series = roots_local.load_sth_zscore()
+            if zscore_series:
+                latest_zs = roots_local.latest(zscore_series)
+                if latest_zs:
+                    zs_date, zs_val = latest_zs
+                    sth_zscore = zs_val
+                    sth_zscore_age_days = (
+                        datetime.now(timezone.utc).date() - zs_date
+                    ).days
 
             cvdd_series = roots_local.load_cvdd()
             if cvdd_series:
@@ -228,6 +247,22 @@ class BtcAccumulationZoneSignal(Signal):
                        if rp_90d_change_age_days else "")
                 ),
                 threshold=f"|change| ≤ {self.rp_change_flat_threshold*100:.0f}%",
+            ))
+
+        # Optional 6th check: STH cost basis Z-score (Roots' standard-deviation
+        # oscillator from the bottom panel of /sth-costbasis chart). Bottoms
+        # historically at -1 to -2; current cycle projected ≈ -0.25.
+        if sth_zscore is not None:
+            in_bottom_zone = sth_zscore <= self.sth_zscore_bottom_threshold
+            checks.append(Check(
+                name="STH Z-score in bottom zone",
+                passed=in_bottom_zone,
+                value=(
+                    f"Z = {sth_zscore:+.2f}σ"
+                    + (f" ({sth_zscore_age_days}d old data)"
+                       if sth_zscore_age_days else "")
+                ),
+                threshold=f"≤ {self.sth_zscore_bottom_threshold:+.2f}σ",
             ))
 
         # Score: 0 in green, 0.5 in yellow, 0.75 in red, 1.0 in deep

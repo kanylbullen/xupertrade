@@ -57,6 +57,15 @@ def load_sth_cost_basis() -> dict[date, float] | None:
     return _load_csv("sth_cost_basis.csv")
 
 
+def load_sth_zscore() -> dict[date, float] | None:
+    """Z-score of STH cost basis (Roots' standard-deviation oscillator).
+
+    Reads from the bottom panel of the /sth-costbasis chart. Values
+    typically range -2 (deep bottom) to +8 (euphoric top spike).
+    """
+    return _load_csv("sth_zscore.csv")
+
+
 def load_cvdd() -> dict[date, float] | None:
     return _load_csv("cvdd.csv")
 
