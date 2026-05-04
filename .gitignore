@@ -1,6 +1,13 @@
 # Cached historical OHLCV from Binance dump (re-downloadable, ~30 MB)
 bot/data/historical/
 
+# Personal/paid data sources — never commit
+# (bitcoinstrategyplatform.com export, Glassnode CSVs, etc.)
+bot/data/private/
+docs/*cookies*
+docs/*roots*
+docs/bitcoin_hodl_strategy_plan.md
+
 # Python
 __pycache__/
 *.py[cod]

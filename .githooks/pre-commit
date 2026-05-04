@@ -64,6 +64,21 @@ block "AWS access key" 'AKIA[0-9A-Z]{16}\b'
 block "Hardcoded SECRET_KEY/API_KEY/PASSWORD literal" \
     '(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*=[ ]*["'"'"'][A-Za-z0-9_+/=-]{16,}["'"'"']'
 
+# Personal/paid data sources — block by file path. Catches accidental
+# additions of files under bot/data/private/ or docs/ files matching
+# known paid-data patterns even if .gitignore was edited away.
+staged_files=$(git diff --cached --name-only --diff-filter=AM 2>/dev/null || true)
+forbidden_files=$(printf '%s\n' "$staged_files" | grep -E \
+    '^(bot/data/private/|docs/.*cookies|docs/.*roots|docs/bitcoin_hodl_strategy)' || true)
+if [[ -n "$forbidden_files" ]]; then
+    echo "❌ pre-commit: blocked — paid/personal data file(s) staged"
+    echo "   These paths are gitignored AND blocked by the hook:"
+    printf '%s\n' "$forbidden_files" | sed 's/^/     /'
+    echo "   Move the file out of these paths or add a more specific exception."
+    echo
+    violations=$((violations + 1))
+fi
+
 # === SOFT BLOCKS — likely sensitive but high false positives. Warn-only ===
 
 soft_warn() {
