@@ -70,6 +70,15 @@ def load_sth_zscore() -> dict[date, float] | None:
     return _load_csv("sth_zscore.csv")
 
 
+def load_mvrv() -> dict[date, float] | None:
+    """MVRV (or MVRV-Z, depending on series). From /mvrv chart.
+
+    Roots' rendered series can dip below zero, suggesting Z-score-style
+    normalization. Bottoms typically at or below 0; tops > 5.
+    """
+    return _load_csv("mvrv.csv")
+
+
 def load_cvdd() -> dict[date, float] | None:
     return _load_csv("cvdd.csv")
 

@@ -77,6 +77,10 @@ class BtcAccumulationZoneSignal(Signal):
     # progressively shallower (current cycle projected ≈ -0.25).
     sth_zscore_bottom_threshold: float = -0.5
 
+    # MVRV (Z-style) bottom threshold. Historical bottoms cluster around 0
+    # with deeper bottoms going negative (~-0.15 in 2023, ~0.18 in 2020).
+    mvrv_bottom_threshold: float = 0.5
+
     def _verdict(self, score: float) -> str:
         # We override score-to-verdict mapping in evaluate(); this is
         # only used when build_state runs without explicit verdict override.
@@ -130,6 +134,8 @@ class BtcAccumulationZoneSignal(Signal):
         sth_zscore_age_days: int | None = None
         lth_cost_basis: float | None = None
         lth_cost_basis_age_days: int | None = None
+        mvrv: float | None = None
+        mvrv_age_days: int | None = None
 
         # Layer 1: local Roots CSVs (if extracted)
         try:
@@ -159,6 +165,16 @@ class BtcAccumulationZoneSignal(Signal):
                     lth_cost_basis = lth_val
                     lth_cost_basis_age_days = (
                         datetime.now(timezone.utc).date() - lth_date
+                    ).days
+
+            mvrv_series = roots_local.load_mvrv()
+            if mvrv_series:
+                latest_mvrv = roots_local.latest(mvrv_series)
+                if latest_mvrv:
+                    mvrv_date, mvrv_val = latest_mvrv
+                    mvrv = mvrv_val
+                    mvrv_age_days = (
+                        datetime.now(timezone.utc).date() - mvrv_date
                     ).days
 
             zscore_series = roots_local.load_sth_zscore()
@@ -275,6 +291,21 @@ class BtcAccumulationZoneSignal(Signal):
                        if sth_zscore_age_days else "")
                 ),
                 threshold=f"≤ {self.sth_zscore_bottom_threshold:+.2f}σ",
+            ))
+
+        # Optional check: MVRV (Z-style) in bottom zone. Universal on-chain
+        # indicator — when MVRV ≤ 0.5 historically marks accumulation periods.
+        if mvrv is not None:
+            in_bottom = mvrv <= self.mvrv_bottom_threshold
+            checks.append(Check(
+                name="MVRV in bottom zone",
+                passed=in_bottom,
+                value=(
+                    f"MVRV = {mvrv:+.2f}"
+                    + (f" ({mvrv_age_days}d old data)"
+                       if mvrv_age_days else "")
+                ),
+                threshold=f"≤ {self.mvrv_bottom_threshold:.2f}",
             ))
 
         # Optional 7th check: BTC below LTH cost basis. Historically only
