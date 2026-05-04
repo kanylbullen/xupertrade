@@ -1,3 +1,6 @@
+# Cached historical OHLCV from Binance dump (re-downloadable, ~30 MB)
+bot/data/historical/
+
 # Python
 __pycache__/
 *.py[cod]

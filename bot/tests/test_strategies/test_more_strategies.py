@@ -36,6 +36,7 @@ from hypertrade.strategies.sma_rsi import SMARSIStrategy
 from hypertrade.strategies.oleg_aryukov import OlegAryukovStrategy
 from hypertrade.strategies.qullamagi_breakout import QullamagiBreakoutStrategy
 from hypertrade.strategies.supertrend import SuperTrendStrategy
+from hypertrade.strategies.golden_cross import GoldenCrossStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -1187,3 +1188,63 @@ class TestQullamagiBreakoutStrategy:
                 "wide-candle filter — synthetic ramp didn't pass all gates."
             )
         assert result.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
+
+
+# ===========================================================================
+# Golden Cross Strategy
+# ===========================================================================
+
+class TestGoldenCrossStrategy:
+    """SMA50 crosses above SMA200 = long; cross below = exit."""
+
+    WARMUP = GoldenCrossStrategy.sma_slow + 5
+
+    @pytest.mark.asyncio
+    async def test_warmup_returns_none(self):
+        strat = GoldenCrossStrategy()
+        df = _flat_df(self.WARMUP - 1)
+        assert await strat.on_candle(df) is None
+
+    @pytest.mark.asyncio
+    async def test_entry_signal_fires(self):
+        """SMA50 crossing above SMA200 fires OPEN_LONG. Strategy only checks
+        the latest bar, so we step through candles one at a time until the
+        cross materializes on the most recent bar."""
+        strat = GoldenCrossStrategy()
+        prices = list(np.linspace(120.0, 80.0, 200)) + list(np.linspace(80.0, 200.0, 100))
+        full_df = _df_from_prices(prices)
+        result = None
+        for i in range(self.WARMUP, len(full_df) + 1):
+            result = await strat.on_candle(full_df.iloc[:i])
+            if result is not None and result.action == SignalAction.OPEN_LONG:
+                break
+        assert result is not None
+        assert result.action == SignalAction.OPEN_LONG
+        assert "Golden" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_exit_signal_fires(self):
+        """SMA50 crossing below SMA200 fires CLOSE_LONG."""
+        strat = GoldenCrossStrategy()
+        strat.restore_state("long", 100.0)
+        prices = list(np.linspace(80.0, 200.0, 200)) + list(np.linspace(200.0, 50.0, 200))
+        full_df = _df_from_prices(prices)
+        result = None
+        for i in range(self.WARMUP, len(full_df) + 1):
+            result = await strat.on_candle(full_df.iloc[:i])
+            if result is not None and result.action == SignalAction.CLOSE_LONG:
+                break
+        assert result is not None
+        assert result.action == SignalAction.CLOSE_LONG
+        assert "Death" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_no_re_entry_when_in_position(self):
+        strat = GoldenCrossStrategy()
+        strat.restore_state("long", 100.0)
+        prices = list(np.linspace(120.0, 80.0, 200)) + list(np.linspace(80.0, 200.0, 100))
+        df = _df_from_prices(prices)
+        # Already in position — bullish cross should NOT emit a new OPEN_LONG
+        result = await strat.on_candle(df)
+        assert result is None or result.action != SignalAction.OPEN_LONG
+

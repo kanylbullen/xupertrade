@@ -84,6 +84,7 @@ async def _run_one(
     fee_rate: float,
     slippage_bps: float,
     save_to_db: bool = True,
+    source: str = "hyperliquid",
 ) -> BacktestResult | None:
     try:
         strategy = get_strategy(strategy_name)
@@ -95,8 +96,19 @@ async def _run_one(
     if timeframe:
         strategy.timeframe = timeframe
 
-    print(f"Fetching {strategy.symbol} {strategy.timeframe} candles ({days}d)...", file=sys.stderr)
-    candles = await _fetch_long_window(strategy.symbol, strategy.timeframe, days)
+    print(
+        f"Fetching {strategy.symbol} {strategy.timeframe} candles ({days}d) from {source}...",
+        file=sys.stderr,
+    )
+    if source == "binance":
+        from hypertrade.data.binance_dump import load_dump
+        try:
+            candles = await load_dump(strategy.symbol, strategy.timeframe, days=days)
+        except Exception as e:
+            print(f"Binance dump fetch failed: {e}", file=sys.stderr)
+            return None
+    else:
+        candles = await _fetch_long_window(strategy.symbol, strategy.timeframe, days)
     if candles is None or candles.empty:
         print(f"No candles for {strategy.symbol} {strategy.timeframe}", file=sys.stderr)
         return None
@@ -161,6 +173,9 @@ async def main() -> int:
     parser.add_argument("--slippage-bps", type=float, default=5.0)
     parser.add_argument("--no-save", action="store_true",
                         help="Skip persisting result to backtest_runs table")
+    parser.add_argument("--source", default="hyperliquid",
+                        choices=["hyperliquid", "binance"],
+                        help="Data source: hyperliquid (default, ~1y) or binance (5+y dump)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -185,6 +200,7 @@ async def main() -> int:
             args.initial_equity, args.position_size,
             args.fee_rate, args.slippage_bps,
             save_to_db=not args.no_save,
+            source=args.source,
         )
         if r is None:
             continue
