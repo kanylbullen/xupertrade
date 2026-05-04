@@ -88,6 +88,35 @@ def load_sth_lth_ratio() -> dict[date, float] | None:
     return _load_csv("sth_lth_ratio.csv")
 
 
+def load_inflow_multiplier() -> dict[date, float] | None:
+    """Capital Inflow Multiplier (green line in /multiplier chart).
+
+    Per Roots: > 100 has historically led cycle bottoms by 2-5 months
+    (2 mån före 2022, 5 mån före 2018). Reflects how much market cap
+    moves per dollar inflow — high values mean illiquid market with
+    bottom-conviction holders.
+    """
+    return _load_csv("inflow_multiplier.csv")
+
+
+def load_outflow_multiplier() -> dict[date, float] | None:
+    """Capital Outflow Multiplier (pink line in /multiplier chart).
+
+    Inverse: spikes during distribution/top phases. Currently exposed
+    via API but not yet used as a signal check.
+    """
+    return _load_csv("outflow_multiplier.csv")
+
+
+def load_bull_regime() -> dict[date, float] | None:
+    """Roots' bull/bear regime classifier from /key-levels chart.
+
+    Values: 3 = "bull" (price above all key levels: SMA200d/SMA21w/STH/RP/LTH),
+            0 = anything else (correction or bear).
+    """
+    return _load_csv("bull_regime.csv")
+
+
 def load_cvdd() -> dict[date, float] | None:
     return _load_csv("cvdd.csv")
 

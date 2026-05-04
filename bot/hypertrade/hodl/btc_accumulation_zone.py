@@ -85,6 +85,10 @@ class BtcAccumulationZoneSignal(Signal):
     # every major cycle bottom (STH cohort underwater vs LTH baseline).
     sth_lth_ratio_bottom_threshold: float = 1.0
 
+    # Capital Inflow Multiplier bottom threshold. Per Roots: > 100 has
+    # historically led cycle bottoms by 2-5 months.
+    inflow_multiplier_bottom_threshold: float = 100.0
+
     def _verdict(self, score: float) -> str:
         # We override score-to-verdict mapping in evaluate(); this is
         # only used when build_state runs without explicit verdict override.
@@ -142,6 +146,10 @@ class BtcAccumulationZoneSignal(Signal):
         mvrv_age_days: int | None = None
         sth_lth_ratio: float | None = None
         sth_lth_ratio_age_days: int | None = None
+        inflow_multiplier: float | None = None
+        inflow_multiplier_age_days: int | None = None
+        bull_regime: float | None = None
+        bull_regime_age_days: int | None = None
 
         # Layer 1: local Roots CSVs (if extracted)
         try:
@@ -192,6 +200,27 @@ class BtcAccumulationZoneSignal(Signal):
                     sth_lth_ratio_age_days = (
                         datetime.now(timezone.utc).date() - ratio_date
                     ).days
+
+            inflow_series = roots_local.load_inflow_multiplier()
+            if inflow_series:
+                latest_inflow = roots_local.latest(inflow_series)
+                if latest_inflow:
+                    in_date, in_val = latest_inflow
+                    inflow_multiplier = in_val
+                    inflow_multiplier_age_days = (
+                        datetime.now(timezone.utc).date() - in_date
+                    ).days
+
+            # Bull regime is mostly forward-padded with 0s; find the latest
+            # "live" entry (one that's <= today)
+            regime_series = roots_local.load_bull_regime()
+            if regime_series:
+                today_date = datetime.now(timezone.utc).date()
+                live_dates = [d for d in regime_series if d <= today_date]
+                if live_dates:
+                    last_live = max(live_dates)
+                    bull_regime = regime_series[last_live]
+                    bull_regime_age_days = (today_date - last_live).days
 
             zscore_series = roots_local.load_sth_zscore()
             if zscore_series:
@@ -307,6 +336,36 @@ class BtcAccumulationZoneSignal(Signal):
                        if sth_zscore_age_days else "")
                 ),
                 threshold=f"≤ {self.sth_zscore_bottom_threshold:+.2f}σ",
+            ))
+
+        # Optional check: Roots' bull/bear regime classifier (3 = bull,
+        # 0 = correction/bear). Pass when NOT in bull = accumulation context.
+        if bull_regime is not None:
+            not_bull = bull_regime < 1.5
+            checks.append(Check(
+                name="Not in Roots' bull regime",
+                passed=not_bull,
+                value=(
+                    f"regime = {'CORRECTION/BEAR' if not_bull else 'BULL'}"
+                    + (f" ({bull_regime_age_days}d old)"
+                       if bull_regime_age_days else "")
+                ),
+                threshold="regime ≠ bull",
+            ))
+
+        # Optional check: Capital Inflow Multiplier > 100 leads cycle bottoms
+        # by 2-5 months historically. Predictive, not coincident.
+        if inflow_multiplier is not None:
+            high_inflow = inflow_multiplier >= self.inflow_multiplier_bottom_threshold
+            checks.append(Check(
+                name="Inflow multiplier elevated (bottom proximity)",
+                passed=high_inflow,
+                value=(
+                    f"Inflow = {inflow_multiplier:.1f}"
+                    + (f" ({inflow_multiplier_age_days}d old data)"
+                       if inflow_multiplier_age_days else "")
+                ),
+                threshold=f"≥ {self.inflow_multiplier_bottom_threshold:.0f}",
             ))
 
         # Optional check: STH/LTH cost basis ratio. Per Roots: < 1.0 has
