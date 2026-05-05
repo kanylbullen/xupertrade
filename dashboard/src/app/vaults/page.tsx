@@ -309,9 +309,9 @@ function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
         </div>
       </CardHeader>
       <CardContent>
-        <div className="space-y-3">
+        <div className="grid gap-4 md:grid-cols-2">
           {data.positions.map((p) => (
-            <PositionRow key={p.vault_address} p={p} />
+            <PositionCard key={p.vault_address} p={p} />
           ))}
         </div>
       </CardContent>
@@ -319,7 +319,7 @@ function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
   );
 }
 
-function PositionRow({ p }: { p: MyPosition }) {
+function PositionCard({ p }: { p: MyPosition }) {
   const allTimeColor = p.all_time_pnl_usd >= 0 ? "text-green-500" : "text-red-500";
   const allTimeSign = p.all_time_pnl_usd >= 0 ? "+" : "";
   const lockMs = p.locked_until ? new Date(p.locked_until).getTime() : 0;
@@ -332,10 +332,10 @@ function PositionRow({ p }: { p: MyPosition }) {
       : { tone: "destructive" as const, text: "no longer qualifies" };
 
   return (
-    <div className="rounded-lg border p-3">
+    <div className="flex h-full flex-col rounded-lg border p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <a
               href={`https://app.hyperliquid.xyz/vaults/${p.vault_address}`}
               target="_blank"
@@ -352,8 +352,7 @@ function PositionRow({ p }: { p: MyPosition }) {
             )}
           </div>
           <div className="mt-1 font-mono text-xs text-muted-foreground">
-            {shortAddr(p.vault_address)} · following{" "}
-            {p.days_following}d
+            {shortAddr(p.vault_address)} · following {p.days_following}d
           </div>
         </div>
         <div className="text-right">
@@ -375,17 +374,24 @@ function PositionRow({ p }: { p: MyPosition }) {
           </div>
         </div>
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
         <Metric label="APR" value={fmtPct(p.current_apr)} />
         <Metric label="Sharpe (180d)" value={fmtNum(p.current_sharpe_180d, 2)} />
         <Metric label="Max DD" value={fmtPct(p.current_max_drawdown_pct, false)} />
         <Metric label="Mgr equity" value={fmtPct(p.current_leader_equity_pct, false)} />
       </div>
       {!stillQualifies && p.failed_filters.length > 0 && (
-        <div className="mt-3 rounded bg-destructive/10 p-2 text-xs text-destructive">
-          Failed filters:{" "}
-          <span className="font-mono">{p.failed_filters.join(", ")}</span>{" "}
-          — consider exiting after lockup expires.
+        // White/foreground text on a subtle red wash — readable like the
+        // rest of the dashboard, with the destructive tone reserved for
+        // the bg + border instead of the text.
+        <div className="mt-auto pt-3">
+          <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-foreground">
+            <span className="text-muted-foreground">Failed filters: </span>
+            <span className="font-mono">{p.failed_filters.join(", ")}</span>
+            <span className="text-muted-foreground">
+              {" "}— consider exiting after lockup expires.
+            </span>
+          </div>
         </div>
       )}
     </div>
