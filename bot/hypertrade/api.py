@@ -51,8 +51,10 @@ async def health(_request: web.Request) -> web.Response:
     return _cors({"status": "ok"})
 
 
-async def hyperliquid_diagnostic(_request: web.Request) -> web.Response:
+async def hyperliquid_diagnostic(request: web.Request) -> web.Response:
     """Verify HyperLiquid SDK can talk to testnet/mainnet using current key."""
+    if (err := _require_auth(request)) is not None:
+        return err
     if not settings.hyperliquid_private_key:
         return _cors(
             {
@@ -89,6 +91,8 @@ async def hyperliquid_diagnostic(_request: web.Request) -> web.Response:
 
 
 async def positions_handler(request: web.Request) -> web.Response:
+    if (err := _require_auth(request)) is not None:
+        return err
     exchange: Exchange | None = request.app.get("exchange")
     if not exchange:
         return _cors({"positions": []})
@@ -113,6 +117,8 @@ async def positions_handler(request: web.Request) -> web.Response:
 
 
 async def list_strategies_handler(request: web.Request) -> web.Response:
+    if (err := _require_auth(request)) is not None:
+        return err
     strategies: list = request.app.get("strategies", [])
     return _cors({
         "strategies": [
@@ -123,6 +129,8 @@ async def list_strategies_handler(request: web.Request) -> web.Response:
 
 
 async def indicator_status(request: web.Request) -> web.Response:
+    if (err := _require_auth(request)) is not None:
+        return err
     try:
         repo: Repository | None = request.app.get("repo")
         strategies: list = request.app.get("strategies", [])
@@ -171,9 +179,12 @@ def _control_routes(
             return err
         return _cors({"session_secret": await control.ensure_session_secret()})
 
-    async def tls_get_config(_request: web.Request) -> web.Response:
-        """Public — returns mode + non-secret TLS fields. Never returns
-        the Cloudflare API token."""
+    async def tls_get_config(request: web.Request) -> web.Response:
+        """Auth-gated. Returns mode + non-secret TLS fields. Never returns
+        the Cloudflare API token. Reveals whether TLS is configured and
+        what hostname — gated alongside the rest of the config surface."""
+        if (err := _require_auth(request)) is not None:
+            return err
         cfg = await control.get_tls_config()
         from hypertrade.notify import caddy_admin
         status = await caddy_admin.get_status()
@@ -284,9 +295,11 @@ def _control_routes(
         await control.set_auth_config(**kwargs)
         return _cors({"ok": True, "mode": kwargs.get("mode", "")})
 
-    async def get_heartbeat(_request: web.Request) -> web.Response:
+    async def get_heartbeat(request: web.Request) -> web.Response:
         """Returns last tick timestamp (epoch seconds) and seconds since,
         so the dashboard / watchdog can flag a stalled bot."""
+        if (err := _require_auth(request)) is not None:
+            return err
         import time
         ts = await control.get_heartbeat()
         if ts is None:
@@ -294,8 +307,10 @@ def _control_routes(
         age = int(time.time()) - ts
         return _cors({"heartbeat": ts, "stale": age > 180, "age_seconds": age})
 
-    async def get_config(_request: web.Request) -> web.Response:
+    async def get_config(request: web.Request) -> web.Response:
         """Redis-only state — no exchange calls, always fast."""
+        if (err := _require_auth(request)) is not None:
+            return err
         paused = await control.is_paused()
         disabled = sorted(await control.get_disabled_strategies())
         overrides = await control.get_all_leverage_overrides()
@@ -317,7 +332,9 @@ def _control_routes(
             }
         )
 
-    async def get_state(_request: web.Request) -> web.Response:
+    async def get_state(request: web.Request) -> web.Response:
+        if (err := _require_auth(request)) is not None:
+            return err
         paused = await control.is_paused()
         disabled = sorted(await control.get_disabled_strategies())
         overrides = await control.get_all_leverage_overrides()
@@ -435,7 +452,9 @@ def _control_routes(
     async def options_handler(_request: web.Request) -> web.Response:
         return _cors({})
 
-    async def hodl_signals(_request: web.Request) -> web.Response:
+    async def hodl_signals(request: web.Request) -> web.Response:
+        if (err := _require_auth(request)) is not None:
+            return err
         from hypertrade.hodl.registry import all_signals, load_all
         load_all()
         results = []
@@ -454,6 +473,8 @@ def _control_routes(
         return _cors({"signals": results})
 
     async def hodl_levels(request: web.Request) -> web.Response:
+        if (err := _require_auth(request)) is not None:
+            return err
         repo: Repository | None = request.app.get("repo")
         if repo is None:
             return _cors({"latest": None})
@@ -475,6 +496,8 @@ def _control_routes(
         }})
 
     async def hodl_purchases(request: web.Request) -> web.Response:
+        if (err := _require_auth(request)) is not None:
+            return err
         repo: Repository | None = request.app.get("repo")
         if repo is None:
             return _cors({"purchases": []})

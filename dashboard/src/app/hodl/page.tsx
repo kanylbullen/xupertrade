@@ -70,15 +70,20 @@ export default async function HodlPage({
   };
   const botApiUrl = botApiUrls[mode];
 
+  // /api/hodl/* are auth-gated when API_KEY is set on the bot. Server-side
+  // render forwards the dashboard's API_KEY so we don't 401 ourselves.
+  const apiKey = process.env.API_KEY || "";
+  const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
+
   let signals: SignalState[] = [];
   let levels: ManualLevels | null = null;
   let purchases: Purchase[] = [];
   let botApiOnline = false;
   try {
     const [signalsRes, levelsRes, purchasesRes] = await Promise.all([
-      fetch(`${botApiUrl}/api/hodl/signals`, { cache: "no-store" }),
-      fetch(`${botApiUrl}/api/hodl/levels`, { cache: "no-store" }),
-      fetch(`${botApiUrl}/api/hodl/purchases?limit=20`, { cache: "no-store" }),
+      fetch(`${botApiUrl}/api/hodl/signals`, { cache: "no-store", headers: authHeaders }),
+      fetch(`${botApiUrl}/api/hodl/levels`, { cache: "no-store", headers: authHeaders }),
+      fetch(`${botApiUrl}/api/hodl/purchases?limit=20`, { cache: "no-store", headers: authHeaders }),
     ]);
     if (signalsRes.ok) {
       const data = (await signalsRes.json()) as { signals: SignalState[] };
