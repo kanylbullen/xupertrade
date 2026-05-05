@@ -204,25 +204,42 @@ def test_period_returns_skips_seed_phase():
     assert abs(rets[0] - 0.10) < 1e-9
 
 
-def test_period_returns_falls_back_when_pnl_missing_anywhere():
-    """If ANY point in the series has pnl_cum=None (legacy row, or HL
-    didn't ship the pnlHistory entry), the whole window falls back to
-    NAV-delta returns. We never mix the two regimes within one series
-    because a boundary pair (0 → real-pnl) would synthesize a giant
-    artificial pnl_delta."""
+def test_period_returns_drops_none_points_and_uses_pnl_on_rest():
+    """When some points have pnl_cum=None (sparse DB rows where HL didn't
+    ship pnlHistory for our own scan timestamps), we drop the None points
+    entirely and use pnl-mode on the rest. Cumulative PnL makes this
+    safe: a (t, t+k) pair captures the total PnL earned over the gap,
+    not the per-period delta."""
     end = datetime.now(tz=timezone.utc)
-    # Mixed series: one pre-pnl-aware row + new rows with real pnl_cum.
     pts = [
-        NavPoint(end - timedelta(days=2), nav=100.0, pnl_cum=None),     # legacy
-        NavPoint(end - timedelta(days=1), nav=105.0, pnl_cum=1_500_000.0),  # new
-        NavPoint(end,                     nav=110.0, pnl_cum=1_500_500.0),
+        NavPoint(end - timedelta(days=4), nav=100.0, pnl_cum=0.0),
+        NavPoint(end - timedelta(days=3), nav=105.0, pnl_cum=None),  # gap row
+        NavPoint(end - timedelta(days=2), nav=110.0, pnl_cum=10.0),
+        NavPoint(end - timedelta(days=1), nav=115.0, pnl_cum=15.0),
     ]
     rets = _period_returns(pts)
-    # Should compute from NAV deltas: +5/100 = 0.05, +5/105 ≈ 0.0476.
-    # NOT from the boundary pnl_delta (1.5M / 100 = 15000).
+    # 3 points with pnl → 2 returns. None point dropped entirely.
+    # Pair 1: (0 → 10) over $100 NAV = +10%
+    # Pair 2: (10 → 15) over $110 NAV = +4.5%
     assert len(rets) == 2
-    assert abs(rets[0] - 0.05) < 1e-9
-    assert max(rets) < 1.0  # sanity: no garbage 15000.0
+    assert abs(rets[0] - 0.10) < 1e-9
+    assert abs(rets[1] - (5 / 110)) < 1e-9
+
+
+def test_period_returns_falls_back_to_nav_when_no_pnl_at_all():
+    """Pre-pnl-aware data (every point has pnl_cum=None, e.g. legacy DB
+    rows from before the schema bump) falls back cleanly to NAV deltas."""
+    end = datetime.now(tz=timezone.utc)
+    pts = [
+        NavPoint(end - timedelta(days=2), nav=100.0, pnl_cum=None),
+        NavPoint(end - timedelta(days=1), nav=110.0, pnl_cum=None),
+        NavPoint(end,                     nav=120.0, pnl_cum=None),
+    ]
+    rets = _period_returns(pts)
+    # NAV deltas: +10/100 = 10%, +10/110 ≈ 9.09%
+    assert len(rets) == 2
+    assert abs(rets[0] - 0.10) < 1e-9
+    assert abs(rets[1] - (10 / 110)) < 1e-9
 
 
 def test_seed_phase_trim_drops_low_nav_leading_samples():
