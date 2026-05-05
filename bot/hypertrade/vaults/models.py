@@ -31,8 +31,19 @@ class VaultSummary:
 
 @dataclass
 class NavPoint:
+    """One sample of vault state at a point in time. `nav` is total
+    account value (deposits + withdrawals + cumulative pnl). `pnl_cum`
+    is the cumulative net PnL since vault inception, or None when we
+    don't have it (legacy rows from before the pnl-aware schema, or
+    HL points where the pnlHistory timestamp didn't match). We store
+    both so period returns can be computed flow-neutrally as
+    `(pnl_cum_t - pnl_cum_{t-1}) / nav_{t-1}`. The metrics layer treats
+    None as 'unknown' — it never silently substitutes 0 (which would
+    create a giant artificial pnl_delta at the boundary)."""
+
     timestamp: datetime
     nav: float
+    pnl_cum: float | None = None
 
 
 @dataclass
@@ -51,6 +62,22 @@ class VaultDetails:
     relationship_type: str
     follower_count: int
     nav_history: list[NavPoint] = field(default_factory=list)
+
+
+@dataclass
+class FollowerState:
+    """Per-user view of a vault, from `vaultDetails(user=...)`."""
+
+    user_address: str
+    vault_address: str
+    vault_equity_usd: float       # current value of user's stake
+    unrealized_pnl_usd: float     # `pnl` in HL — currently-unrealized
+    all_time_pnl_usd: float       # `allTimePnl` — lifetime P&L on this stake
+    days_following: int
+    # `vaultEntryTime` from HL — None when the field was missing/0 in the
+    # response. Don't substitute "now" because that's user-misleading.
+    entered_at: datetime | None
+    locked_until: datetime | None
 
 
 @dataclass

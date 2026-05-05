@@ -33,12 +33,14 @@ type MyPosition = {
   vault_address: string;
   vault_name: string | null;
   leader_address: string | null;
-  first_seen_at: string | null;
-  first_seen_equity_usd: number;
+  vault_equity_usd: number;
+  unrealized_pnl_usd: number;
+  all_time_pnl_usd: number;
+  all_time_pnl_pct: number | null;
+  cost_basis_usd: number;
+  days_following: number;
+  entered_at: string | null;
   last_seen_at: string | null;
-  last_seen_equity_usd: number;
-  pnl_usd: number;
-  pnl_pct: number | null;
   locked_until: string | null;
   qualified: boolean;
   failed_filters: string[];
@@ -263,6 +265,14 @@ function fmtNum(v: number | null, decimals: number): string {
 }
 
 function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
+  const totalAllTimePnl = data.positions.reduce(
+    (s, p) => s + p.all_time_pnl_usd,
+    0,
+  );
+  const totalUnrealized = data.positions.reduce(
+    (s, p) => s + p.unrealized_pnl_usd,
+    0,
+  );
   return (
     <Card className="mb-6 border-primary/30">
       <CardHeader>
@@ -274,16 +284,26 @@ function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
               <code className="rounded bg-muted px-1 py-0.5">
                 {shortAddr(data.address)}
               </code>{" "}
-              — refreshed daily by the scanner. P&amp;L is approximate
-              (first-seen vs current equity), not a true cost basis.
+              — refreshed daily. Equity, P&amp;L, and entry time come from
+              HL&apos;s <code className="rounded bg-muted px-1">followerState</code>.
             </p>
           </div>
-          <div className="text-right">
-            <div className="text-xs text-muted-foreground">Total equity</div>
+          <div className="text-right text-xs">
+            <div className="text-muted-foreground">Total equity</div>
             <div className="font-mono text-lg font-semibold">
               ${data.total_equity_usd.toLocaleString(undefined, {
                 maximumFractionDigits: 2,
               })}
+            </div>
+            <div
+              className={`font-mono ${
+                totalAllTimePnl >= 0 ? "text-green-500" : "text-red-500"
+              }`}
+            >
+              {totalAllTimePnl >= 0 ? "+" : ""}$
+              {totalAllTimePnl.toFixed(2)} all-time ·{" "}
+              {totalUnrealized >= 0 ? "+" : ""}$
+              {totalUnrealized.toFixed(2)} unrealized
             </div>
           </div>
         </div>
@@ -300,8 +320,8 @@ function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
 }
 
 function PositionRow({ p }: { p: MyPosition }) {
-  const pnlSign = p.pnl_usd >= 0 ? "+" : "";
-  const pnlColor = p.pnl_usd >= 0 ? "text-green-500" : "text-red-500";
+  const allTimeColor = p.all_time_pnl_usd >= 0 ? "text-green-500" : "text-red-500";
+  const allTimeSign = p.all_time_pnl_usd >= 0 ? "+" : "";
   const lockMs = p.locked_until ? new Date(p.locked_until).getTime() : 0;
   const locked = lockMs > Date.now();
   const stillQualifies = p.qualified;
@@ -332,20 +352,26 @@ function PositionRow({ p }: { p: MyPosition }) {
             )}
           </div>
           <div className="mt-1 font-mono text-xs text-muted-foreground">
-            {shortAddr(p.vault_address)}
+            {shortAddr(p.vault_address)} · following{" "}
+            {p.days_following}d
           </div>
         </div>
         <div className="text-right">
           <div className="font-mono text-base font-semibold">
-            ${p.last_seen_equity_usd.toLocaleString(undefined, {
+            ${p.vault_equity_usd.toLocaleString(undefined, {
               maximumFractionDigits: 2,
             })}
           </div>
-          <div className={`font-mono text-xs ${pnlColor}`}>
-            {pnlSign}${p.pnl_usd.toFixed(2)}{" "}
-            {p.pnl_pct !== null && (
-              <>({pnlSign}{(p.pnl_pct * 100).toFixed(1)}%)</>
-            )}
+          <div className={`font-mono text-xs ${allTimeColor}`}>
+            {allTimeSign}${p.all_time_pnl_usd.toFixed(2)}{" "}
+            {p.all_time_pnl_pct !== null && (
+              <>({allTimeSign}{(p.all_time_pnl_pct * 100).toFixed(1)}%)</>
+            )}{" "}
+            all-time
+          </div>
+          <div className="font-mono text-xs text-muted-foreground">
+            {p.unrealized_pnl_usd >= 0 ? "+" : ""}$
+            {p.unrealized_pnl_usd.toFixed(2)} unrealized
           </div>
         </div>
       </div>

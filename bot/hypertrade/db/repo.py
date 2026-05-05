@@ -583,28 +583,61 @@ class Repository:
             await session.commit()
 
     async def append_nav_history(
-        self, vault_address: str, points: list[tuple[datetime, float]]
+        self,
+        vault_address: str,
+        points: list[tuple[datetime, float, float | None]],
     ) -> int:
-        """Insert NAV points, skipping duplicates on the composite PK.
-        Returns count of newly inserted rows."""
+        """Insert or backfill (timestamp, nav, pnl_cum) tuples on the
+        composite PK. Returns count of newly inserted rows (backfills
+        don't count). Caller passes 3-tuples; legacy 2-tuples default
+        pnl_cum to None.
+
+        Backfill rule: existing rows with `pnl_cum IS NULL` get updated
+        when incoming data has a non-None pnl_cum. Without this, the
+        first daily poll after a schema bump leaves yesterday's rows
+        permanently unaware of pnl, which would force the metrics layer
+        into the legacy NAV-delta fallback for the rest of the window.
+        """
         if not points:
             return 0
         async with self._session_factory() as session:
             existing = await session.execute(
-                select(VaultNavPoint.timestamp).where(
+                select(
+                    VaultNavPoint.timestamp, VaultNavPoint.pnl_cum
+                ).where(
                     VaultNavPoint.vault_address == vault_address
                 )
             )
-            seen = {ts for (ts,) in existing.all()}
+            existing_pnl: dict = {ts: pnl for (ts, pnl) in existing.all()}
             inserted = 0
-            for ts, nav in points:
-                if ts in seen:
+            backfilled = 0
+            for point in points:
+                if len(point) == 2:
+                    ts, nav = point
+                    pnl_cum = None
+                else:
+                    ts, nav, pnl_cum = point
+                if ts in existing_pnl:
+                    if existing_pnl[ts] is None and pnl_cum is not None:
+                        # Backfill the pnl_cum on a previously-known timestamp.
+                        await session.execute(
+                            VaultNavPoint.__table__.update()
+                            .where(VaultNavPoint.vault_address == vault_address)
+                            .where(VaultNavPoint.timestamp == ts)
+                            .values(pnl_cum=pnl_cum)
+                        )
+                        backfilled += 1
                     continue
                 session.add(
-                    VaultNavPoint(vault_address=vault_address, timestamp=ts, nav=nav)
+                    VaultNavPoint(
+                        vault_address=vault_address,
+                        timestamp=ts,
+                        nav=nav,
+                        pnl_cum=pnl_cum,
+                    )
                 )
                 inserted += 1
-            if inserted:
+            if inserted or backfilled:
                 await session.commit()
             return inserted
 
@@ -733,6 +766,8 @@ class Repository:
     async def vault_nav_for(
         self, vault_address: str
     ) -> list[VaultNavPoint]:
+        """Return all stored NAV+PnL samples for a vault, oldest first.
+        Includes `pnl_cum` so callers can compute flow-neutral returns."""
         async with self._session_factory() as session:
             result = await session.execute(
                 select(VaultNavPoint)
@@ -753,13 +788,16 @@ class Repository:
         self,
         user_address: str,
         vault_address: str,
-        equity_usd: float,
+        vault_equity_usd: float,
+        unrealized_pnl_usd: float,
+        all_time_pnl_usd: float,
+        days_following: int,
+        entered_at: datetime | None,
         locked_until: datetime | None,
     ) -> None:
-        """Update the user's stake in a vault. New row sets first_seen
-        from current values; existing row only updates last_seen and
-        locked_until. If equity drops near zero, mark exited; if it
-        re-enters from zero, clear exited and reset first_seen."""
+        """Update the user's stake in a vault from HL's followerState.
+        Equity ≈ 0 (sub-$1 dust) marks exited; re-entry after exit clears
+        the exited flag."""
         async with self._session_factory() as session:
             row = await session.get(
                 UserVaultEntry, (user_address, vault_address)
@@ -769,26 +807,20 @@ class Repository:
                 row = UserVaultEntry(
                     user_address=user_address,
                     vault_address=vault_address,
-                    first_seen_at=now,
-                    first_seen_equity_usd=equity_usd,
-                    last_seen_at=now,
-                    last_seen_equity_usd=equity_usd,
-                    locked_until=locked_until,
                 )
                 session.add(row)
-            else:
-                if row.exited_at is not None and equity_usd > 1.0:
-                    # Re-entry after an exit: treat as a fresh deposit.
-                    row.first_seen_at = now
-                    row.first_seen_equity_usd = equity_usd
-                    row.exited_at = None
-                row.last_seen_at = now
-                row.last_seen_equity_usd = equity_usd
-                row.locked_until = locked_until
-                # Treat sub-$1 dust as fully exited so the dashboard can
-                # archive cleanly without false "you still hold $0.04".
-                if equity_usd < 1.0 and row.exited_at is None:
-                    row.exited_at = now
+            elif row.exited_at is not None and vault_equity_usd > 1.0:
+                # Re-entry after a withdraw — clear exit flag.
+                row.exited_at = None
+            row.vault_equity_usd = vault_equity_usd
+            row.unrealized_pnl_usd = unrealized_pnl_usd
+            row.all_time_pnl_usd = all_time_pnl_usd
+            row.days_following = days_following
+            row.entered_at = entered_at
+            row.last_seen_at = now
+            row.locked_until = locked_until
+            if vault_equity_usd < 1.0 and row.exited_at is None:
+                row.exited_at = now
             await session.commit()
 
     async def list_user_vault_entries(
