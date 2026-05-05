@@ -128,6 +128,45 @@ def load_dxy() -> dict[date, float] | None:
     return _load_csv("dxy.csv")
 
 
+def load_global_liquidity() -> dict[date, float] | None:
+    """Global liquidity proxy (sum of major central bank balance sheets, etc).
+
+    Values in billions USD ($T scale). BTC tracks global liquidity with a
+    ~2-3 month lag. When liquidity is expanding (90d change positive) BTC
+    has historically appreciated; contractions (Q1 2022) preceded crashes.
+    """
+    return _load_csv("global_liquidity.csv")
+
+
+def load_yield_curve_10y2y() -> dict[date, float] | None:
+    """10-year minus 2-year US Treasury yield spread.
+
+    < 0 = inverted curve = strong recession predictor (median lead time
+    18 months). > 0 = normal curve. The deeper the inversion, the
+    stronger the signal. Ranged -2.4 to +2.9 over 50 years.
+    """
+    return _load_csv("yield_curve_10y2y.csv")
+
+
+def load_unemployment() -> dict[date, float] | None:
+    """US unemployment rate (%). Rising trend = recession proximity."""
+    return _load_csv("unemployment.csv")
+
+
+def load_fed_funds_rate() -> dict[date, float] | None:
+    """US Federal Funds Rate (%). High rate = restrictive policy =
+    headwind for risk assets. Cutting cycle (rate falling) historically
+    precedes BTC bottom by ~6 months."""
+    return _load_csv("fed_funds_rate.csv")
+
+
+def load_recession_active() -> dict[date, float] | None:
+    """NBER-style recession indicator: 1 = officially in recession,
+    0 = not. Recessions are declared with a lag, so this is more useful
+    for historical analysis than real-time signals."""
+    return _load_csv("recession_active.csv")
+
+
 def load_cvdd() -> dict[date, float] | None:
     return _load_csv("cvdd.csv")
 

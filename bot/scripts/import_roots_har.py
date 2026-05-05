@@ -71,6 +71,8 @@ KNOWN_START_DATES: dict[str, str] = {
     "/multiplier":                "2010-07-17",  # placeholder; will auto-derive
     "/key-levels":                "2010-07-17",  # placeholder; will auto-derive
     "/dxy":                       "2012-09-02",  # aligned so max-key = today
+    "/global-liquidity":          "2012-01-02",  # aligned so max-key = today
+    "/recession":                 "1976-01-01",  # 50y of macro data on this page
     "/cvdd":                      "2010-07-17",
 }
 
