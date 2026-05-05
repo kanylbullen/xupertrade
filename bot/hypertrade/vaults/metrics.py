@@ -79,18 +79,20 @@ def _period_returns(points: list[NavPoint]) -> list[float]:
     a boundary pair (None → 1.7M) would compute a giant artificial
     pnl_delta.
 
-    The seed phase (leading samples with NAV < 1% of peak) is trimmed
-    upstream by `_trim_seed_phase`.
+    Seed-phase trim must happen UPSTREAM (in `compute_metrics`), not here.
+    Trimming inside `_period_returns` would re-trim every windowed slice
+    against its own local max NAV, which incorrectly drops the start of a
+    180d Sharpe window if the vault has drawn down then recovered inside
+    the window. Trim once on the full series, slice afterwards.
     """
-    points = _trim_seed_phase(points)
     has_pnl_everywhere = bool(points) and all(
         p.pnl_cum is not None for p in points
     )
     rets: list[float] = []
     for prev, cur in zip(points[:-1], points[1:]):
         if prev.nav <= 0:
-            # Belt-and-braces: shouldn't trigger after _trim_seed_phase
-            # but kept so the function is safe on any input.
+            # Skip seed period — division would explode. Belt-and-braces
+            # backstop in case the caller didn't trim.
             continue
         if has_pnl_everywhere:
             # mypy: pnl_cum can't be None inside this branch
@@ -219,7 +221,17 @@ def sharpe(
 
 def compute_metrics(points: list[NavPoint]) -> VaultMetrics:
     """One-shot: compute every metric we care about from a vault's
-    (NAV, PnL) series."""
+    (NAV, PnL) series.
+
+    Trims the leading seed phase ONCE here against the full series'
+    peak NAV. Downstream functions (`_roi_over`, `max_drawdown`,
+    `sharpe`) then receive a series whose seed has already been
+    excluded — they don't re-trim. This avoids a subtle bug where
+    a windowed slice (e.g. last 180d) would be re-trimmed against
+    its own local max NAV and incorrectly drop the start of the
+    window when the vault has drawn down then recovered within it.
+    """
+    points = _trim_seed_phase(points)
     return VaultMetrics(
         roi_7d=_roi_over(points, 7),
         roi_30d=_roi_over(points, 30),

@@ -249,6 +249,43 @@ def test_seed_phase_trim_drops_low_nav_leading_samples():
     assert dd < 0.10  # well under 10%
 
 
+def test_windowed_metric_does_not_re_trim_against_window_local_max():
+    """Regression test for the Copilot-caught bug: when a windowed metric
+    (sharpe(180d), roi_over(...)) slices the series, the slice's start
+    must NOT be re-trimmed against the WINDOW's local max NAV. Trim is
+    a once-per-series operation done in compute_metrics; downstream
+    functions take the trimmed series as-is.
+
+    Scenario: a long-lived vault that drew down to $50k inside the
+    window and recovered to $5M peak by the end. Window-local trim
+    would drop those early $50k samples (they're <1% of $5M), losing
+    real drawdown signal. Once-trimmed-upstream behavior preserves them.
+    """
+    end = datetime.now(tz=timezone.utc)
+    # 200d series of a mature vault — never near zero.
+    pts = []
+    for d in range(200):
+        # Days 0-100: cruising at $1M with small wiggle
+        if d < 100:
+            nav = 1_000_000.0 + (d * 100)
+            pnl = float(d * 1_000)
+        # Days 100-130: catastrophic drawdown to $50k
+        elif d < 130:
+            nav = 1_000_000.0 - (d - 100) * 30_000
+            pnl = float(100 * 1_000 - (d - 100) * 30_000)
+        # Days 130-200: explosive recovery to $5M
+        else:
+            nav = 100_000.0 + (d - 130) * 70_000
+            pnl = float(-2_900_000 + (d - 130) * 70_000)
+        pts.append(NavPoint(end - timedelta(days=200 - d), nav=nav, pnl_cum=pnl))
+
+    m = compute_metrics(pts)
+    # The within-window drawdown of -95% (1M → 50k) should be visible.
+    # If trim is per-window we'd see something like -5% only.
+    assert m.max_drawdown_pct is not None
+    assert m.max_drawdown_pct > 0.50
+
+
 def test_seed_phase_trim_preserves_real_drawdowns_late_in_history():
     """A vault that grows past the threshold and THEN dips back below
     it has a real drawdown — don't trim that. Trim only the LEADING
