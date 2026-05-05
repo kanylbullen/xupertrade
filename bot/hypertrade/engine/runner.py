@@ -50,17 +50,19 @@ class EngineRunner:
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart, then
-        re-push any persisted Caddy TLS config so HTTPS comes back up
-        without requiring a manual click on the Options page.
+        kick off a background re-push of the persisted Caddy TLS config
+        so HTTPS comes back up without requiring a manual click on the
+        Options page. The TLS push is deliberately fire-and-forget so a
+        slow/unreachable Caddy can't delay engine startup.
         """
-        await self._restore_caddy_tls_config()
-
         if not self.repo:
+            self._kick_caddy_tls_restore()
             return
         try:
             positions = await self.repo.get_open_positions()
         except Exception:
             logger.exception("Failed to fetch open positions for state restoration")
+            self._kick_caddy_tls_restore()
             return
 
         import json
@@ -102,18 +104,20 @@ class EngineRunner:
                 restored, len(positions),
             )
 
-    async def _restore_caddy_tls_config(self) -> None:
-        """Re-push the persisted TLS config to Caddy on bot startup.
+        self._kick_caddy_tls_restore()
+
+    def _kick_caddy_tls_restore(self) -> None:
+        """Fire-and-forget re-push of the persisted Caddy TLS config.
 
         Caddy boots from the Caddyfile mount with `tls internal` (self-signed),
         because the LE config is held in Redis on the bot side and pushed
-        dynamically. After every redeploy the dashboard reverts to the
-        self-signed bootstrap cert until somebody clicks Save on Options →
-        TLS, which is fragile. This brings it back automatically.
+        dynamically. Without this, every redeploy reverts the dashboard to
+        the self-signed bootstrap cert until somebody clicks Save on
+        Options → TLS.
 
-        Gated to the testnet bot to avoid three containers racing to push
-        the same config at startup. Failures are logged but never abort —
-        a misconfigured CF token shouldn't take the whole bot down.
+        Run as a background task so a slow / unreachable Caddy can't
+        delay engine startup. Gated to the testnet bot so paper / mainnet
+        don't race to push the same config three times.
         """
         # Only the testnet bot owns operational tasks (Telegram, vault
         # scanner, TLS re-apply). Other modes share the same Postgres/Redis
@@ -122,41 +126,27 @@ class EngineRunner:
             return
         if self.control is None:
             return
-        try:
-            cfg = await self.control.get_tls_config()
-        except Exception:
-            logger.exception("TLS restore: failed to read config from Redis")
-            return
-        if not cfg.get("enabled"):
-            logger.info("TLS restore: disabled in Redis state — skipping")
-            return
-        missing = [k for k in ("domain", "email", "cf_token") if not cfg.get(k)]
-        if missing:
-            logger.warning(
-                "TLS restore: enabled but missing fields %s — skipping",
-                missing,
-            )
-            return
 
-        from hypertrade.notify import caddy_admin
+        async def _restore() -> None:
+            from hypertrade.notify import caddy_admin
+            ok, msg = await caddy_admin.push_persisted_config(self.control)
+            if ok:
+                logger.info("TLS restore: re-pushed Caddy config (%s)", msg)
+            else:
+                # Includes "missing fields: ..." when state is incomplete
+                # and "HTTP 5xx: ..." or "ConnectionError: ..." otherwise.
+                logger.warning("TLS restore: skipped — %s", msg)
 
-        new_config = caddy_admin.build_https_config(
-            domain=cfg["domain"],
-            email=cfg["email"],
-            cf_token=cfg["cf_token"],
-        )
+        # asyncio.create_task: fires immediately, doesn't block startup.
+        # The runner's tick loop keeps the event loop alive long enough
+        # for the task to complete.
+        import asyncio
         try:
-            ok, msg = await caddy_admin.apply_config(new_config)
-        except Exception:
-            logger.exception("TLS restore: apply_config raised")
-            return
-        if ok:
-            logger.info(
-                "TLS restore: re-pushed LE config to Caddy for %s",
-                cfg["domain"],
-            )
-        else:
-            logger.warning("TLS restore: Caddy rejected config: %s", msg)
+            asyncio.create_task(_restore())
+        except RuntimeError:
+            # No running event loop (shouldn't happen — startup is async),
+            # but keep startup robust against weird call paths.
+            logger.exception("TLS restore: could not schedule background task")
 
     def _reset_strategy_state(self, strategy_name: str) -> None:
         """Called by reconcile when it closes a DB position outside the
