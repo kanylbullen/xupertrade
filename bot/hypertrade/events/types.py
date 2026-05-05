@@ -94,3 +94,26 @@ class LogEntry(Event):
     type: str = "log"
     level: str = "info"
     message: str = ""
+
+
+@dataclass
+class VaultQualified(Event):
+    """A vault entered the qualified set since the last poll."""
+
+    type: str = "vault.qualified"
+    address: str = ""
+    name: str = ""
+    apr: float = 0.0
+    aum_usd: float = 0.0
+    sharpe_180d: float = 0.0
+    leader_equity_pct: float = 0.0
+
+
+@dataclass
+class VaultDisqualified(Event):
+    """A previously qualified vault failed at least one filter."""
+
+    type: str = "vault.disqualified"
+    address: str = ""
+    name: str = ""
+    failed_filters: str = ""  # comma-separated filter names

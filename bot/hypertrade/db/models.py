@@ -6,10 +6,12 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    ForeignKey,
     Integer,
     String,
     Boolean,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -200,6 +202,85 @@ class HodlPurchase(Base):
     cold_storage_at = Column(DateTime(timezone=True), nullable=True)
     cold_storage_address = Column(String(128), nullable=True)
     notes = Column(Text, default="")
+
+
+class Vault(Base):
+    """A HyperLiquid vault we've discovered. Static-ish metadata only;
+    metrics that change daily live in `vault_snapshots`."""
+
+    __tablename__ = "vaults"
+
+    address = Column(String(42), primary_key=True)
+    name = Column(String(128), nullable=True)
+    leader_address = Column(String(42), nullable=True, index=True)
+    description = Column(Text, default="")
+    created_at = Column(DateTime(timezone=True), nullable=True)
+    profit_share_pct = Column(Float, nullable=True)
+    relationship_type = Column(String(16), default="normal")
+    first_seen_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class VaultSnapshot(Base):
+    """Daily snapshot of a vault's risk-adjusted metrics. Each row is one
+    poll; we only insert when something changed (or once per day)."""
+
+    __tablename__ = "vault_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    vault_address = Column(
+        String(42),
+        ForeignKey("vaults.address", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+    aum_usd = Column(Float, nullable=True)
+    nav = Column(Float, nullable=True)
+    leader_equity_pct = Column(Float, nullable=True)
+    depositor_count = Column(Integer, nullable=True)
+    apr = Column(Float, nullable=True)
+    age_days = Column(Integer, nullable=True)
+    roi_7d = Column(Float, nullable=True)
+    roi_30d = Column(Float, nullable=True)
+    roi_90d = Column(Float, nullable=True)
+    roi_180d = Column(Float, nullable=True)
+    roi_365d = Column(Float, nullable=True)
+    max_drawdown_pct = Column(Float, nullable=True)
+    sharpe_180d = Column(Float, nullable=True)
+    qualified = Column(Boolean, default=False, index=True)
+    # JSON: {filter_name: {"passed": bool, "value": str, "threshold": str}}
+    # Lets the dashboard show which filter caused a vault to fail.
+    filter_breakdown_json = Column(Text, default="{}")
+    allow_deposits = Column(Boolean, default=True)
+    is_closed = Column(Boolean, default=False)
+
+    __table_args__ = (
+        UniqueConstraint("vault_address", "snapshot_at", name="uq_vault_snapshot"),
+    )
+
+
+class VaultNavPoint(Base):
+    """One historical NAV observation. Backfilled from HL on first encounter,
+    appended daily thereafter. Composite PK = (address, timestamp)."""
+
+    __tablename__ = "vault_nav_history"
+
+    vault_address = Column(
+        String(42),
+        ForeignKey("vaults.address", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    timestamp = Column(DateTime(timezone=True), primary_key=True)
+    nav = Column(Float, nullable=False)
 
 
 class StrategyConfig(Base):

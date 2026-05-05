@@ -45,6 +45,8 @@ class EngineRunner:
         self._last_funding_poll = 0.0
         self._last_hodl_check = 0.0
         self._last_hodl_zones: dict[str, str] = {}  # signal_name -> last verdict
+        self._last_vault_poll = 0.0
+        self._vault_poller = None  # lazy-init on first use
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart."""
@@ -159,6 +161,15 @@ class EngineRunner:
             except Exception:
                 logger.exception("HODL signal evaluation failed")
             self._last_hodl_check = time.time()
+
+        # Vault scanner: daily poll. Telegram-only via the testnet bot.
+        # Other modes still poll so /vaults dashboard stays fresh in any mode.
+        if self.repo and (time.time() - self._last_vault_poll) > 24 * 3600:
+            try:
+                await self._poll_vaults()
+            except Exception:
+                logger.exception("Vault scan failed")
+            self._last_vault_poll = time.time()
 
         # Honor flat-all request before everything else
         if self.control:
@@ -654,6 +665,19 @@ class EngineRunner:
                 "[hodl/%s] verdict change: %r → %r (score %.2f)",
                 sig.name, prev, state.verdict, state.score,
             )
+
+    async def _poll_vaults(self) -> None:
+        """Run the daily HyperLiquid vault scanner. Lazy-init the poller
+        so we don't pay the import cost when scanning is disabled.
+        """
+        from hypertrade.vaults.poller import VaultPoller
+
+        if self._vault_poller is None:
+            self._vault_poller = VaultPoller(
+                repo=self.repo, event_bus=self.event_bus
+            )
+        result = await self._vault_poller.poll()
+        logger.info("vault scan result: %s", result)
 
     async def _poll_funding(self) -> None:
         """Pull HL funding events since the latest stored timestamp and

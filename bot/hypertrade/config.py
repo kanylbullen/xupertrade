@@ -75,7 +75,10 @@ class Settings(BaseSettings):
     # (everything except heartbeat). Heartbeat is never sent (too noisy).
     # signal.generated is excluded by default — trade.executed already
     # carries the reason and only fires when an order is actually placed.
-    telegram_events: str = "trade.executed,position.closed,error"
+    telegram_events: str = (
+        "trade.executed,position.closed,error,"
+        "vault.qualified,vault.disqualified"
+    )
 
 
 settings = Settings()
