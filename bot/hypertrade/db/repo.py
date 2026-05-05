@@ -585,31 +585,48 @@ class Repository:
     async def append_nav_history(
         self,
         vault_address: str,
-        points: list[tuple[datetime, float, float]],
+        points: list[tuple[datetime, float, float | None]],
     ) -> int:
-        """Insert (timestamp, nav, pnl_cum) tuples, skipping duplicates
-        on the composite PK. Returns count of newly inserted rows.
+        """Insert or backfill (timestamp, nav, pnl_cum) tuples on the
+        composite PK. Returns count of newly inserted rows (backfills
+        don't count). Caller passes 3-tuples; legacy 2-tuples default
+        pnl_cum to None.
 
-        Caller passes 3-tuples; we accept legacy 2-tuples too (older
-        tests) by defaulting pnl_cum to 0.
+        Backfill rule: existing rows with `pnl_cum IS NULL` get updated
+        when incoming data has a non-None pnl_cum. Without this, the
+        first daily poll after a schema bump leaves yesterday's rows
+        permanently unaware of pnl, which would force the metrics layer
+        into the legacy NAV-delta fallback for the rest of the window.
         """
         if not points:
             return 0
         async with self._session_factory() as session:
             existing = await session.execute(
-                select(VaultNavPoint.timestamp).where(
+                select(
+                    VaultNavPoint.timestamp, VaultNavPoint.pnl_cum
+                ).where(
                     VaultNavPoint.vault_address == vault_address
                 )
             )
-            seen = {ts for (ts,) in existing.all()}
+            existing_pnl: dict = {ts: pnl for (ts, pnl) in existing.all()}
             inserted = 0
+            backfilled = 0
             for point in points:
                 if len(point) == 2:
                     ts, nav = point
-                    pnl_cum = 0.0
+                    pnl_cum = None
                 else:
                     ts, nav, pnl_cum = point
-                if ts in seen:
+                if ts in existing_pnl:
+                    if existing_pnl[ts] is None and pnl_cum is not None:
+                        # Backfill the pnl_cum on a previously-known timestamp.
+                        await session.execute(
+                            VaultNavPoint.__table__.update()
+                            .where(VaultNavPoint.vault_address == vault_address)
+                            .where(VaultNavPoint.timestamp == ts)
+                            .values(pnl_cum=pnl_cum)
+                        )
+                        backfilled += 1
                     continue
                 session.add(
                     VaultNavPoint(
@@ -620,7 +637,7 @@ class Repository:
                     )
                 )
                 inserted += 1
-            if inserted:
+            if inserted or backfilled:
                 await session.commit()
             return inserted
 

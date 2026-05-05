@@ -159,7 +159,12 @@ async def _parse_vault_details(
                                 ts_ms_int / 1000.0, tz=timezone.utc
                             ),
                             nav=float(nav_str),
-                            pnl_cum=pnl_by_ts.get(ts_ms_int, 0.0),
+                            # None — not 0.0 — when HL didn't ship a
+                            # matching pnlHistory point. Defaulting to 0
+                            # would silently create a huge artificial
+                            # pnl_delta at the legacy/new boundary and
+                            # blow up downstream metrics.
+                            pnl_cum=pnl_by_ts.get(ts_ms_int),
                         )
                     )
                 except (TypeError, ValueError):
@@ -257,9 +262,15 @@ async def fetch_user_vault_state(
             unrealized_pnl_usd=float(fs.get("pnl") or 0.0),
             all_time_pnl_usd=float(fs.get("allTimePnl") or 0.0),
             days_following=int(fs.get("daysFollowing") or 0),
-            entered_at=datetime.fromtimestamp(
-                entered_ms / 1000.0, tz=timezone.utc
-            ) if entered_ms > 0 else datetime.now(tz=timezone.utc),
+            # None when HL didn't ship a vaultEntryTime — substituting
+            # `now` would render as "entered just now" forever in the UI
+            # and hide the missing-data fact from consumers.
+            entered_at=(
+                datetime.fromtimestamp(
+                    entered_ms / 1000.0, tz=timezone.utc
+                )
+                if entered_ms > 0 else None
+            ),
             locked_until=(
                 datetime.fromtimestamp(locked_ms / 1000.0, tz=timezone.utc)
                 if locked_ms > 0 else None

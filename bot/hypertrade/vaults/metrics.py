@@ -34,18 +34,31 @@ def _period_returns(points: list[NavPoint]) -> list[float]:
     """Compute per-period returns from cumulative-PnL deltas, normalized
     by NAV at the start of each period. Returns one value per consecutive
     pair of points. Drops any pair where the prior NAV was 0 (vault not
-    seeded yet)."""
+    seeded yet).
+
+    Series-level pnl-vs-NAV fallback: if EVERY point in `points` has a
+    non-None `pnl_cum`, use pnl deltas (flow-neutral). If ANY point is
+    missing pnl_cum (legacy rows from before the pnl-aware schema, or
+    HL points where pnlHistory didn't ship a matching timestamp), fall
+    back to NAV deltas across the whole series — flow-contaminated but
+    consistent. The two regimes are NEVER mixed in one series, because
+    a boundary pair (None → 1.7M) would compute a giant artificial
+    pnl_delta.
+    """
+    has_pnl_everywhere = bool(points) and all(
+        p.pnl_cum is not None for p in points
+    )
     rets: list[float] = []
     for prev, cur in zip(points[:-1], points[1:]):
         if prev.nav <= 0:
             # Skip the seed period — division would explode.
             continue
-        pnl_delta = cur.pnl_cum - prev.pnl_cum
-        # Fallback for legacy points where pnl_cum is missing/zero
-        # everywhere: use NAV-delta normalized by start NAV.
-        if cur.pnl_cum == 0.0 and prev.pnl_cum == 0.0:
-            pnl_delta = cur.nav - prev.nav
-        rets.append(pnl_delta / prev.nav)
+        if has_pnl_everywhere:
+            # mypy: pnl_cum can't be None inside this branch
+            delta = cur.pnl_cum - prev.pnl_cum  # type: ignore[operator]
+        else:
+            delta = cur.nav - prev.nav
+        rets.append(delta / prev.nav)
     return rets
 
 

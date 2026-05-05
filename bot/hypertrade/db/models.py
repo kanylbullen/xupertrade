@@ -325,7 +325,10 @@ class VaultNavPoint(Base):
     )
     timestamp = Column(DateTime(timezone=True), primary_key=True)
     nav = Column(Float, nullable=False)
-    pnl_cum = Column(Float, nullable=False, default=0.0)
+    # NULL = we don't know the cumulative PnL for this point (legacy row
+    # from before the pnl-aware schema, or HL didn't ship a matching
+    # pnlHistory timestamp). Distinct from a real cumulative-PnL of zero.
+    pnl_cum = Column(Float, nullable=True)
 
 
 class StrategyConfig(Base):

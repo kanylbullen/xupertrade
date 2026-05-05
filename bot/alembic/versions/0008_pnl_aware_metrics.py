@@ -60,9 +60,12 @@ def upgrade() -> None:
     op.drop_column("user_vault_entries", "first_seen_equity_usd")
     op.drop_column("user_vault_entries", "last_seen_equity_usd")
 
+    # pnl_cum is nullable — NULL means "we don't have it for this point"
+    # (legacy rows or missing HL data), distinct from a real PnL of zero.
+    # Existing rows backfill to NULL; new rows get the value when known.
     op.add_column(
         "vault_nav_history",
-        sa.Column("pnl_cum", sa.Float(), nullable=False, server_default="0"),
+        sa.Column("pnl_cum", sa.Float(), nullable=True),
     )
 
 

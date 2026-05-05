@@ -202,3 +202,44 @@ def test_period_returns_skips_seed_phase():
     # Only the (100→110) pair survives; the (0→100) pair is skipped.
     assert len(rets) == 1
     assert abs(rets[0] - 0.10) < 1e-9
+
+
+def test_period_returns_falls_back_when_pnl_missing_anywhere():
+    """If ANY point in the series has pnl_cum=None (legacy row, or HL
+    didn't ship the pnlHistory entry), the whole window falls back to
+    NAV-delta returns. We never mix the two regimes within one series
+    because a boundary pair (0 → real-pnl) would synthesize a giant
+    artificial pnl_delta."""
+    end = datetime.now(tz=timezone.utc)
+    # Mixed series: one pre-pnl-aware row + new rows with real pnl_cum.
+    pts = [
+        NavPoint(end - timedelta(days=2), nav=100.0, pnl_cum=None),     # legacy
+        NavPoint(end - timedelta(days=1), nav=105.0, pnl_cum=1_500_000.0),  # new
+        NavPoint(end,                     nav=110.0, pnl_cum=1_500_500.0),
+    ]
+    rets = _period_returns(pts)
+    # Should compute from NAV deltas: +5/100 = 0.05, +5/105 ≈ 0.0476.
+    # NOT from the boundary pnl_delta (1.5M / 100 = 15000).
+    assert len(rets) == 2
+    assert abs(rets[0] - 0.05) < 1e-9
+    assert max(rets) < 1.0  # sanity: no garbage 15000.0
+
+
+def test_period_returns_uses_pnl_when_available_everywhere():
+    """When EVERY point has pnl_cum, returns are pnl-delta based
+    (flow-neutral). NAV deltas are ignored."""
+    end = datetime.now(tz=timezone.utc)
+    # NAV looks volatile (deposits and withdrawals), but the strategy
+    # actually made a clean +1% per period.
+    pts = [
+        NavPoint(end - timedelta(days=3), nav=1000.0, pnl_cum=0.0),
+        NavPoint(end - timedelta(days=2), nav=2000.0, pnl_cum=10.0),  # +10 on 1000
+        NavPoint(end - timedelta(days=1), nav=500.0,  pnl_cum=30.0),  # +20 on 2000
+        NavPoint(end,                     nav=600.0,  pnl_cum=35.0),  # +5 on 500
+    ]
+    rets = _period_returns(pts)
+    assert len(rets) == 3
+    # +10/1000 = 0.010, +20/2000 = 0.010, +5/500 = 0.010 — all the same
+    # despite wild NAV swings caused by simulated deposits/withdrawals.
+    for r in rets:
+        assert abs(r - 0.010) < 1e-9
