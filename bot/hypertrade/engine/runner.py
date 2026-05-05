@@ -739,7 +739,9 @@ class EngineRunner:
 
         if self._vault_poller is None:
             self._vault_poller = VaultPoller(
-                repo=self.repo, event_bus=self.event_bus
+                repo=self.repo,
+                event_bus=self.event_bus,
+                track_user_address=settings.vault_tracking_address,
             )
         result = await self._vault_poller.poll()
         logger.info("vault scan result: %s", result)

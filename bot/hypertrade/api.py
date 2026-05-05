@@ -485,6 +485,90 @@ def _control_routes(
             "notes": p.notes,
         } for p in rows]})
 
+    async def vaults_mine(request: web.Request) -> web.Response:
+        """Return the user's tracked vault deposits joined with our scoring.
+
+        For each held vault we attach:
+          - current equity + entry equity for a rough P&L (best we can do
+            without scraping HL deposit receipts)
+          - latest snapshot's qualified status + filter breakdown so the
+            UI can flag vaults that have drifted out of qualification
+          - lockup window if any
+
+        Auth-gated when API_KEY is set: the response includes a wallet
+        address and per-vault equities, which is identifying information
+        even though the underlying data is public on-chain. The dashboard
+        sends `X-Api-Key` from its server-side env when calling this.
+        """
+        if (err := _require_auth(request)) is not None:
+            return err
+        repo: Repository | None = request.app.get("repo")
+        if repo is None or not settings.vault_tracking_address:
+            return _cors({"address": "", "positions": [], "total_equity_usd": 0.0})
+        addr = settings.vault_tracking_address.strip().lower()
+        try:
+            entries = await repo.list_user_vault_entries(addr)
+        except Exception as e:
+            return _cors({"address": addr, "positions": [], "error": str(e)},
+                         status=500)
+
+        positions = []
+        total = 0.0
+        for e in entries:
+            vault = await repo.get_vault(e.vault_address)
+            snap = await repo.latest_vault_snapshot(e.vault_address)
+            breakdown = []
+            if snap and snap.filter_breakdown_json:
+                try:
+                    breakdown = json.loads(snap.filter_breakdown_json)
+                except (json.JSONDecodeError, TypeError):
+                    breakdown = []
+            failed = [r["name"] for r in breakdown if not r.get("passed", True)]
+            pnl_usd = e.last_seen_equity_usd - e.first_seen_equity_usd
+            pnl_pct = (
+                pnl_usd / e.first_seen_equity_usd
+                if e.first_seen_equity_usd > 0 else None
+            )
+            total += e.last_seen_equity_usd
+            positions.append({
+                "vault_address": e.vault_address,
+                "vault_name": vault.name if vault else None,
+                "leader_address": vault.leader_address if vault else None,
+                "first_seen_at": (
+                    e.first_seen_at.isoformat() if e.first_seen_at else None
+                ),
+                "first_seen_equity_usd": e.first_seen_equity_usd,
+                "last_seen_at": (
+                    e.last_seen_at.isoformat() if e.last_seen_at else None
+                ),
+                "last_seen_equity_usd": e.last_seen_equity_usd,
+                "pnl_usd": pnl_usd,
+                "pnl_pct": pnl_pct,
+                "locked_until": (
+                    e.locked_until.isoformat() if e.locked_until else None
+                ),
+                "qualified": bool(snap and snap.qualified),
+                "failed_filters": failed,
+                "current_apr": snap.apr if snap else None,
+                "current_sharpe_180d": snap.sharpe_180d if snap else None,
+                "current_aum_usd": snap.aum_usd if snap else None,
+                "current_max_drawdown_pct": snap.max_drawdown_pct if snap else None,
+                "current_leader_equity_pct": snap.leader_equity_pct if snap else None,
+                "snapshot_at": (
+                    snap.snapshot_at.isoformat() if snap and snap.snapshot_at else None
+                ),
+            })
+        # Sort by P&L percent desc so winners surface first.
+        positions.sort(
+            key=lambda p: (p["pnl_pct"] if p["pnl_pct"] is not None else 0.0),
+            reverse=True,
+        )
+        return _cors({
+            "address": addr,
+            "positions": positions,
+            "total_equity_usd": total,
+        })
+
     async def vaults_list(request: web.Request) -> web.Response:
         """Currently qualified vaults with latest snapshot metrics."""
         repo: Repository | None = request.app.get("repo")
@@ -608,6 +692,7 @@ def _control_routes(
     app.router.add_get("/api/hodl/purchases", hodl_purchases)
     app.router.add_route("OPTIONS", "/api/hodl/{tail:.*}", options_handler)
     app.router.add_get("/api/vaults", vaults_list)
+    app.router.add_get("/api/vaults/mine", vaults_mine)
     app.router.add_get("/api/vaults/{address}", vault_detail)
     app.router.add_get("/api/vaults/{address}/snapshots", vault_snapshots)
     app.router.add_route("OPTIONS", "/api/vaults/{tail:.*}", options_handler)
