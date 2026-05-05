@@ -28,6 +28,8 @@ type Coin = {
 type PortfolioResponse = {
   configured: boolean;
   provider: string;
+  ok?: boolean;
+  error?: string;
   coins: Coin[];
   total_value_usd: number;
   total_pnl_24h_usd: number;
@@ -39,7 +41,7 @@ type PortfolioResponse = {
 export default async function PortfolioPage({
   searchParams,
 }: {
-  searchParams: Promise<{ mode?: string }>;
+  searchParams: Promise<{ mode?: string; fresh?: string }>;
 }) {
   const params = await searchParams;
   const rawMode = params.mode ?? "paper";
@@ -57,20 +59,27 @@ export default async function PortfolioPage({
   const apiKey = process.env.API_KEY || "";
   const headers: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
+  // Forward `?fresh=1` to the bot so the user can bypass the Redis cache
+  // by adding it to the dashboard URL — matches what the page copy promises.
+  const upstreamUrl = `${botApiUrl}/api/portfolio/coins${
+    params.fresh === "1" ? "?fresh=1" : ""
+  }`;
+
   let data: PortfolioResponse | null = null;
-  let botApiOnline = false;
+  // Distinguish "couldn't reach bot at all" (network) from "bot answered
+  // but with a 401/500" — the latter is more actionable.
+  let networkError = false;
+  let httpStatus: number | null = null;
   try {
-    const res = await fetch(`${botApiUrl}/api/portfolio/coins`, {
-      cache: "no-store",
-      headers,
-    });
+    const res = await fetch(upstreamUrl, { cache: "no-store", headers });
+    httpStatus = res.status;
     if (res.ok) {
       data = (await res.json()) as PortfolioResponse;
-      botApiOnline = true;
     }
   } catch {
-    // bot offline
+    networkError = true;
   }
+  const botApiOnline = !networkError && httpStatus !== null;
 
   return (
     <div className="container mx-auto max-w-6xl p-4 sm:p-6">
@@ -89,10 +98,37 @@ export default async function PortfolioPage({
         </p>
       </div>
 
-      {!botApiOnline && (
+      {networkError && (
         <Card className="mb-4 border-destructive/50">
           <CardContent className="pt-6 text-sm text-destructive">
-            Bot API ({mode}) unreachable.
+            Bot API ({mode}) unreachable — network error.
+          </CardContent>
+        </Card>
+      )}
+      {botApiOnline && httpStatus !== null && httpStatus >= 400 && (
+        <Card className="mb-4 border-destructive/50">
+          <CardContent className="pt-6 text-sm text-destructive">
+            Bot API responded HTTP {httpStatus}.{" "}
+            {httpStatus === 401 && (
+              <>
+                Auth required — set{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  API_KEY
+                </code>{" "}
+                in the dashboard env so it can forward{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  X-Api-Key
+                </code>
+                .
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+      {data && data.configured && data.ok === false && (
+        <Card className="mb-4 border-destructive/50">
+          <CardContent className="pt-6 text-sm text-destructive">
+            Provider error ({data.provider}): {data.error || "unknown"}
           </CardContent>
         </Card>
       )}

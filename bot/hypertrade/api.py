@@ -694,7 +694,10 @@ def _control_routes(
                 "cached": False,
             })
 
-        cache_key = f"portfolio:{provider.name}:coins"
+        # Cache key includes mode + provider so paper/testnet/mainnet
+        # bots sharing the same Redis don't overwrite each other's
+        # cached snapshots if multiple providers are configured.
+        cache_key = f"portfolio:{settings.exchange_mode}:{provider.name}:coins"
         force_refresh = request.query.get("fresh") == "1"
 
         if not force_refresh:
@@ -714,6 +717,8 @@ def _control_routes(
         payload = {
             "configured": True,
             "provider": provider.name,
+            "ok": snap.ok,
+            "error": snap.error,
             "coins": [_asdict(c) for c in snap.coins],
             "total_value_usd": snap.total_value_usd,
             "total_pnl_24h_usd": snap.total_pnl_24h_usd,
@@ -721,9 +726,10 @@ def _control_routes(
             "fetched_at": snap.fetched_at,
             "cached": False,
         }
-        # Only cache successful (non-empty) responses to avoid pinning a
-        # transient error for 5 minutes.
-        if snap.coins:
+        # Cache any successful response (including empty-but-ok — e.g.
+        # a brand-new portfolio with no holdings). Only error responses
+        # are skipped, so a transient outage doesn't pin a 5-min cache.
+        if snap.ok:
             await control.cache_set(cache_key, json.dumps(payload), ttl_seconds=300)
         return _cors(payload)
 

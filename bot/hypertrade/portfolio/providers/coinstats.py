@@ -85,12 +85,22 @@ def _parse_holding(raw: dict) -> CoinHolding | None:
     avg_buy = (raw.get("averageBuy") or {})
     avg_sell = (raw.get("averageSell") or {})
 
+    rank_raw = coin.get("rank")
+    rank: int | None = None
+    if rank_raw is not None:
+        try:
+            rank = int(rank_raw)
+        except (TypeError, ValueError):
+            # Empty string, non-numeric, etc. — skip silently rather than
+            # raise and poison parsing for the whole response.
+            rank = None
+
     return CoinHolding(
         identifier=identifier,
         symbol=symbol,
         name=str(coin.get("name") or ""),
         icon=str(coin.get("icon") or ""),
-        rank=int(coin["rank"]) if coin.get("rank") is not None else None,
+        rank=rank,
         count=count,
         price_usd=price_usd,
         value_usd=value_usd,
@@ -130,6 +140,8 @@ async def fetch_portfolio_coins(
         # Misconfiguration — caller usually checks this, but defend anyway.
         return PortfolioSnapshot(
             fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+            ok=False,
+            error="missing api_key or share_token",
         )
 
     headers = {
@@ -159,12 +171,16 @@ async def fetch_portfolio_coins(
                 )
                 return PortfolioSnapshot(
                     fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+                    ok=False,
+                    error=f"HTTP {resp.status}",
                 )
             data = await resp.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
         logger.warning("CoinStats /portfolio/coins failed: %s", exc)
         return PortfolioSnapshot(
             fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+            ok=False,
+            error=f"{type(exc).__name__}: {exc}"[:200],
         )
     finally:
         if own_session:

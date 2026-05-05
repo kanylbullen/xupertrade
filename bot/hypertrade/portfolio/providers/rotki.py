@@ -98,10 +98,14 @@ class RotkiProvider(PortfolioProvider):
                         data = await self._fetch_balances(fresh)
                     except Exception as exc:
                         logger.warning("rotki: re-auth + fetch failed: %s", exc)
-                        return _empty_snapshot()
+                        return _empty_snapshot(
+                            error=f"re-auth failed: {type(exc).__name__}"
+                        )
             except Exception as exc:
                 logger.warning("rotki: fetch failed: %s", exc)
-                return _empty_snapshot()
+                return _empty_snapshot(
+                    error=f"{type(exc).__name__}: {exc}"[:200]
+                )
 
         return _parse_balances(data)
 
@@ -147,9 +151,11 @@ class _RotkiUnauthorized(Exception):
     """Internal sentinel — session expired or never started."""
 
 
-def _empty_snapshot() -> PortfolioSnapshot:
+def _empty_snapshot(error: str = "") -> PortfolioSnapshot:
     return PortfolioSnapshot(
         fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+        ok=not error,
+        error=error,
     )
 
 

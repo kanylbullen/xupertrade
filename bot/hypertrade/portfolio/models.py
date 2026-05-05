@@ -44,7 +44,14 @@ class CoinHolding:
 
 @dataclass
 class PortfolioSnapshot:
-    """One point-in-time view of the user's portfolio."""
+    """One point-in-time view of the user's portfolio.
+
+    `ok` distinguishes a legitimately-empty portfolio (ok=True, coins=[])
+    from a fetch failure (ok=False, coins=[]). Callers cache only
+    successful responses — empty-but-ok still gets cached so a brand-new
+    portfolio doesn't burn 8 credits per dashboard refresh, but real
+    errors retry on the next request instead of pinning a 5-min outage.
+    """
 
     coins: list[CoinHolding] = field(default_factory=list)
     total_value_usd: float = 0.0
@@ -52,3 +59,5 @@ class PortfolioSnapshot:
     total_pnl_all_time_usd: float = 0.0
     fetched_at: str = ""        # ISO-8601 UTC
     cached: bool = False
+    ok: bool = True
+    error: str = ""
