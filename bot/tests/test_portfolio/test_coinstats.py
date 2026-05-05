@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from hypertrade.portfolio.coinstats import (
+from hypertrade.portfolio.providers.coinstats import (
     _parse_holding,
     fetch_portfolio_coins,
 )

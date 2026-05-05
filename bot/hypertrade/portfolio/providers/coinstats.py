@@ -1,8 +1,11 @@
-"""CoinStats portfolio API client.
+"""CoinStats portfolio provider.
 
 Wraps `GET /portfolio/coins`. Returns a `PortfolioSnapshot` ready for
 dashboard rendering. Costs 8 credits per request, so callers should
 cache aggressively (5-min TTL is the project default).
+
+Requires a CoinStats Degen plan subscription. For a self-hosted free
+alternative see `RotkiProvider`.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from datetime import datetime, timezone
 import aiohttp
 
 from hypertrade.portfolio.models import CoinHolding, PortfolioSnapshot
+from hypertrade.portfolio.providers.base import PortfolioProvider
 
 logger = logging.getLogger(__name__)
 
@@ -186,3 +190,29 @@ async def fetch_portfolio_coins(
         fetched_at=datetime.now(tz=timezone.utc).isoformat(),
         cached=False,
     )
+
+
+class CoinStatsProvider(PortfolioProvider):
+    """`PortfolioProvider` adapter around `fetch_portfolio_coins`."""
+
+    name = "coinstats"
+
+    def __init__(
+        self,
+        api_key: str,
+        share_token: str,
+        passcode: str = "",
+        include_risk_score: bool = True,
+    ) -> None:
+        self.api_key = api_key
+        self.share_token = share_token
+        self.passcode = passcode
+        self.include_risk_score = include_risk_score
+
+    async def fetch_snapshot(self) -> PortfolioSnapshot:
+        return await fetch_portfolio_coins(
+            api_key=self.api_key,
+            share_token=self.share_token,
+            passcode=self.passcode,
+            include_risk_score=self.include_risk_score,
+        )

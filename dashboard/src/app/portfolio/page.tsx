@@ -27,6 +27,7 @@ type Coin = {
 
 type PortfolioResponse = {
   configured: boolean;
+  provider: string;
   coins: Coin[];
   total_value_usd: number;
   total_pnl_24h_usd: number;
@@ -78,9 +79,11 @@ export default async function PortfolioPage({
           Portfolio
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Read-only view of your CoinStats portfolio across exchanges and
-          wallets. Refreshed live with a 5-minute Redis cache (CoinStats
-          charges 8 credits per request). Add{" "}
+          Read-only view of your full crypto portfolio across exchanges
+          and wallets. Backend pluggable — currently {data?.provider
+            ? <><strong>{data.provider}</strong></>
+            : "not configured"}. Refreshed live with a 5-minute Redis
+          cache. Add{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-xs">?fresh=1</code>
           {" "}to bust the cache.
         </p>
@@ -96,18 +99,43 @@ export default async function PortfolioPage({
 
       {botApiOnline && data && !data.configured && (
         <Card>
-          <CardContent className="pt-6 text-sm text-muted-foreground">
-            CoinStats integration not configured. Set{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-xs">
-              COINSTATS_API_KEY
-            </code>{" "}
-            and{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-xs">
-              COINSTATS_SHARE_TOKEN
-            </code>{" "}
-            in <code className="rounded bg-muted px-1 py-0.5 text-xs">.env</code>{" "}
-            on the deploy host. Get your share token from CoinStats →
-            portfolio → share.
+          <CardContent className="pt-6 text-sm text-muted-foreground space-y-3">
+            <p>
+              No portfolio provider configured. Set{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                PORTFOLIO_PROVIDER
+              </code>{" "}
+              in <code className="rounded bg-muted px-1 py-0.5 text-xs">.env</code>{" "}
+              on the deploy host to one of:
+            </p>
+            <ul className="ml-4 list-disc space-y-1">
+              <li>
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">rotki</code>
+                {" "}— self-hosted, free; needs{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  ROTKI_URL
+                </code>
+                {" "}+{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  ROTKI_USERNAME
+                </code>
+                {" "}+{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  ROTKI_PASSWORD
+                </code>
+              </li>
+              <li>
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">coinstats</code>
+                {" "}— SaaS, requires Degen plan; needs{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  COINSTATS_API_KEY
+                </code>
+                {" "}+{" "}
+                <code className="rounded bg-muted px-1 py-0.5 text-xs">
+                  COINSTATS_SHARE_TOKEN
+                </code>
+              </li>
+            </ul>
           </CardContent>
         </Card>
       )}

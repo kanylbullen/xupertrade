@@ -30,15 +30,26 @@ class Settings(BaseSettings):
     # vaults only exist on mainnet.
     vault_tracking_address: str = ""
 
-    # CoinStats portfolio integration (read-only). Powers the /portfolio
-    # dashboard page. Both fields required to enable; leave empty to
-    # disable the page. The share token is what uniquely identifies a
-    # portfolio — get it from CoinStats app → portfolio share menu.
-    # See https://coinstats.app/docs/sharetoken
+    # Portfolio provider selector. "" = disabled (default), "coinstats" =
+    # third-party paid, "rotki" = open-source self-hosted. The matching
+    # provider's connection vars (below) must also be filled in.
+    portfolio_provider: str = ""
+
+    # CoinStats portfolio (read-only). Requires Degen plan subscription.
+    # 8 credits per request — page caches 5 min in Redis. Get share token
+    # from CoinStats app → portfolio → share. See coinstats.app/docs/sharetoken
     coinstats_api_key: str = ""
     coinstats_share_token: str = ""
     # Optional: set if your portfolio is passcode-protected on CoinStats.
     coinstats_passcode: str = ""
+
+    # Rotki — open-source self-hosted portfolio tracker (https://rotki.com).
+    # Run a Rotki backend (e.g. via Docker) and point us at it. Auth is
+    # session-based: we POST username+password to log in, then read
+    # balances. Premium subscription not required for the local instance.
+    rotki_url: str = ""           # e.g. "http://rotki:5042"
+    rotki_username: str = ""
+    rotki_password: str = ""
 
     @property
     def is_paper(self) -> bool:

@@ -668,20 +668,24 @@ def _control_routes(
         }})
 
     async def portfolio_coins(request: web.Request) -> web.Response:
-        """Return the user's CoinStats portfolio: holdings + P&L.
+        """Return the user's portfolio (holdings + P&L) from the configured
+        provider (CoinStats, Rotki, or none).
 
-        Auth-gated when API_KEY is set — the response includes coin
-        balances and dollar values which are personal data.
-
-        Cached in Redis for 5 minutes per credit-conscious access (CoinStats
-        charges 8 credits per call). The dashboard can pass `?fresh=1` to
-        bust the cache when the user explicitly wants to reload.
+        Auth-gated when API_KEY is set — responses include personal
+        balance data. Cached in Redis 5 min per credit / load conscious
+        access; `?fresh=1` busts the cache.
         """
         if (err := _require_auth(request)) is not None:
             return err
-        if not (settings.coinstats_api_key and settings.coinstats_share_token):
+
+        from dataclasses import asdict as _asdict
+        from hypertrade.portfolio.providers import get_provider
+
+        provider = get_provider()
+        if provider is None:
             return _cors({
                 "configured": False,
+                "provider": "",
                 "coins": [],
                 "total_value_usd": 0.0,
                 "total_pnl_24h_usd": 0.0,
@@ -690,10 +694,7 @@ def _control_routes(
                 "cached": False,
             })
 
-        from dataclasses import asdict as _asdict
-        from hypertrade.portfolio.coinstats import fetch_portfolio_coins
-
-        cache_key = "portfolio:coinstats:coins"
+        cache_key = f"portfolio:{provider.name}:coins"
         force_refresh = request.query.get("fresh") == "1"
 
         if not force_refresh:
@@ -708,15 +709,11 @@ def _control_routes(
                     # Fall through to fresh fetch if cache is corrupt
                     pass
 
-        snap = await fetch_portfolio_coins(
-            api_key=settings.coinstats_api_key,
-            share_token=settings.coinstats_share_token,
-            passcode=settings.coinstats_passcode,
-            include_risk_score=True,
-        )
+        snap = await provider.fetch_snapshot()
 
         payload = {
             "configured": True,
+            "provider": provider.name,
             "coins": [_asdict(c) for c in snap.coins],
             "total_value_usd": snap.total_value_usd,
             "total_pnl_24h_usd": snap.total_pnl_24h_usd,
