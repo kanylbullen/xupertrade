@@ -417,11 +417,13 @@ the change has any risk of regression.
 8. Push: git push -u origin <branch>
 9. Open PR: gh pr create --fill --base master
    Use a HEREDOC body with: ## Summary, ## Test plan, ## Notes for reviewer.
-10. Wait for GitHub Copilot's automated review to post.
+10. Wait for GitHub Copilot's automated review to post (~60s after open).
     - Read every comment Copilot leaves.
     - Address what's worth addressing (real bugs, security, clarity).
-    - Reply or push fixes; Copilot re-reviews on each push.
-11. After Copilot review is clean (or all comments resolved), merge:
+    - Reply inline (`gh api ...pulls/N/comments/<id>/replies`) and push
+      fixes. Copilot does NOT re-review on subsequent pushes — its only
+      pass is on initial PR open. Don't wait for a second review.
+11. After all Copilot comments are resolved (replied + fixed), merge:
     gh pr merge --squash --delete-branch
 12. Pull master locally; deploy to server with standard command.
 13. Verify (logs clean, dashboard correct, parity check).
@@ -482,16 +484,31 @@ description as the merged commit.
 ### Working with Copilot review
 
 GitHub Copilot's PR review (auto-enabled on this repo) posts within
-~60s of opening or pushing to a PR. Treat it as a pair-programmer:
+~60s of **opening** the PR. It does NOT re-review on subsequent
+pushes — its only pass is on initial open. Treat it as a one-shot
+pair-programmer:
 
-- **Real bugs** — fix immediately, push, Copilot re-reviews.
+- **Real bugs** — fix in a follow-up commit on the branch, push, then
+  reply inline with the fix-commit hash so the comment shows resolved.
 - **Style nits** — fix or dismiss with reasoning in a reply.
 - **Spurious flags** (e.g. "this could throw" on already-handled cases)
   — leave a one-line reply explaining; don't waste cycles arguing.
 - **Don't merge with unaddressed bug-flag comments** even if you
   disagree — at minimum reply explaining why you're proceeding.
 
-If Copilot finds nothing in 5 min, it's done — proceed to merge.
+If Copilot posts no comments within ~5 min of PR open, it's done —
+proceed to merge. After fixing comments and pushing, do NOT wait for a
+second review — there won't be one.
+
+Reply to a specific comment:
+```
+gh api -X POST repos/<owner>/<repo>/pulls/<N>/comments/<comment-id>/replies \
+  -f body="..."
+```
+List comment IDs:
+```
+gh api repos/<owner>/<repo>/pulls/<N>/comments --jq '.[] | {id, path, line}'
+```
 
 ### When to ask the user vs. just do it
 
