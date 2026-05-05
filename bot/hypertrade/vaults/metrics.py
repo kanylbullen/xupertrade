@@ -70,14 +70,19 @@ def _period_returns(points: list[NavPoint]) -> list[float]:
     pair of points. Drops any pair where the prior NAV was 0 (vault not
     seeded yet).
 
-    Series-level pnl-vs-NAV fallback: if EVERY point in `points` has a
-    non-None `pnl_cum`, use pnl deltas (flow-neutral). If ANY point is
-    missing pnl_cum (legacy rows from before the pnl-aware schema, or
-    HL points where pnlHistory didn't ship a matching timestamp), fall
-    back to NAV deltas across the whole series — flow-contaminated but
-    consistent. The two regimes are NEVER mixed in one series, because
-    a boundary pair (None → 1.7M) would compute a giant artificial
-    pnl_delta.
+    pnl-vs-NAV decision: if at least 2 points have a non-None `pnl_cum`,
+    use pnl deltas on JUST those points (drop the others). Cumulative
+    PnL makes this safe — a (point_t, point_t+k) pair captures the total
+    PnL earned over the gap, regardless of what happened to NAV in between.
+    If fewer than 2 points have pnl_cum, fall back to NAV deltas across
+    the whole series — flow-contaminated but consistent.
+
+    Why drop None points instead of forcing series-wide fallback:
+    real-world data has gaps (HL doesn't keep every historical point in
+    `allTime`, so our DB ends up with sparse NULLs for our own scan
+    timestamps that HL never re-shipped). Dropping the few NULLs lets
+    most metrics stay flow-neutral; series-wide fallback over-corrects
+    by giving up pnl-mode entirely as soon as any point is missing.
 
     Seed-phase trim must happen UPSTREAM (in `compute_metrics`), not here.
     Trimming inside `_period_returns` would re-trim every windowed slice
@@ -85,16 +90,21 @@ def _period_returns(points: list[NavPoint]) -> list[float]:
     180d Sharpe window if the vault has drawn down then recovered inside
     the window. Trim once on the full series, slice afterwards.
     """
-    has_pnl_everywhere = bool(points) and all(
-        p.pnl_cum is not None for p in points
-    )
+    points_with_pnl = [p for p in points if p.pnl_cum is not None]
+    if len(points_with_pnl) >= 2:
+        use_points = points_with_pnl
+        pnl_mode = True
+    else:
+        use_points = points
+        pnl_mode = False
+
     rets: list[float] = []
-    for prev, cur in zip(points[:-1], points[1:]):
+    for prev, cur in zip(use_points[:-1], use_points[1:]):
         if prev.nav <= 0:
             # Skip seed period — division would explode. Belt-and-braces
             # backstop in case the caller didn't trim.
             continue
-        if has_pnl_everywhere:
+        if pnl_mode:
             # mypy: pnl_cum can't be None inside this branch
             delta = cur.pnl_cum - prev.pnl_cum  # type: ignore[operator]
         else:
