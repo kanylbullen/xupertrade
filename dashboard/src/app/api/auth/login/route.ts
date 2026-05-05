@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   fetchAuthConfig,
+  getSessionSecret,
   signSession,
   newSessionPayload,
   COOKIE_OPTIONS,
@@ -51,8 +52,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "invalid-credentials" }, { status: 401 });
   }
 
+  const secret = await getSessionSecret(true);
+  if (!secret) {
+    // No session secret available — bot is unreachable or API_KEY isn't
+    // set on the dashboard. Don't issue a cookie that can't be verified.
+    return NextResponse.json(
+      { ok: false, error: "session-secret-unavailable" },
+      { status: 503 },
+    );
+  }
   const payload = newSessionPayload(username);
-  const cookieValue = signSession(payload, cfg.session_secret);
+  const cookieValue = signSession(payload, secret);
   const res = NextResponse.json({ ok: true });
   res.cookies.set(COOKIE_OPTIONS.name, cookieValue, {
     httpOnly: true,

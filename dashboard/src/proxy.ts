@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
   fetchAuthConfig,
+  getSessionSecret,
   verifySession,
   SESSION_COOKIE,
 } from "@/lib/auth";
@@ -31,7 +32,8 @@ export async function proxy(req: NextRequest) {
   if (cfg.mode === "disabled") return NextResponse.next();
 
   const cookie = req.cookies.get(SESSION_COOKIE)?.value;
-  const session = cookie ? verifySession(cookie, cfg.session_secret) : null;
+  const secret = await getSessionSecret();
+  const session = cookie && secret ? verifySession(cookie, secret) : null;
   if (session) return NextResponse.next();
 
   // Build the login redirect URL on the public hostname (PUBLIC_URL),

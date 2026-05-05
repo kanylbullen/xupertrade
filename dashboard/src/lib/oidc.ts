@@ -65,14 +65,9 @@ export async function getOidcConfig(): Promise<{
   const cfg = await fetchAuthConfig(true);
   if (!cfg.oidc_issuer || !cfg.oidc_client_id) return null;
 
-  // We need the client_secret too — but the public /api/auth/config endpoint
-  // strips it. So we fetch it directly from the bot's auth config endpoint
-  // which DOES include it (the bot's endpoint already returns session_secret;
-  // the dashboard is server-side and can hold the OIDC client secret too).
-  // But to keep secrets minimal in transit, we use a dedicated internal
-  // call. For now, the bot's public endpoint exposes everything except the
-  // bcrypt hash and oidc_client_secret. We need to add the secret to the
-  // payload — let's fetch it via a privileged endpoint instead.
+  // The public /api/auth/config endpoint deliberately strips client_secret
+  // (and session_secret too — both are fetched via API_KEY-gated bot
+  // endpoints so they never appear in publicly-readable responses).
   const secret = await fetchOidcSecret();
   if (!secret) return null;
 

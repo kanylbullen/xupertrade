@@ -9,9 +9,9 @@ import {
 } from "@/lib/oidc";
 import {
   COOKIE_OPTIONS,
+  getSessionSecret,
   newSessionPayload,
   signSession,
-  fetchAuthConfig,
 } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -68,9 +68,13 @@ export async function GET(req: Request) {
       "oidc-user",
   );
 
-  // Sign the session cookie using the same secret as basic auth
-  const authCfg = await fetchAuthConfig(true);
-  const sessionValue = signSession(newSessionPayload(sub), authCfg.session_secret);
+  // Sign the session cookie. Secret comes from the API_KEY-gated bot
+  // endpoint so it's never publicly exposed.
+  const secret = await getSessionSecret(true);
+  if (!secret) {
+    return loginError(url, "session-secret-unavailable");
+  }
+  const sessionValue = signSession(newSessionPayload(sub), secret);
 
   // Use PUBLIC_URL (or DASHBOARD_URL) as the base for the post-login
   // redirect so users land on the public hostname, not the docker

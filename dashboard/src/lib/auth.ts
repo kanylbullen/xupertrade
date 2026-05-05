@@ -22,7 +22,6 @@ export type AuthConfig = {
   oidc_issuer: string;
   oidc_client_id: string;
   oidc_scopes: string;
-  session_secret: string;
 };
 
 export type SessionPayload = {
@@ -82,8 +81,57 @@ function defaultConfig(): AuthConfig {
     oidc_issuer: "",
     oidc_client_id: "",
     oidc_scopes: "openid profile email",
-    session_secret: "",
   };
+}
+
+/** Fetch the dashboard's session-cookie HMAC secret from the bot.
+ *
+ *  The bot exposes this on an API_KEY-gated endpoint (NOT on the public
+ *  /api/auth/config) so an attacker who can hit the bot port can't mint
+ *  forged sessions. We cache for 60s in-process — secret rarely changes
+ *  and a stale value just invalidates active sessions.
+ *
+ *  Returns "" when the bot is unreachable or API_KEY isn't set on the
+ *  dashboard side (in dev / disabled-auth deploys), which causes
+ *  signSession/verifySession to refuse to operate — fail-closed. */
+let _secretCached: { at: number; value: string } | null = null;
+const SECRET_CACHE_TTL_MS = 60_000;
+
+export async function getSessionSecret(force = false): Promise<string> {
+  const now = Date.now();
+  if (!force && _secretCached && now - _secretCached.at < SECRET_CACHE_TTL_MS) {
+    return _secretCached.value;
+  }
+  const apiKey = process.env.API_KEY || "";
+  if (!apiKey) {
+    // No API_KEY → can't authenticate to the bot. Don't fall back to
+    // a public fetch: that's the bug we're fixing. Return empty so
+    // signSession/verifySession refuse to operate.
+    _secretCached = { at: now, value: "" };
+    return "";
+  }
+  try {
+    const res = await fetch(`${botUrlInternal()}/api/auth/session-secret`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(2000),
+      headers: { "X-Api-Key": apiKey },
+    });
+    if (!res.ok) {
+      _secretCached = { at: now, value: "" };
+      return "";
+    }
+    const j = (await res.json()) as { session_secret?: string };
+    const value = j.session_secret || "";
+    _secretCached = { at: now, value };
+    return value;
+  } catch {
+    _secretCached = { at: now, value: "" };
+    return "";
+  }
+}
+
+export function invalidateSessionSecretCache(): void {
+  _secretCached = null;
 }
 
 function b64urlEncode(buf: Buffer): string {

@@ -1,5 +1,6 @@
 """HTTP API for dashboard queries (indicator status + runtime control)."""
 
+import hmac
 import json
 import logging
 import os
@@ -33,11 +34,15 @@ def _cors(payload, status: int = 200) -> web.Response:
 
 
 def _require_auth(request: web.Request) -> web.Response | None:
-    """Returns 401 response if API key is configured and missing/wrong, else None."""
+    """Returns 401 response if API key is configured and missing/wrong, else None.
+
+    Uses `hmac.compare_digest` for constant-time comparison so the response
+    timing doesn't leak how many leading characters matched.
+    """
     if not settings.api_key:
         return None  # auth disabled
     provided = request.headers.get("X-Api-Key", "")
-    if provided != settings.api_key:
+    if not hmac.compare_digest(provided, settings.api_key):
         return _cors({"error": "Unauthorized"}, status=401)
     return None
 
@@ -138,8 +143,16 @@ def _control_routes(
 
     async def auth_get_config(_request: web.Request) -> web.Response:
         """Public — returns mode + non-secret OIDC fields. Never returns
-        password hash or client secret. The dashboard uses this to decide
-        whether to show the login screen and which provider to use."""
+        password hash, client secret, or session_secret. The dashboard
+        uses this to decide whether to show the login screen and which
+        provider to use.
+
+        SECURITY: do NOT add `session_secret` here. It's the HMAC key
+        the dashboard signs/verifies cookies with — leaking it to a
+        public endpoint lets anyone forge a valid session and walk past
+        proxy.ts. The dashboard fetches it server-side from
+        `/api/auth/session-secret` (API_KEY-gated).
+        """
         cfg = await control.get_auth_config()
         return _cors({
             "mode": cfg["mode"],
@@ -147,11 +160,16 @@ def _control_routes(
             "oidc_issuer": cfg["oidc_issuer"],
             "oidc_client_id": cfg["oidc_client_id"],
             "oidc_scopes": cfg["oidc_scopes"],
-            # Session secret is needed by the dashboard middleware to verify
-            # signed cookies. It's not a user-facing secret — losing it just
-            # invalidates active sessions.
-            "session_secret": await control.ensure_session_secret(),
         })
+
+    async def auth_get_session_secret(request: web.Request) -> web.Response:
+        """Return the dashboard's session-cookie HMAC key. API_KEY-gated
+        — only the dashboard's server-side render code should call this,
+        never the browser. Generates the secret on first call.
+        """
+        if (err := _require_auth(request)) is not None:
+            return err
+        return _cors({"session_secret": await control.ensure_session_secret()})
 
     async def tls_get_config(_request: web.Request) -> web.Response:
         """Public — returns mode + non-secret TLS fields. Never returns
@@ -707,6 +725,7 @@ def _control_routes(
     app.router.add_route("OPTIONS", "/api/tls/{tail:.*}", options_handler)
     app.router.add_get("/api/auth/config", auth_get_config)
     app.router.add_get("/api/auth/oidc-secret", auth_get_oidc_secret)
+    app.router.add_get("/api/auth/session-secret", auth_get_session_secret)
     app.router.add_post("/api/auth/verify", auth_verify_basic)
     app.router.add_post("/api/auth/configure", auth_configure)
     app.router.add_route("OPTIONS", "/api/auth/{tail:.*}", options_handler)
