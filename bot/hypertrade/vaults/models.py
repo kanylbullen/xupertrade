@@ -31,8 +31,16 @@ class VaultSummary:
 
 @dataclass
 class NavPoint:
+    """One sample of vault state at a point in time. `nav` is total
+    account value (deposits + withdrawals + cumulative pnl). `pnl_cum`
+    is the cumulative net PnL since vault inception. We store both so
+    period returns can be computed as `(pnl_cum_t - pnl_cum_{t-1}) /
+    nav_{t-1}` — flow-neutral, unlike NAV deltas which are contaminated
+    by deposits and withdrawals from other LPs."""
+
     timestamp: datetime
     nav: float
+    pnl_cum: float = 0.0
 
 
 @dataclass
@@ -51,6 +59,20 @@ class VaultDetails:
     relationship_type: str
     follower_count: int
     nav_history: list[NavPoint] = field(default_factory=list)
+
+
+@dataclass
+class FollowerState:
+    """Per-user view of a vault, from `vaultDetails(user=...)`."""
+
+    user_address: str
+    vault_address: str
+    vault_equity_usd: float       # current value of user's stake
+    unrealized_pnl_usd: float     # `pnl` in HL — currently-unrealized
+    all_time_pnl_usd: float       # `allTimePnl` — lifetime P&L on this stake
+    days_following: int
+    entered_at: datetime          # `vaultEntryTime`
+    locked_until: datetime | None
 
 
 @dataclass

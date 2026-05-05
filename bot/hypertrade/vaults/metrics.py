@@ -1,9 +1,25 @@
-"""Risk-adjusted metrics computed from a NAV (account value) series.
+"""Risk-adjusted metrics computed from a vault's (NAV, cumulative-PnL) series.
 
-Pure functions over `list[NavPoint]` — no I/O, no DB. Easy to unit-test
-on synthetic series. NAV resolution from HL is variable (~5-10 days for
-allTime view), so we treat each sample as one observation and infer the
-period from the timestamp gaps.
+Pure functions — no I/O, no DB. Easy to unit-test on synthetic series.
+
+**Why we compute returns from PnL deltas, not NAV deltas:**
+
+A vault's NAV (`accountValueHistory`) reflects deposits and withdrawals
+from every LP, not just trading P&L. If $1M is withdrawn, NAV drops
+without anyone losing money. If $1M is deposited, NAV rises without
+anyone earning anything. Sharpe / max-DD / ROI computed from raw NAV
+deltas are flow-contaminated.
+
+Cumulative PnL (`pnlHistory`) is pure strategy performance — it's the
+sum of realized + unrealized P&L since vault inception, independent of
+LP flows. Period return is `(pnl_cum_t - pnl_cum_{t-1}) / nav_{t-1}`,
+which is the correct % return for the period regardless of what other
+LPs did during it. Sharpe / DD / ROI are then computed from that
+return series.
+
+For the legacy case where pnl_cum is missing (e.g. our own NAV samples
+collected before the pnl-aware schema), we fall back to NAV deltas with
+a warning baked into the docstring.
 """
 
 from __future__ import annotations
@@ -12,6 +28,25 @@ import math
 from datetime import datetime, timedelta, timezone
 
 from hypertrade.vaults.models import NavPoint, VaultMetrics
+
+
+def _period_returns(points: list[NavPoint]) -> list[float]:
+    """Compute per-period returns from cumulative-PnL deltas, normalized
+    by NAV at the start of each period. Returns one value per consecutive
+    pair of points. Drops any pair where the prior NAV was 0 (vault not
+    seeded yet)."""
+    rets: list[float] = []
+    for prev, cur in zip(points[:-1], points[1:]):
+        if prev.nav <= 0:
+            # Skip the seed period — division would explode.
+            continue
+        pnl_delta = cur.pnl_cum - prev.pnl_cum
+        # Fallback for legacy points where pnl_cum is missing/zero
+        # everywhere: use NAV-delta normalized by start NAV.
+        if cur.pnl_cum == 0.0 and prev.pnl_cum == 0.0:
+            pnl_delta = cur.nav - prev.nav
+        rets.append(pnl_delta / prev.nav)
+    return rets
 
 
 def _bisect_at_or_before(
@@ -23,35 +58,52 @@ def _bisect_at_or_before(
 
 
 def _roi_over(points: list[NavPoint], days: int) -> float | None:
-    """Return ROI over the given lookback in *days*. None if insufficient
-    history. Computed against the latest sample."""
+    """Cumulative return over the lookback window, computed by chaining
+    period returns: (1+r1)*(1+r2)*...*(1+rn) - 1. Insensitive to LP
+    flows because each `r_i` is pnl-based, not NAV-based."""
     if len(points) < 2:
         return None
     latest = points[-1]
     target = latest.timestamp - timedelta(days=days)
-    earliest = points[0]
-    # Need at least `days` of history before "now".
-    if earliest.timestamp > target:
+    if points[0].timestamp > target:
+        # Need at least `days` of history to compute ROI(days)
         return None
     base = _bisect_at_or_before(points, target)
-    if base is None or base.nav <= 0:
+    if base is None:
         return None
-    return (latest.nav - base.nav) / base.nav
+    window = [p for p in points if p.timestamp >= base.timestamp]
+    if len(window) < 2:
+        return None
+    rets = _period_returns(window)
+    if not rets:
+        return None
+    cum = 1.0
+    for r in rets:
+        cum *= 1.0 + r
+    return cum - 1.0
 
 
 def max_drawdown(points: list[NavPoint]) -> float | None:
-    """Return the worst peak-to-trough drawdown as a positive fraction.
-    e.g. 0.32 means the vault dropped 32% from a prior peak. None when
-    there isn't enough data to form a peak-trough pair."""
+    """Worst peak-to-trough drawdown of the cumulative return curve.
+
+    Builds the cumulative-return curve from period returns (flow-neutral)
+    and finds the largest peak-to-trough drop. Returns the drop as a
+    positive fraction (e.g. 0.32 = 32%). None when there isn't enough
+    data."""
     if len(points) < 2:
         return None
-    peak = points[0].nav
+    rets = _period_returns(points)
+    if not rets:
+        return None
+    cum = 1.0
+    peak = 1.0
     worst = 0.0
-    for p in points:
-        if p.nav > peak:
-            peak = p.nav
+    for r in rets:
+        cum *= 1.0 + r
+        if cum > peak:
+            peak = cum
         if peak > 0:
-            dd = (peak - p.nav) / peak
+            dd = (peak - cum) / peak
             if dd > worst:
                 worst = dd
     return worst
@@ -81,7 +133,8 @@ def sharpe(
     window_days: int | None = None,
     risk_free_rate: float = 0.0,
 ) -> float | None:
-    """Annualized Sharpe ratio computed from per-period returns.
+    """Annualized Sharpe ratio computed from per-period flow-neutral
+    returns.
 
     `window_days` slices to the last N days of samples (None = all).
     Risk-free is annual; subtracted from the annualized mean return.
@@ -96,11 +149,7 @@ def sharpe(
     if len(series) < 4:
         return None
 
-    rets: list[float] = []
-    for prev, cur in zip(series[:-1], series[1:]):
-        if prev.nav <= 0:
-            continue
-        rets.append((cur.nav - prev.nav) / prev.nav)
+    rets = _period_returns(series)
     if len(rets) < 3:
         return None
 
@@ -117,7 +166,8 @@ def sharpe(
 
 
 def compute_metrics(points: list[NavPoint]) -> VaultMetrics:
-    """One-shot: compute every metric we care about from a NAV series."""
+    """One-shot: compute every metric we care about from a vault's
+    (NAV, PnL) series."""
     return VaultMetrics(
         roi_7d=_roi_over(points, 7),
         roi_30d=_roi_over(points, 30),

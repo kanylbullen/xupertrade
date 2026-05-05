@@ -524,26 +524,30 @@ def _control_routes(
                 except (json.JSONDecodeError, TypeError):
                     breakdown = []
             failed = [r["name"] for r in breakdown if not r.get("passed", True)]
-            pnl_usd = e.last_seen_equity_usd - e.first_seen_equity_usd
-            pnl_pct = (
-                pnl_usd / e.first_seen_equity_usd
-                if e.first_seen_equity_usd > 0 else None
+            # Cost basis ≈ current equity − unrealized P&L. (Actual on-chain
+            # cost basis would need scraping deposit receipts.)
+            cost_basis_usd = e.vault_equity_usd - e.unrealized_pnl_usd
+            all_time_pnl_pct = (
+                e.all_time_pnl_usd / cost_basis_usd
+                if cost_basis_usd > 0 else None
             )
-            total += e.last_seen_equity_usd
+            total += e.vault_equity_usd
             positions.append({
                 "vault_address": e.vault_address,
                 "vault_name": vault.name if vault else None,
                 "leader_address": vault.leader_address if vault else None,
-                "first_seen_at": (
-                    e.first_seen_at.isoformat() if e.first_seen_at else None
+                "vault_equity_usd": e.vault_equity_usd,
+                "unrealized_pnl_usd": e.unrealized_pnl_usd,
+                "all_time_pnl_usd": e.all_time_pnl_usd,
+                "all_time_pnl_pct": all_time_pnl_pct,
+                "cost_basis_usd": cost_basis_usd,
+                "days_following": e.days_following,
+                "entered_at": (
+                    e.entered_at.isoformat() if e.entered_at else None
                 ),
-                "first_seen_equity_usd": e.first_seen_equity_usd,
                 "last_seen_at": (
                     e.last_seen_at.isoformat() if e.last_seen_at else None
                 ),
-                "last_seen_equity_usd": e.last_seen_equity_usd,
-                "pnl_usd": pnl_usd,
-                "pnl_pct": pnl_pct,
                 "locked_until": (
                     e.locked_until.isoformat() if e.locked_until else None
                 ),
@@ -558,9 +562,11 @@ def _control_routes(
                     snap.snapshot_at.isoformat() if snap and snap.snapshot_at else None
                 ),
             })
-        # Sort by P&L percent desc so winners surface first.
+        # Sort by all-time P&L percent desc so best performers surface first.
         positions.sort(
-            key=lambda p: (p["pnl_pct"] if p["pnl_pct"] is not None else 0.0),
+            key=lambda p: (
+                p["all_time_pnl_pct"] if p["all_time_pnl_pct"] is not None else 0.0
+            ),
             reverse=True,
         )
         return _cors({

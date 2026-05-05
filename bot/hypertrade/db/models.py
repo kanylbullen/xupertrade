@@ -269,13 +269,11 @@ class VaultSnapshot(Base):
 
 
 class UserVaultEntry(Base):
-    """The user's stake in a HyperLiquid vault. One row per vault we've ever
-    seen them deposit into. Updated daily by the user-position poller.
-
-    Tracks first-seen equity (used as the cost basis for a rough P&L since
-    we lack actual deposit-time receipts), last-seen equity, and lockup.
-    Composite PK on (user_address, vault_address) so exiting+re-entering
-    a vault refreshes the same row.
+    """The user's stake in a HyperLiquid vault. Composite PK on
+    (user_address, vault_address). Refreshed daily from HL's
+    `vaultDetails.followerState`, which is the source of truth for
+    "what is my position worth?" — no need to track first-seen / last-seen
+    diffs ourselves since HL gives us entry time + lifetime P&L directly.
     """
 
     __tablename__ = "user_vault_entries"
@@ -286,28 +284,37 @@ class UserVaultEntry(Base):
         ForeignKey("vaults.address", ondelete="CASCADE"),
         primary_key=True,
     )
-    first_seen_at = Column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-    first_seen_equity_usd = Column(Float, nullable=False)
+    # Current value of the user's stake (HL's `vaultEquity`).
+    vault_equity_usd = Column(Float, nullable=False, default=0.0)
+    # Currently-unrealized P&L on this stake (HL's `pnl`).
+    unrealized_pnl_usd = Column(Float, nullable=False, default=0.0)
+    # Lifetime P&L on this stake including any realized portion (HL's
+    # `allTimePnl`). This is what the user actually cares about for
+    # "have I made money on this vault?".
+    all_time_pnl_usd = Column(Float, nullable=False, default=0.0)
+    # When the user first followed the vault (HL's `vaultEntryTime`).
+    entered_at = Column(DateTime(timezone=True), nullable=True)
+    days_following = Column(Integer, nullable=False, default=0)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
     last_seen_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
-    last_seen_equity_usd = Column(Float, nullable=False)
-    locked_until = Column(DateTime(timezone=True), nullable=True)
-    # When equity drops to ~0 (full withdrawal) we keep the row but mark
-    # it exited so the dashboard can show historical positions. A subsequent
-    # deposit clears this and updates first_seen_*.
+    # Equity ≈ 0 (full withdrawal) → marked exited; row kept for history.
     exited_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class VaultNavPoint(Base):
-    """One historical NAV observation. Backfilled from HL on first encounter,
-    appended daily thereafter. Composite PK = (address, timestamp)."""
+    """One historical NAV+PnL observation. Backfilled from HL on first
+    encounter, appended daily thereafter. Composite PK = (address, ts).
+
+    `nav` is total account value (deposits + withdrawals + cumulative
+    pnl). `pnl_cum` is cumulative net PnL since vault inception. We
+    store both so period returns can be computed as `(pnl_cum_t -
+    pnl_cum_{t-1}) / nav_{t-1}` — flow-neutral, unlike NAV deltas.
+    Pre-pnl-aware rows have pnl_cum=0 and the metric layer falls back
+    to NAV-delta returns for them."""
 
     __tablename__ = "vault_nav_history"
 
@@ -318,6 +325,7 @@ class VaultNavPoint(Base):
     )
     timestamp = Column(DateTime(timezone=True), primary_key=True)
     nav = Column(Float, nullable=False)
+    pnl_cum = Column(Float, nullable=False, default=0.0)
 
 
 class StrategyConfig(Base):

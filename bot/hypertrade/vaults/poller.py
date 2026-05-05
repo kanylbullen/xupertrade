@@ -23,10 +23,16 @@ from hypertrade.vaults.api import (
     fetch_details,
     fetch_details_batch,
     fetch_user_vault_equities,
+    fetch_user_vault_state,
 )
 from hypertrade.vaults.filters import FilterConfig, coarse_prefilter, evaluate
 from hypertrade.vaults.metrics import compute_metrics
-from hypertrade.vaults.models import NavPoint, VaultSnapshot
+from hypertrade.vaults.models import (
+    NavPoint,
+    VaultDetails,
+    VaultSnapshot,
+    VaultSummary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +40,30 @@ logger = logging.getLogger(__name__)
 def _utc_day_bucket(now: datetime) -> datetime:
     """Truncate to UTC midnight so re-runs in the same day update one row."""
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _synthesize_summary(address: str, det: VaultDetails) -> VaultSummary:
+    """Build a VaultSummary from per-vault details when the vault isn't
+    in the catalogue (closed in the last 24h, or fell off for some
+    reason). Approximates `tvl_usd` as the latest NAV and `created_at`
+    as the timestamp of the first NAV sample. The full filter then runs
+    against this synthetic summary — a vault scored honestly even when
+    we don't have catalogue context."""
+    nav_history = det.nav_history or []
+    tvl_usd = nav_history[-1].nav if nav_history else 0.0
+    created_at = (
+        nav_history[0].timestamp if nav_history else datetime.now(timezone.utc)
+    )
+    return VaultSummary(
+        address=address,
+        name=det.name,
+        leader_address=det.leader_address,
+        tvl_usd=tvl_usd,
+        is_closed=det.is_closed,
+        relationship_type=det.relationship_type,
+        created_at=created_at,
+        apr=det.apr,
+    )
 
 
 class VaultPoller:
@@ -98,64 +128,11 @@ class VaultPoller:
             if det is None:
                 continue
 
-            # Persist NAV history first so compute_metrics sees the merged
-            # series — own-collected daily snapshots augment HL's sparse
-            # ~5-10d allTime view over time.
-            await self.repo.upsert_vault(
-                address=summary.address,
-                name=summary.name,
-                leader_address=summary.leader_address,
-                description=det.description,
-                created_at=summary.created_at,
-                profit_share_pct=det.leader_commission,
-                relationship_type=summary.relationship_type,
+            snap, verdict, previously_qualified = await self._score_and_save_vault(
+                summary, det, snapshot_at
             )
-            if det.nav_history:
-                await self.repo.append_nav_history(
-                    summary.address,
-                    [(p.timestamp, p.nav) for p in det.nav_history],
-                )
-
-            merged_history = await self._load_merged_history(summary.address, det.nav_history)
-            metrics = compute_metrics(merged_history)
-            # Replace the API-only history with the merged series so the rest
-            # of the loop (including event payload) reflects what we scored on.
-            det.nav_history = merged_history
-            snap = VaultSnapshot(
-                summary=summary,
-                details=det,
-                metrics=metrics,
-                snapshot_at=snapshot_at,
-            )
-            verdict = evaluate(snap, self.config)
             if verdict.qualified:
                 qualified_count += 1
-
-            previously_qualified = await self._was_previously_qualified(summary.address)
-
-            await self.repo.save_vault_snapshot(
-                vault_address=summary.address,
-                snapshot_at=snapshot_at,
-                aum_usd=summary.tvl_usd,
-                nav=merged_history[-1].nav if merged_history else None,
-                leader_equity_pct=det.leader_fraction,
-                depositor_count=det.follower_count,
-                apr=det.apr,
-                age_days=summary.age_days,
-                roi_7d=metrics.roi_7d,
-                roi_30d=metrics.roi_30d,
-                roi_90d=metrics.roi_90d,
-                roi_180d=metrics.roi_180d,
-                roi_365d=metrics.roi_365d,
-                max_drawdown_pct=metrics.max_drawdown_pct,
-                sharpe_180d=metrics.sharpe_180d,
-                qualified=verdict.qualified,
-                filter_breakdown_json=json.dumps(
-                    [asdict(r) for r in verdict.breakdown]
-                ),
-                allow_deposits=det.allow_deposits,
-                is_closed=det.is_closed,
-            )
 
             if verdict.qualified and not previously_qualified:
                 new_qualified.append((summary.address, summary.name, snap))
@@ -197,13 +174,19 @@ class VaultPoller:
                 )
 
         # Track the user's own vault deposits if a tracking address is set.
-        # Done after the main scan so any user-held vault that's already in
-        # `vaults` has fresh metadata; vaults the user holds that AREN'T
-        # in our candidates get on-demand vaultDetails fetched.
+        # Done after the main scan so user-held vaults that ARE candidates
+        # already have fresh snapshots; held vaults that AREN'T candidates
+        # get scored on-demand here so the dashboard verdicts cover all
+        # 100% of held positions.
         user_positions = 0
         if self.track_user_address:
             try:
-                user_positions = await self._poll_user_positions()
+                catalog_by_addr = {s.address: s for s in catalog}
+                user_positions = await self._poll_user_positions(
+                    catalog_by_addr=catalog_by_addr,
+                    already_scored=candidate_addresses,
+                    snapshot_at=snapshot_at,
+                )
             except Exception:
                 logger.exception("vault poller: user-position poll failed")
 
@@ -230,17 +213,20 @@ class VaultPoller:
             "elapsed_s": elapsed,
         }
 
-    async def _poll_user_positions(self) -> int:
-        """Refresh `user_vault_entries` from HL's userVaultEquities.
+    async def _poll_user_positions(
+        self,
+        *,
+        catalog_by_addr: dict[str, VaultSummary],
+        already_scored: set[str],
+        snapshot_at: datetime,
+    ) -> int:
+        """Refresh `user_vault_entries` from HL's vaultDetails(user=...)
+        and score any held vault that didn't pass coarse pre-filter so
+        the dashboard verdicts cover ALL held positions, not just the ones
+        that happened to land in the main scan candidate set.
 
-        For any vault the user holds that's NOT already in our `vaults`
-        table, fetch its details on-demand so the dashboard has metadata
-        + scoring even for vaults that don't pass the coarse pre-filter
-        (small AUM, young, fee too high — user can hold them anyway).
-
-        Reuses one aiohttp ClientSession across the equities call and
-        every per-vault details fetch so we don't create separate
-        connector pools.
+        Pulls each held vault's details + per-user followerState in one
+        round trip. Reuses one aiohttp ClientSession across all calls.
         """
         async with aiohttp.ClientSession() as session:
             equities = await fetch_user_vault_equities(
@@ -253,75 +239,143 @@ class VaultPoller:
                 addr = str(entry.get("vaultAddress") or "").lower()
                 if not addr:
                     continue
-                try:
-                    equity = float(entry.get("equity") or 0.0)
-                except (TypeError, ValueError):
-                    equity = 0.0
-                locked_ms = entry.get("lockedUntilTimestamp")
-                locked_until = None
-                if locked_ms:
+
+                # One vaultDetails call gets us BOTH the rich follower state
+                # (current equity, unrealized + all-time PnL, entry time,
+                # lockup) AND the vault payload we need to score it.
+                det, follower = await fetch_user_vault_state(
+                    self.track_user_address, addr, session
+                )
+
+                # Persist the user's stake regardless of whether scoring
+                # succeeds — staleness is worse than a missing verdict.
+                if follower is not None:
                     try:
-                        locked_until = datetime.fromtimestamp(
-                            float(locked_ms) / 1000.0, tz=timezone.utc
+                        await self.repo.upsert_user_vault_entry(
+                            user_address=self.track_user_address,
+                            vault_address=addr,
+                            vault_equity_usd=follower.vault_equity_usd,
+                            unrealized_pnl_usd=follower.unrealized_pnl_usd,
+                            all_time_pnl_usd=follower.all_time_pnl_usd,
+                            days_following=follower.days_following,
+                            entered_at=follower.entered_at,
+                            locked_until=follower.locked_until,
                         )
-                    except (TypeError, ValueError):
-                        locked_until = None
-
-                # Make sure we have metadata for this vault — user can hold
-                # vaults that fail our coarse filter, and we still want to
-                # show name/leader/age on the dashboard.
-                vault = await self.repo.get_vault(addr)
-                if vault is None:
-                    det = await fetch_details(addr, session)
-                    if det is not None:
-                        await self.repo.upsert_vault(
-                            address=det.address,
-                            name=det.name,
-                            leader_address=det.leader_address,
-                            description=det.description,
-                            # We don't have catalogue createTimeMillis
-                            # without a catalog scan, so leave it None
-                            # rather than fabricate. The next daily
-                            # catalog scan will fill it in if visible.
-                            created_at=None,
-                            profit_share_pct=det.leader_commission,
-                            relationship_type=det.relationship_type,
+                    except Exception:
+                        logger.exception(
+                            "vault poller: upsert_user_vault_entry(%s) failed",
+                            addr,
                         )
-                        if det.nav_history:
-                            await self.repo.append_nav_history(
-                                addr,
-                                [(p.timestamp, p.nav) for p in det.nav_history],
-                            )
 
+                # Skip scoring for vaults we already scored in the main
+                # loop — would just rewrite the same snapshot row.
+                if addr in already_scored or det is None:
+                    continue
+
+                # Score this off-catalog vault so the dashboard can show
+                # ✓/✗ instead of "?". Use the catalogue summary if we
+                # have one (same vault address but failed coarse filter
+                # for e.g. AUM band); otherwise synthesize a summary
+                # from details.
+                summary = catalog_by_addr.get(addr) or _synthesize_summary(
+                    addr, det
+                )
                 try:
-                    await self.repo.upsert_user_vault_entry(
-                        user_address=self.track_user_address,
-                        vault_address=addr,
-                        equity_usd=equity,
-                        locked_until=locked_until,
-                    )
+                    await self._score_and_save_vault(summary, det, snapshot_at)
                 except Exception:
                     logger.exception(
-                        "vault poller: upsert_user_vault_entry(%s) failed",
-                        addr,
+                        "vault poller: scoring user-held %s failed", addr
                     )
         return len(equities)
+
+    async def _score_and_save_vault(
+        self,
+        summary: VaultSummary,
+        det: VaultDetails,
+        snapshot_at: datetime,
+    ):
+        """Persist vault metadata + NAV/PnL history, compute metrics on
+        the merged history, run the filter, write the snapshot. Returns
+        (snap, verdict, previously_qualified). Used by both the main
+        catalogue loop and the user-position scorer so vaults outside
+        the coarse pre-filter still get qualified/failed verdicts when
+        the user holds them.
+        """
+        await self.repo.upsert_vault(
+            address=summary.address,
+            name=summary.name,
+            leader_address=summary.leader_address,
+            description=det.description,
+            created_at=summary.created_at,
+            profit_share_pct=det.leader_commission,
+            relationship_type=summary.relationship_type,
+        )
+        if det.nav_history:
+            await self.repo.append_nav_history(
+                summary.address,
+                [(p.timestamp, p.nav, p.pnl_cum) for p in det.nav_history],
+            )
+
+        merged_history = await self._load_merged_history(
+            summary.address, det.nav_history
+        )
+        metrics = compute_metrics(merged_history)
+        det.nav_history = merged_history
+        snap = VaultSnapshot(
+            summary=summary,
+            details=det,
+            metrics=metrics,
+            snapshot_at=snapshot_at,
+        )
+        verdict = evaluate(snap, self.config)
+
+        previously_qualified = await self._was_previously_qualified(summary.address)
+
+        await self.repo.save_vault_snapshot(
+            vault_address=summary.address,
+            snapshot_at=snapshot_at,
+            aum_usd=summary.tvl_usd,
+            nav=merged_history[-1].nav if merged_history else None,
+            leader_equity_pct=det.leader_fraction,
+            depositor_count=det.follower_count,
+            apr=det.apr,
+            age_days=summary.age_days,
+            roi_7d=metrics.roi_7d,
+            roi_30d=metrics.roi_30d,
+            roi_90d=metrics.roi_90d,
+            roi_180d=metrics.roi_180d,
+            roi_365d=metrics.roi_365d,
+            max_drawdown_pct=metrics.max_drawdown_pct,
+            sharpe_180d=metrics.sharpe_180d,
+            qualified=verdict.qualified,
+            filter_breakdown_json=json.dumps(
+                [asdict(r) for r in verdict.breakdown]
+            ),
+            allow_deposits=det.allow_deposits,
+            is_closed=det.is_closed,
+        )
+        return snap, verdict, previously_qualified
 
     async def _load_merged_history(
         self, address: str, fresh: list[NavPoint]
     ) -> list[NavPoint]:
         """Combine HL's allTime samples with what we've appended to
-        `vault_nav_history` over time. Dedup by timestamp; sort ascending."""
+        `vault_nav_history` over time. Dedup by timestamp; sort ascending.
+        Pairs each NAV with its cumulative PnL when available."""
         try:
             stored = await self.repo.vault_nav_for(address)
         except Exception:
             logger.exception("vault poller: vault_nav_for(%s) failed", address)
             return fresh
-        merged: dict[datetime, float] = {p.timestamp: p.nav for p in stored}
+        merged: dict[datetime, tuple[float, float]] = {
+            p.timestamp: (p.nav, p.pnl_cum) for p in stored
+        }
         for p in fresh:
-            merged[p.timestamp] = p.nav
-        return [NavPoint(timestamp=ts, nav=nav)
-                for ts, nav in sorted(merged.items())]
+            merged[p.timestamp] = (p.nav, p.pnl_cum)
+        return [
+            NavPoint(timestamp=ts, nav=nav, pnl_cum=pnl_cum)
+            for ts, (nav, pnl_cum) in sorted(merged.items())
+        ]
 
     async def _emit_dropouts_for(
         self,
