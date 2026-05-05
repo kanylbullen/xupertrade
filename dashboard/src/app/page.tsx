@@ -90,8 +90,14 @@ export default async function OverviewPage({
   let positionRows: PositionRow[] = [];
   let positionsFromExchange = false;
 
+  // /api/positions is auth-gated when API_KEY is set on the bot. Forward
+  // the dashboard's API_KEY from server-side env so SSR doesn't 401 and
+  // silently degrade to stale DB positions.
+  const apiKey = process.env.API_KEY || "";
+  const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
+
   try {
-    const res = await fetch(`${botApiUrl}/api/positions`, { cache: "no-store" });
+    const res = await fetch(`${botApiUrl}/api/positions`, { cache: "no-store", headers: authHeaders });
     if (res.ok) {
       const data = await res.json() as { positions: ExchangePos[] };
 
