@@ -271,6 +271,24 @@ class BotControl:
                     pipe.set(key, val)
         await pipe.execute()
 
+    async def cache_get(self, key: str) -> str | None:
+        """Read a generic Redis cache key. Returns None on miss/error."""
+        if self._redis is None:
+            return None
+        try:
+            return await self._redis.get(key)
+        except Exception:
+            return None
+
+    async def cache_set(self, key: str, value: str, ttl_seconds: int) -> None:
+        """Write a generic Redis cache key with TTL. Silent on error."""
+        if self._redis is None:
+            return
+        try:
+            await self._redis.set(key, value, ex=ttl_seconds)
+        except Exception:
+            pass
+
     async def ensure_session_secret(self) -> str:
         """Generate session_secret if missing. Returns the current secret."""
         if self._redis is None:

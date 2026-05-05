@@ -667,6 +667,69 @@ def _control_routes(
             ],
         }})
 
+    async def portfolio_coins(request: web.Request) -> web.Response:
+        """Return the user's CoinStats portfolio: holdings + P&L.
+
+        Auth-gated when API_KEY is set — the response includes coin
+        balances and dollar values which are personal data.
+
+        Cached in Redis for 5 minutes per credit-conscious access (CoinStats
+        charges 8 credits per call). The dashboard can pass `?fresh=1` to
+        bust the cache when the user explicitly wants to reload.
+        """
+        if (err := _require_auth(request)) is not None:
+            return err
+        if not (settings.coinstats_api_key and settings.coinstats_share_token):
+            return _cors({
+                "configured": False,
+                "coins": [],
+                "total_value_usd": 0.0,
+                "total_pnl_24h_usd": 0.0,
+                "total_pnl_all_time_usd": 0.0,
+                "fetched_at": "",
+                "cached": False,
+            })
+
+        from dataclasses import asdict as _asdict
+        from hypertrade.portfolio.coinstats import fetch_portfolio_coins
+
+        cache_key = "portfolio:coinstats:coins"
+        force_refresh = request.query.get("fresh") == "1"
+
+        if not force_refresh:
+            cached = await control.cache_get(cache_key)
+            if cached:
+                try:
+                    payload = json.loads(cached)
+                    payload["cached"] = True
+                    payload["configured"] = True
+                    return _cors(payload)
+                except (json.JSONDecodeError, TypeError):
+                    # Fall through to fresh fetch if cache is corrupt
+                    pass
+
+        snap = await fetch_portfolio_coins(
+            api_key=settings.coinstats_api_key,
+            share_token=settings.coinstats_share_token,
+            passcode=settings.coinstats_passcode,
+            include_risk_score=True,
+        )
+
+        payload = {
+            "configured": True,
+            "coins": [_asdict(c) for c in snap.coins],
+            "total_value_usd": snap.total_value_usd,
+            "total_pnl_24h_usd": snap.total_pnl_24h_usd,
+            "total_pnl_all_time_usd": snap.total_pnl_all_time_usd,
+            "fetched_at": snap.fetched_at,
+            "cached": False,
+        }
+        # Only cache successful (non-empty) responses to avoid pinning a
+        # transient error for 5 minutes.
+        if snap.coins:
+            await control.cache_set(cache_key, json.dumps(payload), ttl_seconds=300)
+        return _cors(payload)
+
     async def vault_snapshots(request: web.Request) -> web.Response:
         repo: Repository | None = request.app.get("repo")
         address = request.match_info.get("address", "").lower()
@@ -702,6 +765,8 @@ def _control_routes(
     app.router.add_get("/api/vaults/{address}", vault_detail)
     app.router.add_get("/api/vaults/{address}/snapshots", vault_snapshots)
     app.router.add_route("OPTIONS", "/api/vaults/{tail:.*}", options_handler)
+    app.router.add_get("/api/portfolio/coins", portfolio_coins)
+    app.router.add_route("OPTIONS", "/api/portfolio/{tail:.*}", options_handler)
     app.router.add_get("/api/tls/config", tls_get_config)
     app.router.add_post("/api/tls/configure", tls_configure)
     app.router.add_route("OPTIONS", "/api/tls/{tail:.*}", options_handler)

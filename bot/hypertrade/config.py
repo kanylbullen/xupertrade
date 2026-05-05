@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     # vaults only exist on mainnet.
     vault_tracking_address: str = ""
 
+    # CoinStats portfolio integration (read-only). Powers the /portfolio
+    # dashboard page. Both fields required to enable; leave empty to
+    # disable the page. The share token is what uniquely identifies a
+    # portfolio — get it from CoinStats app → portfolio share menu.
+    # See https://coinstats.app/docs/sharetoken
+    coinstats_api_key: str = ""
+    coinstats_share_token: str = ""
+    # Optional: set if your portfolio is passcode-protected on CoinStats.
+    coinstats_passcode: str = ""
+
     @property
     def is_paper(self) -> bool:
         return self.exchange_mode == "paper"
