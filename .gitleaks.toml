@@ -30,7 +30,10 @@ regex = '''(?i)(CF|CLOUDFLARE)_(API_)?TOKEN[ =:]+["']?[A-Za-z0-9_-]{30,}'''
 [[rules]]
 id = "hardcoded-secret-assignment"
 description = "Hardcoded SECRET_KEY/API_KEY/PASSWORD/PRIVATE_KEY literal"
-regex = '''(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*=[ ]*["'][A-Za-z0-9_+/=-]{16,}["']'''
+# Matches: KEY = "value", KEY: "value" (YAML), KEY=value (dotenv).
+# `[:=]` covers both Python-style and YAML/compose syntax; quotes
+# optional so unquoted dotenv lines (`API_KEY=actualvalue`) also fire.
+regex = '''(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*[:=][ ]*["']?[A-Za-z0-9_+/=-]{16,}["']?'''
 
 # --- Allowlist (false positives) ---
 
