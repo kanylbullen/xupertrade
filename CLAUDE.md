@@ -392,47 +392,124 @@ The `paper` mode is the integration test — it runs the same code against a sim
 
 ## 7. Workflow per task
 
+**As of 2026-05-05, all new features go through a feature branch + PR
+flow.** Direct pushes to master are reserved for emergency fixes and
+trivial doc tweaks. Hotfixes can also branch (`fix/<short-name>`) when
+the change has any risk of regression.
+
+### Standard flow (feature work)
+
 ```
 1. State the task in one sentence. Update the backlog if new.
 2. Investigate (read code, logs, DB rows).
-3. Plan (subagent if non-trivial; otherwise inline).
-4. Implement.
-5. Test locally if possible (pytest, dry-run).
-6. Commit with descriptive message + Co-Authored-By line.
-7. Push to origin/master.
-8. Deploy to server with the standard command.
-9. Verify (logs clean, dashboard correct, parity check).
-10. Mark backlog item Done with commit hash.
+3. Plan — write to docs/plans/<feature>.md for non-trivial work.
+   Get user sign-off on the plan before coding.
+4. Create branch: git switch -c <type>/<short-name>
+   Types: feat | fix | docs | refactor | chore
+   Examples: feat/vault-scanner, fix/penguin-restart, docs/api-readme
+5. Implement on the branch.
+6. Test locally (pytest, type-check, dry-run if possible).
+7. Commit with Conventional-Commit-style message + Co-Authored-By line.
+   Multiple commits per branch are fine — they get squashed at merge.
+8. Push: git push -u origin <branch>
+9. Open PR: gh pr create --fill --base master
+   Use a HEREDOC body with: ## Summary, ## Test plan, ## Notes for reviewer.
+10. Wait for GitHub Copilot's automated review to post.
+    - Read every comment Copilot leaves.
+    - Address what's worth addressing (real bugs, security, clarity).
+    - Reply or push fixes; Copilot re-reviews on each push.
+11. After Copilot review is clean (or all comments resolved), merge:
+    gh pr merge --squash --delete-branch
+12. Pull master locally; deploy to server with standard command.
+13. Verify (logs clean, dashboard correct, parity check).
+14. Mark backlog item Done with the merged-PR's squash-commit hash.
+```
+
+### Direct-to-master allowed (skip the PR)
+
+Only these:
+- README typos, comment fixes, single-word doc edits.
+- Reverting a freshly-broken master commit (use `git revert`, not force-push).
+- True emergencies where the bot is down and waiting on review costs money.
+
+When unsure: branch + PR. The five extra minutes are negligible vs. the
+cost of a regression in master.
+
+### Branch naming
+
+- `feat/<short-name>` — new feature or signal
+- `fix/<short-name>` — bug fix
+- `docs/<short-name>` — docs-only changes (README, CLAUDE.md, plans)
+- `refactor/<short-name>` — internal restructuring, no behavior change
+- `chore/<short-name>` — dependency bumps, gitignore, CI
+
+Keep names short but specific: `feat/vault-scanner`, not
+`feat/new-vault-thing`. Use kebab-case.
+
+### PR description template
+
+```markdown
+## Summary
+- 1-3 bullets: what this changes and why
+
+## Test plan
+- [ ] pytest passes (97+ tests)
+- [ ] specific manual checks (e.g. "/hodl page renders new card")
+- [ ] deploy verified (or "deploy after merge")
+
+## Notes for reviewer
+- Anything subtle, intentional trade-offs, or follow-up work
 ```
 
 ### Commit message style
 
 ```
-<imperative one-line summary, <72 chars>
+<type>: <imperative summary, <72 chars>
 
-<paragraph explaining WHY, not what — the diff shows what>
+<paragraph explaining WHY — the diff shows what>
 
 Co-Authored-By: Claude <model> <noreply@anthropic.com>
 ```
 
+`<type>` matches the branch type prefix (feat/fix/docs/refactor/chore).
+Multiple commits on a branch don't need to be perfectly clean —
+`gh pr merge --squash` collapses them into one with the PR title +
+description as the merged commit.
+
+### Working with Copilot review
+
+GitHub Copilot's PR review (auto-enabled on this repo) posts within
+~60s of opening or pushing to a PR. Treat it as a pair-programmer:
+
+- **Real bugs** — fix immediately, push, Copilot re-reviews.
+- **Style nits** — fix or dismiss with reasoning in a reply.
+- **Spurious flags** (e.g. "this could throw" on already-handled cases)
+  — leave a one-line reply explaining; don't waste cycles arguing.
+- **Don't merge with unaddressed bug-flag comments** even if you
+  disagree — at minimum reply explaining why you're proceeding.
+
+If Copilot finds nothing in 5 min, it's done — proceed to merge.
+
 ### When to ask the user vs. just do it
 
-**Just do it:**
+**Just do it (still requires PR):**
 - Code fixes, refactors, new tests.
 - Adding logging, retry logic, reconcile improvements.
 - Updating docs, `.env.example`, README.
-- Routine commits + deploys.
+- New HODL signals or features that fit existing architecture.
 - Recommending strategy disable based on evidence.
 
-**Ask first:**
+**Ask first (and write a plan in `docs/plans/`):**
 - Anything that modifies production DB rows beyond the migration tooling.
 - Disabling a strategy in live config (recommend, then ask).
 - Sending real funds, mainnet trading.
 - `git reset --hard` on shared branches, force-push.
 - Changing the architecture in a way that touches >5 files.
 - Removing strategies, columns, or endpoints (vs. deprecating).
+- New features that don't fit existing architecture (e.g. vault scanner —
+  sit between exchange/ and hodl/).
 
-When in doubt, write the change as a draft commit on a branch and surface it for review instead of pushing to master.
+When in doubt, write the plan first and surface it for review.
 
 ---
 
