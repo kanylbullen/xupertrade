@@ -170,6 +170,30 @@ def build_internal_https_config(domain: str | None = None) -> dict:
 build_http_only_config = build_internal_https_config
 
 
+async def push_persisted_config(control) -> tuple[bool, str]:
+    """Build the right Caddy config from the BotControl-persisted TLS state
+    and POST it to Caddy. Centralizes the build-and-apply path so the API
+    handler (Options page) and the runner's startup re-apply share one
+    implementation.
+
+    Returns (ok, message). When TLS is disabled in state, falls back to
+    `build_internal_https_config` so Caddy still serves something on :443.
+    """
+    cfg = await control.get_tls_config()
+    if cfg.get("enabled"):
+        missing = [k for k in ("domain", "email", "cf_token") if not cfg.get(k)]
+        if missing:
+            return False, f"missing fields: {missing}"
+        new_config = build_https_config(
+            domain=cfg["domain"],
+            email=cfg["email"],
+            cf_token=cfg["cf_token"],
+        )
+    else:
+        new_config = build_internal_https_config(domain=cfg.get("domain") or None)
+    return await apply_config(new_config)
+
+
 async def apply_config(config: dict) -> tuple[bool, str]:
     """POST a config to Caddy. Returns (ok, message)."""
     try:

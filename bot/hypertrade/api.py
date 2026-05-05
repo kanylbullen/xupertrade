@@ -191,29 +191,11 @@ def _control_routes(
 
         from hypertrade.notify import caddy_admin
 
-        if cfg["enabled"]:
-            missing = [k for k in ("domain", "email", "cf_token") if not cfg.get(k)]
-            if missing:
-                return _cors(
-                    {"ok": False, "error": f"missing fields: {missing}"},
-                    status=400,
-                )
-            new_config = caddy_admin.build_https_config(
-                domain=cfg["domain"],
-                email=cfg["email"],
-                cf_token=cfg["cf_token"],
-            )
-        else:
-            # Pass the configured domain (if any) so the self-signed cert
-            # at least matches the hostname users hit. Without it Caddy
-            # has no subject to issue for and TLS handshake fails.
-            new_config = caddy_admin.build_internal_https_config(
-                domain=cfg.get("domain") or None,
-            )
-
-        ok, msg = await caddy_admin.apply_config(new_config)
+        ok, msg = await caddy_admin.push_persisted_config(control)
         if not ok:
-            return _cors({"ok": False, "error": msg}, status=502)
+            # missing-field validation is the only client-error case
+            status = 400 if msg.startswith("missing fields") else 502
+            return _cors({"ok": False, "error": msg}, status=status)
         return _cors({"ok": True, "enabled": cfg["enabled"], "domain": cfg["domain"]})
 
     async def auth_get_oidc_secret(request: web.Request) -> web.Response:
