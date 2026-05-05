@@ -198,7 +198,10 @@ async def fetch_user_vault_equities(
         ) as resp:
             resp.raise_for_status()
             data = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        # ValueError covers JSONDecodeError when HL returns an HTML error
+        # page or otherwise malformed body — keep the documented "[] on
+        # any error" contract.
         logger.warning("userVaultEquities(%s) failed: %s", user_address, exc)
         return []
     finally:

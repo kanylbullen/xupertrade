@@ -494,7 +494,14 @@ def _control_routes(
           - latest snapshot's qualified status + filter breakdown so the
             UI can flag vaults that have drifted out of qualification
           - lockup window if any
+
+        Auth-gated when API_KEY is set: the response includes a wallet
+        address and per-vault equities, which is identifying information
+        even though the underlying data is public on-chain. The dashboard
+        sends `X-Api-Key` from its server-side env when calling this.
         """
+        if (err := _require_auth(request)) is not None:
+            return err
         repo: Repository | None = request.app.get("repo")
         if repo is None or not settings.vault_tracking_address:
             return _cors({"address": "", "positions": [], "total_equity_usd": 0.0})

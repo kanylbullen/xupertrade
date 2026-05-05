@@ -73,13 +73,22 @@ export default async function VaultsPage({
   };
   const botApiUrl = botApiUrls[mode];
 
+  // /api/vaults/mine is auth-gated when API_KEY is set on the bot.
+  // We're server-side rendering so it's safe to read API_KEY from env
+  // and forward it. Without the key, only public /api/vaults works.
+  const apiKey = process.env.API_KEY || "";
+  const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
+
   let vaults: Vault[] = [];
   let myPositions: MyPositionsResponse | null = null;
   let botApiOnline = false;
   try {
     const [listRes, mineRes] = await Promise.all([
       fetch(`${botApiUrl}/api/vaults`, { cache: "no-store" }),
-      fetch(`${botApiUrl}/api/vaults/mine`, { cache: "no-store" }),
+      fetch(`${botApiUrl}/api/vaults/mine`, {
+        cache: "no-store",
+        headers: authHeaders,
+      }),
     ]);
     if (listRes.ok) {
       const data = (await listRes.json()) as { vaults: Vault[] };

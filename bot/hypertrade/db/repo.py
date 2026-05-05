@@ -556,10 +556,16 @@ class Repository:
         name: str,
         leader_address: str,
         description: str,
-        created_at: datetime,
+        created_at: datetime | None,
         profit_share_pct: float,
         relationship_type: str = "normal",
     ) -> None:
+        """Insert or update vault metadata.
+
+        `created_at` is allowed to be None when the vault is discovered
+        through user-position tracking (we have no `createTimeMillis`
+        without the catalogue scan); the next daily scan fills it in.
+        """
         async with self._session_factory() as session:
             row = await session.get(Vault, address)
             if row is None:
@@ -568,7 +574,10 @@ class Repository:
             row.name = name
             row.leader_address = leader_address
             row.description = description
-            row.created_at = created_at
+            # Don't overwrite a known created_at with None — the catalog
+            # scan is authoritative once we've seen it.
+            if created_at is not None or row.created_at is None:
+                row.created_at = created_at
             row.profit_share_pct = profit_share_pct
             row.relationship_type = relationship_type
             await session.commit()

@@ -237,12 +237,18 @@ class VaultPoller:
         table, fetch its details on-demand so the dashboard has metadata
         + scoring even for vaults that don't pass the coarse pre-filter
         (small AUM, young, fee too high — user can hold them anyway).
-        """
-        equities = await fetch_user_vault_equities(self.track_user_address)
-        if not equities:
-            return 0
 
+        Reuses one aiohttp ClientSession across the equities call and
+        every per-vault details fetch so we don't create separate
+        connector pools.
+        """
         async with aiohttp.ClientSession() as session:
+            equities = await fetch_user_vault_equities(
+                self.track_user_address, session=session
+            )
+            if not equities:
+                return 0
+
             for entry in equities:
                 addr = str(entry.get("vaultAddress") or "").lower()
                 if not addr:
