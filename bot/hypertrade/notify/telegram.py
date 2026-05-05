@@ -80,6 +80,24 @@ def _format_event(event: dict) -> Optional[str]:
     if etype == "error":
         msg = html.escape(str(event.get("message") or ""))
         return f"{prefix}⚠️ <b>ERROR</b> {event.get('strategy')}: {msg}"
+    if etype == "vault.qualified":
+        name = html.escape(str(event.get("name") or ""))
+        addr = str(event.get("address") or "")
+        return (
+            f"{prefix}🏦 <b>VAULT QUALIFIED</b> {name}\n"
+            f"<i>APR {float(event.get('apr', 0))*100:.0f}% · "
+            f"AUM ${float(event.get('aum_usd', 0)):,.0f} · "
+            f"Sharpe {float(event.get('sharpe_180d', 0)):.2f} · "
+            f"Mgr equity {float(event.get('leader_equity_pct', 0))*100:.1f}%</i>\n"
+            f"<code>{addr}</code>"
+        )
+    if etype == "vault.disqualified":
+        name = html.escape(str(event.get("name") or ""))
+        failed = html.escape(str(event.get("failed_filters") or ""))
+        return (
+            f"{prefix}⛔ <b>VAULT DROPPED</b> {name}\n"
+            f"<i>failed: {failed}</i>"
+        )
     return None
 
 

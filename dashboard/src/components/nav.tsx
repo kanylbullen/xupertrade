@@ -11,6 +11,7 @@ const links = [
   { href: "/trades", label: "Trades" },
   { href: "/strategies", label: "Strategies" },
   { href: "/hodl", label: "HODL" },
+  { href: "/vaults", label: "Vaults" },
   { href: "/options", label: "Options" },
   { href: "/status", label: "Status" },
 ];

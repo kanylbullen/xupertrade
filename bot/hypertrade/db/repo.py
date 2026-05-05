@@ -1,7 +1,7 @@
 """Database repository for trades and positions."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -16,6 +16,9 @@ from hypertrade.db.models import (
     ManualOnchainLevel,
     PositionRecord,
     Trade,
+    Vault,
+    VaultNavPoint,
+    VaultSnapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -541,6 +544,196 @@ class Repository:
                 .limit(limit)
             )
             return list(result.scalars().all())
+
+    # ------------------------------------------------------------------
+    # Vault scanner: catalog + daily snapshots + NAV history
+    # ------------------------------------------------------------------
+
+    async def upsert_vault(
+        self,
+        address: str,
+        name: str,
+        leader_address: str,
+        description: str,
+        created_at: datetime,
+        profit_share_pct: float,
+        relationship_type: str = "normal",
+    ) -> None:
+        async with self._session_factory() as session:
+            row = await session.get(Vault, address)
+            if row is None:
+                row = Vault(address=address, first_seen_at=datetime.now(timezone.utc))
+                session.add(row)
+            row.name = name
+            row.leader_address = leader_address
+            row.description = description
+            row.created_at = created_at
+            row.profit_share_pct = profit_share_pct
+            row.relationship_type = relationship_type
+            await session.commit()
+
+    async def append_nav_history(
+        self, vault_address: str, points: list[tuple[datetime, float]]
+    ) -> int:
+        """Insert NAV points, skipping duplicates on the composite PK.
+        Returns count of newly inserted rows."""
+        if not points:
+            return 0
+        async with self._session_factory() as session:
+            existing = await session.execute(
+                select(VaultNavPoint.timestamp).where(
+                    VaultNavPoint.vault_address == vault_address
+                )
+            )
+            seen = {ts for (ts,) in existing.all()}
+            inserted = 0
+            for ts, nav in points:
+                if ts in seen:
+                    continue
+                session.add(
+                    VaultNavPoint(vault_address=vault_address, timestamp=ts, nav=nav)
+                )
+                inserted += 1
+            if inserted:
+                await session.commit()
+            return inserted
+
+    async def save_vault_snapshot(
+        self,
+        vault_address: str,
+        snapshot_at: datetime,
+        aum_usd: float | None,
+        nav: float | None,
+        leader_equity_pct: float | None,
+        depositor_count: int | None,
+        apr: float | None,
+        age_days: int | None,
+        roi_7d: float | None,
+        roi_30d: float | None,
+        roi_90d: float | None,
+        roi_180d: float | None,
+        roi_365d: float | None,
+        max_drawdown_pct: float | None,
+        sharpe_180d: float | None,
+        qualified: bool,
+        filter_breakdown_json: str,
+        allow_deposits: bool,
+        is_closed: bool,
+    ) -> int:
+        async with self._session_factory() as session:
+            existing = await session.execute(
+                select(VaultSnapshot).where(
+                    VaultSnapshot.vault_address == vault_address,
+                    VaultSnapshot.snapshot_at == snapshot_at,
+                )
+            )
+            row = existing.scalar_one_or_none()
+            if row is None:
+                row = VaultSnapshot(
+                    vault_address=vault_address,
+                    snapshot_at=snapshot_at,
+                )
+                session.add(row)
+            row.aum_usd = aum_usd
+            row.nav = nav
+            row.leader_equity_pct = leader_equity_pct
+            row.depositor_count = depositor_count
+            row.apr = apr
+            row.age_days = age_days
+            row.roi_7d = roi_7d
+            row.roi_30d = roi_30d
+            row.roi_90d = roi_90d
+            row.roi_180d = roi_180d
+            row.roi_365d = roi_365d
+            row.max_drawdown_pct = max_drawdown_pct
+            row.sharpe_180d = sharpe_180d
+            row.qualified = qualified
+            row.filter_breakdown_json = filter_breakdown_json
+            row.allow_deposits = allow_deposits
+            row.is_closed = is_closed
+            await session.commit()
+            return int(row.id)
+
+    async def latest_vault_snapshot(
+        self, vault_address: str
+    ) -> VaultSnapshot | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(VaultSnapshot)
+                .where(VaultSnapshot.vault_address == vault_address)
+                .order_by(VaultSnapshot.snapshot_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def latest_qualified_vaults(
+        self, *, max_age_days: int = 7
+    ) -> list[tuple[Vault, VaultSnapshot]]:
+        """Return currently qualified vaults, joined with their latest snapshot.
+
+        "Latest snapshot" means the most recent row per vault — this gives
+        us the current verdict, not historical state. We cap the staleness
+        at `max_age_days` so a vault that hasn't been re-evaluated in over
+        a week (scanner outage, mode switch, etc.) is treated as unknown
+        rather than perpetually qualified. Default of 7 days survives a
+        few missed daily polls without going silent.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        async with self._session_factory() as session:
+            # Pick the newest snapshot per vault; filter to qualified later.
+            # Sorting by (vault, snapshot_at desc) lets us pluck the head row
+            # per vault in one pass.
+            result = await session.execute(
+                select(VaultSnapshot)
+                .order_by(
+                    VaultSnapshot.vault_address,
+                    VaultSnapshot.snapshot_at.desc(),
+                )
+            )
+            seen: set[str] = set()
+            picks: list[VaultSnapshot] = []
+            for snap in result.scalars().all():
+                if snap.vault_address in seen:
+                    continue
+                seen.add(snap.vault_address)
+                if not snap.qualified:
+                    continue
+                if snap.snapshot_at and snap.snapshot_at < cutoff:
+                    continue
+                picks.append(snap)
+            out: list[tuple[Vault, VaultSnapshot]] = []
+            for snap in picks:
+                vault = await session.get(Vault, snap.vault_address)
+                if vault is not None:
+                    out.append((vault, snap))
+            return out
+
+    async def vault_snapshots_for(
+        self, vault_address: str, limit: int = 90
+    ) -> list[VaultSnapshot]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(VaultSnapshot)
+                .where(VaultSnapshot.vault_address == vault_address)
+                .order_by(VaultSnapshot.snapshot_at.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def vault_nav_for(
+        self, vault_address: str
+    ) -> list[VaultNavPoint]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(VaultNavPoint)
+                .where(VaultNavPoint.vault_address == vault_address)
+                .order_by(VaultNavPoint.timestamp.asc())
+            )
+            return list(result.scalars().all())
+
+    async def get_vault(self, address: str) -> Vault | None:
+        async with self._session_factory() as session:
+            return await session.get(Vault, address)
 
     async def close(self) -> None:
         await self._engine.dispose()

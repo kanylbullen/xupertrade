@@ -1,5 +1,6 @@
 """HTTP API for dashboard queries (indicator status + runtime control)."""
 
+import json
 import logging
 import os
 import uuid
@@ -502,10 +503,132 @@ def _control_routes(
             "notes": p.notes,
         } for p in rows]})
 
+    async def vaults_list(request: web.Request) -> web.Response:
+        """Currently qualified vaults with latest snapshot metrics."""
+        repo: Repository | None = request.app.get("repo")
+        if repo is None:
+            return _cors({"vaults": []})
+        try:
+            rows = await repo.latest_qualified_vaults()
+        except Exception as e:
+            return _cors({"vaults": [], "error": str(e)}, status=500)
+        out = []
+        for vault, snap in rows:
+            out.append({
+                "address": vault.address,
+                "name": vault.name,
+                "leader_address": vault.leader_address,
+                "description": vault.description,
+                "created_at": vault.created_at.isoformat() if vault.created_at else None,
+                "profit_share_pct": vault.profit_share_pct,
+                "snapshot_at": snap.snapshot_at.isoformat() if snap.snapshot_at else None,
+                "aum_usd": snap.aum_usd,
+                "nav": snap.nav,
+                "leader_equity_pct": snap.leader_equity_pct,
+                "depositor_count": snap.depositor_count,
+                "apr": snap.apr,
+                "age_days": snap.age_days,
+                "roi_7d": snap.roi_7d,
+                "roi_30d": snap.roi_30d,
+                "roi_90d": snap.roi_90d,
+                "roi_180d": snap.roi_180d,
+                "roi_365d": snap.roi_365d,
+                "max_drawdown_pct": snap.max_drawdown_pct,
+                "sharpe_180d": snap.sharpe_180d,
+                "qualified": snap.qualified,
+                "allow_deposits": snap.allow_deposits,
+                "is_closed": snap.is_closed,
+            })
+        # Default sort: best Sharpe first.
+        out.sort(key=lambda v: v.get("sharpe_180d") or 0.0, reverse=True)
+        return _cors({"vaults": out})
+
+    async def vault_detail(request: web.Request) -> web.Response:
+        repo: Repository | None = request.app.get("repo")
+        address = request.match_info.get("address", "").lower()
+        if repo is None or not address:
+            return _cors({"vault": None}, status=404)
+        try:
+            vault = await repo.get_vault(address)
+            snap = await repo.latest_vault_snapshot(address) if vault else None
+            nav = await repo.vault_nav_for(address) if vault else []
+        except Exception as e:
+            return _cors({"vault": None, "error": str(e)}, status=500)
+        if vault is None:
+            return _cors({"vault": None}, status=404)
+        breakdown = []
+        if snap and snap.filter_breakdown_json:
+            try:
+                breakdown = json.loads(snap.filter_breakdown_json)
+            except (json.JSONDecodeError, TypeError):
+                breakdown = []
+        return _cors({"vault": {
+            "address": vault.address,
+            "name": vault.name,
+            "leader_address": vault.leader_address,
+            "description": vault.description,
+            "created_at": vault.created_at.isoformat() if vault.created_at else None,
+            "profit_share_pct": vault.profit_share_pct,
+            "latest_snapshot": None if snap is None else {
+                "snapshot_at": snap.snapshot_at.isoformat() if snap.snapshot_at else None,
+                "aum_usd": snap.aum_usd,
+                "nav": snap.nav,
+                "leader_equity_pct": snap.leader_equity_pct,
+                "depositor_count": snap.depositor_count,
+                "apr": snap.apr,
+                "age_days": snap.age_days,
+                "roi_7d": snap.roi_7d,
+                "roi_30d": snap.roi_30d,
+                "roi_90d": snap.roi_90d,
+                "roi_180d": snap.roi_180d,
+                "roi_365d": snap.roi_365d,
+                "max_drawdown_pct": snap.max_drawdown_pct,
+                "sharpe_180d": snap.sharpe_180d,
+                "qualified": snap.qualified,
+                "allow_deposits": snap.allow_deposits,
+                "is_closed": snap.is_closed,
+                "filter_breakdown": breakdown,
+            },
+            "nav_history": [
+                {"timestamp": p.timestamp.isoformat(), "nav": p.nav}
+                for p in nav
+            ],
+        }})
+
+    async def vault_snapshots(request: web.Request) -> web.Response:
+        repo: Repository | None = request.app.get("repo")
+        address = request.match_info.get("address", "").lower()
+        if repo is None or not address:
+            return _cors({"snapshots": []})
+        try:
+            limit = int(request.query.get("days", "30"))
+        except (ValueError, TypeError):
+            limit = 30
+        try:
+            rows = await repo.vault_snapshots_for(address, limit=limit)
+        except Exception as e:
+            return _cors({"snapshots": [], "error": str(e)}, status=500)
+        return _cors({"snapshots": [{
+            "snapshot_at": s.snapshot_at.isoformat() if s.snapshot_at else None,
+            "aum_usd": s.aum_usd,
+            "nav": s.nav,
+            "leader_equity_pct": s.leader_equity_pct,
+            "apr": s.apr,
+            "roi_90d": s.roi_90d,
+            "roi_180d": s.roi_180d,
+            "max_drawdown_pct": s.max_drawdown_pct,
+            "sharpe_180d": s.sharpe_180d,
+            "qualified": s.qualified,
+        } for s in rows]})
+
     app.router.add_get("/api/hodl/signals", hodl_signals)
     app.router.add_get("/api/hodl/levels", hodl_levels)
     app.router.add_get("/api/hodl/purchases", hodl_purchases)
     app.router.add_route("OPTIONS", "/api/hodl/{tail:.*}", options_handler)
+    app.router.add_get("/api/vaults", vaults_list)
+    app.router.add_get("/api/vaults/{address}", vault_detail)
+    app.router.add_get("/api/vaults/{address}/snapshots", vault_snapshots)
+    app.router.add_route("OPTIONS", "/api/vaults/{tail:.*}", options_handler)
     app.router.add_get("/api/tls/config", tls_get_config)
     app.router.add_post("/api/tls/configure", tls_configure)
     app.router.add_route("OPTIONS", "/api/tls/{tail:.*}", options_handler)

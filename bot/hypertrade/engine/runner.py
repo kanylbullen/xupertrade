@@ -45,6 +45,8 @@ class EngineRunner:
         self._last_funding_poll = 0.0
         self._last_hodl_check = 0.0
         self._last_hodl_zones: dict[str, str] = {}  # signal_name -> last verdict
+        self._last_vault_poll = 0.0
+        self._vault_poller = None  # lazy-init on first use
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart."""
@@ -159,6 +161,29 @@ class EngineRunner:
             except Exception:
                 logger.exception("HODL signal evaluation failed")
             self._last_hodl_check = time.time()
+
+        # Vault scanner: daily poll, owned by the testnet bot only. Both
+        # paper and testnet share the same Postgres in the default Compose
+        # setup, so running it in every container would duplicate the
+        # 14 MB catalogue fetch and risk emitting two `vault.qualified`
+        # alerts for the same state change. Telegram also lives on the
+        # testnet bot, so this puts the alerts at the same source as the
+        # poll. The /vaults dashboard reads from the shared DB regardless
+        # of which mode the user is browsing.
+        # On failure we DON'T advance _last_vault_poll, so a transient HL
+        # outage retries on the next tick instead of waiting a full day.
+        if (
+            self.repo
+            and settings.exchange_mode == "testnet"
+            and (time.time() - self._last_vault_poll) > 24 * 3600
+        ):
+            try:
+                await self._poll_vaults()
+                self._last_vault_poll = time.time()
+            except Exception:
+                logger.exception(
+                    "Vault scan failed — will retry on next tick"
+                )
 
         # Honor flat-all request before everything else
         if self.control:
@@ -654,6 +679,19 @@ class EngineRunner:
                 "[hodl/%s] verdict change: %r → %r (score %.2f)",
                 sig.name, prev, state.verdict, state.score,
             )
+
+    async def _poll_vaults(self) -> None:
+        """Run the daily HyperLiquid vault scanner. Lazy-init the poller
+        so we don't pay the import cost when scanning is disabled.
+        """
+        from hypertrade.vaults.poller import VaultPoller
+
+        if self._vault_poller is None:
+            self._vault_poller = VaultPoller(
+                repo=self.repo, event_bus=self.event_bus
+            )
+        result = await self._vault_poller.poll()
+        logger.info("vault scan result: %s", result)
 
     async def _poll_funding(self) -> None:
         """Pull HL funding events since the latest stored timestamp and
