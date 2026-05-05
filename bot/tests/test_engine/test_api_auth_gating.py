@@ -138,3 +138,88 @@ def test_require_auth_uses_constant_time_compare():
     assert "compare_digest" in src
     # And NOT the naive ==:
     assert "provided != settings.api_key" not in src
+
+
+# ---------------------------------------------------------------------------
+# fix/gate-getters: read-only endpoints that previously responded 200 to any
+# unauthenticated caller. These leak personal data (positions, vault
+# entries, HODL purchases), operational state (paused, disabled strategies,
+# leverage overrides), or the wallet address (hyperliquid diagnostic).
+# Once API_KEY is set on the bot, they MUST 401 without the header.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def app_with_all_routes(fake_control):
+    """Wires both the closure-bound handlers (via `_control_routes`) AND
+    the module-level handlers (positions, /strategies, indicator-status,
+    hyperliquid/diagnostic) so we can probe the full surface."""
+    app = web.Application()
+    api_module._control_routes(
+        app, control=fake_control, exchange=MagicMock(), strategies=[],
+    )
+    app.router.add_get("/api/positions", api_module.positions_handler)
+    app.router.add_get("/strategies", api_module.list_strategies_handler)
+    app.router.add_get("/api/indicator-status", api_module.indicator_status)
+    app.router.add_get(
+        "/api/hyperliquid/diagnostic", api_module.hyperliquid_diagnostic,
+    )
+    return app
+
+
+# Endpoints that hold personal data, operational config, or wallet info.
+# All MUST return 401 when API_KEY is set and no header is sent.
+GATED_GET_ENDPOINTS = [
+    "/api/positions",
+    "/strategies",
+    "/api/indicator-status",
+    "/api/hyperliquid/diagnostic",
+    "/api/control/state",
+    "/api/control/config",
+    "/api/control/heartbeat",
+    "/api/tls/config",
+    "/api/hodl/signals",
+    "/api/hodl/levels",
+    "/api/hodl/purchases",
+    "/api/vaults/mine",
+]
+
+
+@pytest.mark.parametrize("path", GATED_GET_ENDPOINTS)
+@pytest.mark.asyncio
+async def test_gated_get_endpoints_require_api_key(app_with_all_routes, path):
+    """Regression: each endpoint that exposes personal/operational data
+    must reject unauthenticated requests when API_KEY is set."""
+    with patch.object(api_module.settings, "api_key", "test-api-key-123"):
+        status, _ = await _get(app_with_all_routes, path)
+        assert status == 401, f"{path} returned {status}, expected 401"
+
+
+@pytest.mark.parametrize("path", GATED_GET_ENDPOINTS)
+@pytest.mark.asyncio
+async def test_gated_get_endpoints_reject_wrong_key(app_with_all_routes, path):
+    """Wrong key → 401 across the board."""
+    with patch.object(api_module.settings, "api_key", "test-api-key-123"):
+        status, _ = await _get(
+            app_with_all_routes, path, headers={"X-Api-Key": "wrong"},
+        )
+        assert status == 401, f"{path} returned {status}, expected 401"
+
+
+# Endpoints that MUST stay reachable without auth — the login page renders
+# before any session exists, /health is a Docker healthcheck, vault list
+# data is scraped from public HL endpoints, and /api/auth/verify IS the
+# auth mechanism.
+PUBLIC_ENDPOINTS = [
+    "/api/auth/config",
+]
+
+
+@pytest.mark.parametrize("path", PUBLIC_ENDPOINTS)
+@pytest.mark.asyncio
+async def test_public_endpoints_remain_open_with_api_key_set(
+    app_with_all_routes, path,
+):
+    """Sanity: gating PR didn't accidentally lock down the login page."""
+    with patch.object(api_module.settings, "api_key", "test-api-key-123"):
+        status, _ = await _get(app_with_all_routes, path)
+        assert status == 200, f"{path} returned {status}, expected 200"

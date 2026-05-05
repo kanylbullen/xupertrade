@@ -25,11 +25,16 @@ export default async function OptionsPage({
   };
   const botApiUrl = botApiUrls[mode];
 
+  // /strategies is auth-gated when API_KEY is set on the bot. Forward the
+  // dashboard's API_KEY from server-side env so SSR doesn't 401.
+  const apiKey = process.env.API_KEY || "";
+  const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
+
   type StrategyMeta = { name: string; symbol: string; timeframe: string };
   let strategies: StrategyMeta[] = [];
   let botApiOnline = false;
   try {
-    const res = await fetch(`${botApiUrl}/strategies`, { cache: "no-store" });
+    const res = await fetch(`${botApiUrl}/strategies`, { cache: "no-store", headers: authHeaders });
     if (res.ok) {
       const data = await res.json() as { strategies: StrategyMeta[] };
       strategies = data.strategies;
