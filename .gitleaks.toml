@@ -1,0 +1,57 @@
+# gitleaks config — used by .github/workflows/secret-scan.yml.
+#
+# Patterns mirror .githooks/pre-commit so a leak that the local hook
+# would have caught will also fail the CI scan. Update both together.
+
+# Inherit gitleaks' built-in baseline (covers AWS, GCP, Stripe, Slack,
+# generic high-entropy strings, etc.) so we only need to add the
+# project-specific extras here.
+[extend]
+useDefault = true
+
+# --- Project-specific rules ---
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token (digits:base64chars format)"
+regex = '''(?i)\b[0-9]{8,12}:[A-Za-z0-9_-]{30,}\b'''
+keywords = ["telegram", "bot_token", "TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN"]
+
+[[rules]]
+id = "hyperliquid-private-key"
+description = "Ethereum/HyperLiquid private key (0x + 64 hex)"
+regex = '''\b0x[a-fA-F0-9]{64}\b'''
+
+[[rules]]
+id = "cloudflare-api-token"
+description = "Cloudflare API token assigned to CF_TOKEN/CLOUDFLARE_API_TOKEN"
+regex = '''(?i)(CF|CLOUDFLARE)_(API_)?TOKEN[ =:]+["']?[A-Za-z0-9_-]{30,}'''
+
+[[rules]]
+id = "hardcoded-secret-assignment"
+description = "Hardcoded SECRET_KEY/API_KEY/PASSWORD/PRIVATE_KEY literal"
+regex = '''(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*=[ ]*["'][A-Za-z0-9_+/=-]{16,}["']'''
+
+# --- Allowlist (false positives) ---
+
+[allowlist]
+description = "Paths and patterns that should never trigger"
+paths = [
+  '''(.*?)\.lock$''',
+  '''(.*?)-lock\.json$''',
+  '''node_modules/''',
+  '''\.venv/''',
+  '''bot/data/historical/''',
+  '''\.gitleaks\.toml$''',  # this file contains the patterns themselves
+  '''\.githooks/pre-commit$''',  # ditto
+  '''CLAUDE\.md$''',  # documents the patterns + uses example tokens like "8639592584:AAGj…"
+]
+
+# Example/placeholder values used in docs and .env.example
+regexes = [
+  '''1234567890:your-actual-token-here''',
+  '''you@example\.com''',
+  '''0x[a-fA-F0-9]{64}.*example''',
+  '''\$DEPLOY_HOST''',
+  '''\$YOUR_DOMAIN''',
+]
