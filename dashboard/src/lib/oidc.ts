@@ -63,6 +63,7 @@ export async function getOidcConfig(): Promise<{
   cfg: AuthConfig;
 } | null> {
   const cfg = await fetchAuthConfig(true);
+  if (!cfg) return null;
   if (!cfg.oidc_issuer || !cfg.oidc_client_id) return null;
 
   // The public /api/auth/config endpoint deliberately strips client_secret

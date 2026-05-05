@@ -45,7 +45,7 @@ function botUrlInternal(): string {
 let _cached: { at: number; cfg: AuthConfig } | null = null;
 const CACHE_TTL_MS = 30_000;
 
-export async function fetchAuthConfig(force = false): Promise<AuthConfig> {
+export async function fetchAuthConfig(force = false): Promise<AuthConfig | null> {
   const now = Date.now();
   if (!force && _cached && now - _cached.at < CACHE_TTL_MS) {
     return _cached.cfg;
@@ -56,17 +56,17 @@ export async function fetchAuthConfig(force = false): Promise<AuthConfig> {
       signal: AbortSignal.timeout(2000),
     });
     if (!res.ok) {
-      const cfg = defaultConfig();
-      _cached = { at: now, cfg };
-      return cfg;
+      // SECURITY: do NOT cache a default-disabled config on failure.
+      // proxy.ts uses null as "fail closed" — caching disabled here
+      // would let an attacker who induces a transient bot outage walk
+      // past auth for the entire 30s cache TTL.
+      return null;
     }
     const cfg = (await res.json()) as AuthConfig;
     _cached = { at: now, cfg };
     return cfg;
   } catch {
-    const cfg = defaultConfig();
-    _cached = { at: now, cfg };
-    return cfg;
+    return null;
   }
 }
 

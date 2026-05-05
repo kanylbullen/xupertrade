@@ -12,6 +12,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   "oidc-state-invalid": "OIDC sign-in failed (invalid state)",
   "oidc-token-exchange-failed": "OIDC token exchange failed — check provider settings",
   "oidc-no-claims": "OIDC provider returned no identity claims",
+  "oidc-session-secret-unavailable":
+    "Sign-in succeeded but the dashboard couldn't fetch its cookie-signing key — check API_KEY is set on both bot and dashboard",
 };
 
 export default async function LoginPage({
@@ -26,14 +28,18 @@ export default async function LoginPage({
   const forceFallback = params.fallback === "basic";
 
   const cfg = await fetchAuthConfig(true);
-  const oidcConfigured =
-    cfg.mode === "oidc" && !!cfg.oidc_issuer && !!cfg.oidc_client_id;
-  const basicAvailable = cfg.basic_user_set;
+  // Bot unreachable → render the login form anyway with the error
+  // message so the user can see what's wrong rather than seeing a
+  // blank page or crash.
+  const oidcConfigured = !!cfg
+    && cfg.mode === "oidc" && !!cfg.oidc_issuer && !!cfg.oidc_client_id;
+  const basicAvailable = !!cfg && cfg.basic_user_set;
 
   // Show OIDC primary view only if mode=oidc, basic isn't being forced,
   // and OIDC is actually usable. Otherwise fall back to basic form.
   const showOidc =
-    cfg.mode === "oidc" && oidcConfigured && !forceFallback;
+    !!cfg && cfg.mode === "oidc" && oidcConfigured && !forceFallback;
+  const oidcIssuer = cfg?.oidc_issuer ?? "";
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
@@ -46,7 +52,7 @@ export default async function LoginPage({
         {showOidc ? (
           <>
             <OidcLogin
-              issuer={cfg.oidc_issuer}
+              issuer={oidcIssuer}
               next={next}
               error={error}
             />
@@ -63,7 +69,7 @@ export default async function LoginPage({
               </div>
             )}
           </>
-        ) : cfg.mode === "oidc" && !oidcConfigured ? (
+        ) : cfg?.mode === "oidc" && !oidcConfigured ? (
           <>
             <div className="space-y-4 rounded-lg border bg-card p-6">
               <p className="text-sm text-yellow-400">

@@ -25,8 +25,15 @@ export async function botFetch(req: Request, path: string, init?: RequestInit) {
   // Forward the dashboard's API_KEY as X-Api-Key so the bot's
   // _require_auth gate accepts our control-route POSTs (pause, flat-all,
   // strategy toggle, leverage, tls/configure, auth/configure, ...).
-  // Without this, those routes silently bypass auth on the bot side
-  // because the dashboard never sends the header — defeating the gate.
+  // Two failure modes if we DON'T send it:
+  //   • API_KEY set on the bot → those routes return 401 and the
+  //     dashboard buttons silently break.
+  //   • API_KEY empty on the bot (the .env.example default) → auth is
+  //     globally disabled bot-side and anyone reachable to the bot's
+  //     host-bound port can hit those endpoints unauthenticated.
+  // Forwarding is harmless in both cases (no-op when the bot has no
+  // API_KEY) and makes the gate actually effective once API_KEY is set.
+  //
   // Caller-supplied headers in `init.headers` take precedence so a
   // route can override (e.g. for endpoints that explicitly require a
   // different auth scheme).

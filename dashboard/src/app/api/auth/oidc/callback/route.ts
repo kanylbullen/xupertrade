@@ -69,10 +69,10 @@ export async function GET(req: Request) {
   );
 
   // Sign the session cookie. Secret comes from the API_KEY-gated bot
-  // endpoint so it's never publicly exposed.
+  // endpoint so it's never publicly exposed. Fail closed if unavailable.
   const secret = await getSessionSecret(true);
   if (!secret) {
-    return loginError(url, "session-secret-unavailable");
+    return loginError(url, "oidc-session-secret-unavailable");
   }
   const sessionValue = signSession(newSessionPayload(sub), secret);
 
