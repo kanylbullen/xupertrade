@@ -21,6 +21,10 @@ class FakeRepo:
         self.snapshots: list[dict] = []
         self.upserts: list[dict] = []
         self.nav_appends: list[tuple[str, int]] = []
+        self.nav_store: dict[str, list] = {}
+        # Vaults that should appear in `latest_qualified_vaults` — driven by
+        # the most recent save_vault_snapshot with qualified=True.
+        self._qualified_state: dict[str, dict] = {}
 
     async def latest_vault_snapshot(self, address: str):
         return self.latest.get(address)
@@ -30,15 +34,51 @@ class FakeRepo:
 
     async def append_nav_history(self, address, points):
         self.nav_appends.append((address, len(points)))
+        # Persist into the in-memory store so vault_nav_for() returns them.
+        existing = {p.timestamp: p.nav for p in self.nav_store.get(address, [])}
+        for ts, nav in points:
+            existing[ts] = nav
+        from hypertrade.vaults.models import NavPoint
+        self.nav_store[address] = sorted(
+            (NavPoint(timestamp=ts, nav=nav) for ts, nav in existing.items()),
+            key=lambda p: p.timestamp,
+        )
         return len(points)
+
+    async def vault_nav_for(self, address):
+        return self.nav_store.get(address, [])
 
     async def save_vault_snapshot(self, **kwargs):
         self.snapshots.append(kwargs)
         # Stash a tiny shim so the next poll sees previous state.
-        self.latest[kwargs["vault_address"]] = type(
-            "Snap", (), {"qualified": kwargs["qualified"]}
+        addr = kwargs["vault_address"]
+        snap = type(
+            "Snap",
+            (),
+            {
+                **{k: v for k, v in kwargs.items() if k != "vault_address"},
+                "qualified": kwargs["qualified"],
+            },
         )()
+        self.latest[addr] = snap
+        if kwargs["qualified"]:
+            self._qualified_state[addr] = kwargs
+        else:
+            self._qualified_state.pop(addr, None)
         return len(self.snapshots)
+
+    async def latest_qualified_vaults(self, *, max_age_days: int = 7):
+        out = []
+        for addr, kwargs in self._qualified_state.items():
+            vault = type("V", (), {"address": addr, "name": "Vault " + addr[-4:]})()
+            snap = type(
+                "Snap",
+                (),
+                {**{k: v for k, v in kwargs.items() if k != "vault_address"},
+                 "qualified": True},
+            )()
+            out.append((vault, snap))
+        return out
 
 
 class CapturingBus:
@@ -145,6 +185,45 @@ async def test_poller_disqualifies_on_state_flip():
         result = await poller.poll()
         assert result["newly_disqualified"] == 1
         assert any(e.type == "vault.disqualified" for e in bus.published)
+
+
+@pytest.mark.asyncio
+async def test_poller_disqualifies_when_vault_drops_from_coarse_set():
+    """A vault that previously qualified but no longer survives the coarse
+    pre-filter (e.g. closed, AUM fell out of band, dropped from catalogue)
+    must still get a disqualified snapshot + event — Copilot caught that the
+    original implementation silently kept it in /vaults until aged out."""
+    repo = FakeRepo()
+    bus = CapturingBus()
+    poller = VaultPoller(repo=repo, event_bus=bus, debounce_seconds=86400.0)
+
+    addr = "0x" + "44" * 20
+    summary = _summary(addr)
+    good = _details(addr, sharpe_friendly=True)
+
+    # Day 1: vault qualifies and is recorded.
+    with (
+        patch("hypertrade.vaults.poller.fetch_catalog", new=AsyncMock(return_value=[summary])),
+        patch("hypertrade.vaults.poller.fetch_details_batch", new=AsyncMock(return_value={addr: good})),
+    ):
+        await poller.poll()
+    assert any(e.type == "vault.qualified" for e in bus.published)
+
+    # Day 2: vault disappears from catalogue entirely (e.g. closed).
+    bus.published.clear()
+    poller._last_alert.clear()  # otherwise debounce silences day 2
+    with (
+        patch("hypertrade.vaults.poller.fetch_catalog", new=AsyncMock(return_value=[])),
+        patch("hypertrade.vaults.poller.fetch_details_batch", new=AsyncMock(return_value={})),
+    ):
+        result = await poller.poll()
+    assert any(e.type == "vault.disqualified" for e in bus.published)
+    # Confirm a disqualified row was actually persisted (so /vaults stops
+    # showing it).
+    assert any(
+        s["vault_address"] == addr and s["qualified"] is False
+        for s in repo.snapshots
+    )
 
 
 @pytest.mark.asyncio

@@ -85,7 +85,7 @@ services:
       TELEGRAM_ENABLED: "${TELEGRAM_ENABLED:-true}"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
-      TELEGRAM_EVENTS: "${TELEGRAM_EVENTS:-signal.generated,trade.executed,position.closed,error}"
+      TELEGRAM_EVENTS: "${TELEGRAM_EVENTS:-trade.executed,position.closed,error,vault.qualified,vault.disqualified}"
 
   bot-mainnet:
     <<: *bot-base

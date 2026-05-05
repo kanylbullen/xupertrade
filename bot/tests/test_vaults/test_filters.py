@@ -162,11 +162,19 @@ def test_coarse_prefilter_drops_obvious_misses():
         _summary(
             created_at=datetime.now(tz=timezone.utc) - timedelta(days=30)
         ),  # too young
-        _summary(apr=-0.5),  # negative apr
+        _summary(apr=-0.6),  # deeply negative apr
     ]
     out = coarse_prefilter(cands)
     assert len(out) == 1
     assert out[0].is_closed is False
+
+
+def test_coarse_prefilter_keeps_mildly_negative_apr():
+    # APR is short-window noise; vaults at -10% APR can still pass full
+    # filter via positive ROI 90/180d. Don't drop them at coarse stage.
+    cands = [_summary(apr=-0.10)]
+    out = coarse_prefilter(cands)
+    assert len(out) == 1
 
 
 def test_filter_config_overrides_apply():

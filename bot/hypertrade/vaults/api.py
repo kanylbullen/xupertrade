@@ -83,10 +83,22 @@ async def fetch_catalog(
     return out
 
 
+def _safe_float(v, default: float = 0.0) -> float:
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 async def fetch_details(
     address: str, session: aiohttp.ClientSession
 ) -> VaultDetails | None:
-    """POST vaultDetails for one vault. Returns None on miss/error."""
+    """POST vaultDetails for one vault. Returns None on miss/error.
+
+    The `vaultDetails` payload is undocumented and we've seen `null` returned
+    for invalid addresses. All field reads are guarded so a single bad
+    vault can't abort the whole `fetch_details_batch` gather.
+    """
     payload = {"type": "vaultDetails", "vaultAddress": address}
     try:
         async with session.post(
@@ -103,42 +115,66 @@ async def fetch_details(
     if data is None or not isinstance(data, dict):
         return None
 
-    nav_history: list[NavPoint] = []
-    for period, pdata in data.get("portfolio", []):
-        # `allTime` gives the longest series; that's what we want for
-        # Sharpe and max-DD over the lifetime.
-        if period != "allTime":
-            continue
-        for ts_ms, nav_str in pdata.get("accountValueHistory", []):
-            try:
-                nav_history.append(
-                    NavPoint(
-                        timestamp=datetime.fromtimestamp(
-                            ts_ms / 1000.0, tz=timezone.utc
-                        ),
-                        nav=float(nav_str),
-                    )
-                )
-            except (TypeError, ValueError):
+    try:
+        nav_history: list[NavPoint] = []
+        portfolio = data.get("portfolio") or []
+        if not isinstance(portfolio, list):
+            portfolio = []
+        for entry in portfolio:
+            if not (isinstance(entry, (list, tuple)) and len(entry) >= 2):
                 continue
-        break
+            period, pdata = entry[0], entry[1]
+            # `allTime` gives the longest series; that's what we want for
+            # Sharpe and max-DD over the lifetime.
+            if period != "allTime" or not isinstance(pdata, dict):
+                continue
+            for point in pdata.get("accountValueHistory", []) or []:
+                if not (isinstance(point, (list, tuple)) and len(point) >= 2):
+                    continue
+                ts_ms, nav_str = point[0], point[1]
+                try:
+                    nav_history.append(
+                        NavPoint(
+                            timestamp=datetime.fromtimestamp(
+                                float(ts_ms) / 1000.0, tz=timezone.utc
+                            ),
+                            nav=float(nav_str),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+            break
 
-    return VaultDetails(
-        address=data.get("vaultAddress", address),
-        name=data.get("name", ""),
-        leader_address=data.get("leader", ""),
-        description=data.get("description", ""),
-        apr=float(data.get("apr", 0.0)),
-        leader_fraction=float(data.get("leaderFraction", 0.0)),
-        leader_commission=float(data.get("leaderCommission", 0.0)),
-        allow_deposits=bool(data.get("allowDeposits", False)),
-        is_closed=bool(data.get("isClosed", False)),
-        relationship_type=(
-            data.get("relationship", {}).get("type", "normal")
-        ),
-        follower_count=len(data.get("followers", [])),
-        nav_history=sorted(nav_history, key=lambda p: p.timestamp),
-    )
+        followers = data.get("followers") or []
+        relationship = data.get("relationship") or {}
+        # `followers` is capped at 100 in the response, so this is
+        # "≥ 100" for popular vaults. Stored as-is; the dashboard could
+        # render "100+" when the cap is reached.
+        follower_count = (
+            len(followers) if isinstance(followers, list) else 0
+        )
+
+        return VaultDetails(
+            address=str(data.get("vaultAddress") or address),
+            name=str(data.get("name") or ""),
+            leader_address=str(data.get("leader") or ""),
+            description=str(data.get("description") or ""),
+            apr=_safe_float(data.get("apr")),
+            leader_fraction=_safe_float(data.get("leaderFraction")),
+            leader_commission=_safe_float(data.get("leaderCommission")),
+            allow_deposits=bool(data.get("allowDeposits", False)),
+            is_closed=bool(data.get("isClosed", False)),
+            relationship_type=(
+                str(relationship.get("type", "normal"))
+                if isinstance(relationship, dict)
+                else "normal"
+            ),
+            follower_count=follower_count,
+            nav_history=sorted(nav_history, key=lambda p: p.timestamp),
+        )
+    except Exception as exc:
+        logger.warning("vaultDetails(%s) parse failed: %s", address, exc)
+        return None
 
 
 async def fetch_details_batch(
@@ -155,10 +191,16 @@ async def fetch_details_batch(
 
     async def one(addr: str) -> tuple[str, VaultDetails | None]:
         async with sem:
-            return addr, await fetch_details(addr, session)
+            try:
+                return addr, await fetch_details(addr, session)
+            except Exception:  # belt-and-braces: never abort the whole batch
+                logger.exception("fetch_details(%s) raised — skipping", addr)
+                return addr, None
 
     try:
-        results = await asyncio.gather(*(one(a) for a in addresses))
+        results = await asyncio.gather(
+            *(one(a) for a in addresses), return_exceptions=False
+        )
     finally:
         if own_session:
             await session.close()

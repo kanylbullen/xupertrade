@@ -162,7 +162,9 @@ export default async function VaultsPage({
                         {fmtPct(v.profit_share_pct, false)}
                       </td>
                       <td className="py-2 pr-3 text-right font-mono">
-                        {v.age_days ?? "—"}d
+                        {v.age_days === null || v.age_days === undefined
+                          ? "—"
+                          : `${v.age_days}d`}
                       </td>
                     </tr>
                   ))}

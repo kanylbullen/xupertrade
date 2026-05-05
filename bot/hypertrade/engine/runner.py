@@ -162,14 +162,28 @@ class EngineRunner:
                 logger.exception("HODL signal evaluation failed")
             self._last_hodl_check = time.time()
 
-        # Vault scanner: daily poll. Telegram-only via the testnet bot.
-        # Other modes still poll so /vaults dashboard stays fresh in any mode.
-        if self.repo and (time.time() - self._last_vault_poll) > 24 * 3600:
+        # Vault scanner: daily poll, owned by the testnet bot only. Both
+        # paper and testnet share the same Postgres in the default Compose
+        # setup, so running it in every container would duplicate the
+        # 14 MB catalogue fetch and risk emitting two `vault.qualified`
+        # alerts for the same state change. Telegram also lives on the
+        # testnet bot, so this puts the alerts at the same source as the
+        # poll. The /vaults dashboard reads from the shared DB regardless
+        # of which mode the user is browsing.
+        # On failure we DON'T advance _last_vault_poll, so a transient HL
+        # outage retries on the next tick instead of waiting a full day.
+        if (
+            self.repo
+            and settings.exchange_mode == "testnet"
+            and (time.time() - self._last_vault_poll) > 24 * 3600
+        ):
             try:
                 await self._poll_vaults()
+                self._last_vault_poll = time.time()
             except Exception:
-                logger.exception("Vault scan failed")
-            self._last_vault_poll = time.time()
+                logger.exception(
+                    "Vault scan failed — will retry on next tick"
+                )
 
         # Honor flat-all request before everything else
         if self.control:

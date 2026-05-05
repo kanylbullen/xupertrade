@@ -165,9 +165,11 @@ def coarse_prefilter(
     """Return the subset of catalog summaries worth fetching details for.
 
     Cheap criteria only — avoid the expensive per-vault POST until a vault
-    has a reasonable chance of passing the full filter. We're permissive
-    here: a few false-positives are fine, but missing a real qualifier is
-    not. The full filter applies after `compute_metrics`.
+    has a reasonable chance of passing the full filter. We're deliberately
+    permissive: a few false-positives are fine (we'll reject them in the
+    full filter after compute_metrics), but missing a real qualifier is
+    not. We only apply rules that come straight from `summary` — anything
+    that needs `vaultDetails` (Sharpe, manager equity, fee, ROIs) waits.
     """
     cfg = cfg or FilterConfig()
     out = []
@@ -180,10 +182,12 @@ def coarse_prefilter(
             continue
         if s.age_days < cfg.min_age_days:
             continue
-        # APR is from the catalog and reflects (typically) the trailing
-        # ~30d window. A vault deeply negative on APR is unlikely to pass
-        # the ROI 90d > 0 check, so we drop it cheaply.
-        if s.apr <= 0:
+        # APR is a short-window proxy and CAN turn negative briefly even
+        # for vaults that still pass ROI 90/180d. We only drop the deeply
+        # negative tail (-50% APR or worse) — vaults that bad won't pass
+        # any positive-ROI rule. This keeps the candidate set tractable
+        # without dropping legitimate qualifiers.
+        if s.apr < -0.5:
             continue
         out.append(s)
     return out

@@ -666,19 +666,29 @@ class Repository:
             )
             return result.scalar_one_or_none()
 
-    async def latest_qualified_vaults(self) -> list[tuple[Vault, VaultSnapshot]]:
-        """Return current qualified vaults, joined with their latest snapshot.
+    async def latest_qualified_vaults(
+        self, *, max_age_days: int = 7
+    ) -> list[tuple[Vault, VaultSnapshot]]:
+        """Return currently qualified vaults, joined with their latest snapshot.
 
         "Latest snapshot" means the most recent row per vault — this gives
-        us the current verdict, not historical state.
+        us the current verdict, not historical state. We cap the staleness
+        at `max_age_days` so a vault that hasn't been re-evaluated in over
+        a week (scanner outage, mode switch, etc.) is treated as unknown
+        rather than perpetually qualified. Default of 7 days survives a
+        few missed daily polls without going silent.
         """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         async with self._session_factory() as session:
-            # Pull all snapshots from last 48h, pick newest per vault, filter qualified.
-            cutoff = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=48)
+            # Pick the newest snapshot per vault; filter to qualified later.
+            # Sorting by (vault, snapshot_at desc) lets us pluck the head row
+            # per vault in one pass.
             result = await session.execute(
                 select(VaultSnapshot)
-                .where(VaultSnapshot.snapshot_at >= cutoff)
-                .order_by(VaultSnapshot.vault_address, VaultSnapshot.snapshot_at.desc())
+                .order_by(
+                    VaultSnapshot.vault_address,
+                    VaultSnapshot.snapshot_at.desc(),
+                )
             )
             seen: set[str] = set()
             picks: list[VaultSnapshot] = []
@@ -686,8 +696,11 @@ class Repository:
                 if snap.vault_address in seen:
                     continue
                 seen.add(snap.vault_address)
-                if snap.qualified:
-                    picks.append(snap)
+                if not snap.qualified:
+                    continue
+                if snap.snapshot_at and snap.snapshot_at < cutoff:
+                    continue
+                picks.append(snap)
             out: list[tuple[Vault, VaultSnapshot]] = []
             for snap in picks:
                 vault = await session.get(Vault, snap.vault_address)
