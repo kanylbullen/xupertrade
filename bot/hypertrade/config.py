@@ -30,10 +30,17 @@ class Settings(BaseSettings):
     # vaults only exist on mainnet.
     vault_tracking_address: str = ""
 
-    # Portfolio provider selector. "" = disabled (default), "coinstats" =
-    # third-party paid, "rotki" = open-source self-hosted. The matching
-    # provider's connection vars (below) must also be filled in.
-    portfolio_provider: str = ""
+    # Comma-separated list of portfolio providers to query. Each shows
+    # up as its own card on /portfolio. The matching provider's
+    # connection vars (below) must also be filled in.
+    #
+    #   ""                     → page disabled
+    #   "rotki"                → only Rotki
+    #   "rotki,ghostfolio"     → both, side-by-side
+    #   "rotki,ghostfolio,coinstats" → all three
+    #
+    # Special value "*" enables every provider whose creds are set.
+    portfolio_providers: str = ""
 
     # CoinStats portfolio (read-only). Requires Degen plan subscription.
     # 8 credits per request — page caches 5 min in Redis. Get share token
@@ -50,6 +57,14 @@ class Settings(BaseSettings):
     rotki_url: str = ""           # e.g. "http://rotki:5042"
     rotki_username: str = ""
     rotki_password: str = ""
+
+    # Ghostfolio — open-source self-hosted multi-asset portfolio tracker
+    # (https://ghostfol.io). Broader asset universe than Rotki — supports
+    # stocks, ETFs, funds, plus crypto. Auth is via Bearer token (or the
+    # scoped "API key" in newer versions). The token is generated from
+    # Ghostfolio settings → Membership → "Security token".
+    ghostfolio_url: str = ""      # e.g. "http://ghostfolio:3333"
+    ghostfolio_token: str = ""    # security token / API token
 
     @property
     def is_paper(self) -> bool:

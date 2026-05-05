@@ -668,70 +668,73 @@ def _control_routes(
         }})
 
     async def portfolio_coins(request: web.Request) -> web.Response:
-        """Return the user's portfolio (holdings + P&L) from the configured
-        provider (CoinStats, Rotki, or none).
+        """Return the user's portfolio (holdings + P&L) from every
+        configured provider, side-by-side.
 
-        Auth-gated when API_KEY is set — responses include personal
-        balance data. Cached in Redis 5 min per credit / load conscious
-        access; `?fresh=1` busts the cache.
+        Each provider gets its own entry in the `providers` list; the
+        dashboard renders one card per. Auth-gated when API_KEY is set
+        (responses include personal balance data). Each provider's
+        snapshot is cached separately in Redis 5 min; `?fresh=1` busts
+        the cache.
         """
         if (err := _require_auth(request)) is not None:
             return err
 
         from dataclasses import asdict as _asdict
-        from hypertrade.portfolio.providers import get_provider
+        from hypertrade.portfolio.providers import get_providers
 
-        provider = get_provider()
-        if provider is None:
+        providers = get_providers()
+        if not providers:
             return _cors({
                 "configured": False,
-                "provider": "",
-                "coins": [],
-                "total_value_usd": 0.0,
-                "total_pnl_24h_usd": 0.0,
-                "total_pnl_all_time_usd": 0.0,
-                "fetched_at": "",
-                "cached": False,
+                "providers": [],
             })
 
-        # Cache key includes mode + provider so paper/testnet/mainnet
-        # bots sharing the same Redis don't overwrite each other's
-        # cached snapshots if multiple providers are configured.
-        cache_key = f"portfolio:{settings.exchange_mode}:{provider.name}:coins"
         force_refresh = request.query.get("fresh") == "1"
 
-        if not force_refresh:
-            cached = await control.cache_get(cache_key)
-            if cached:
-                try:
-                    payload = json.loads(cached)
-                    payload["cached"] = True
-                    payload["configured"] = True
-                    return _cors(payload)
-                except (json.JSONDecodeError, TypeError):
-                    # Fall through to fresh fetch if cache is corrupt
-                    pass
+        async def _resolve(p):
+            cache_key = f"portfolio:{settings.exchange_mode}:{p.name}:coins"
+            if not force_refresh:
+                cached = await control.cache_get(cache_key)
+                if cached:
+                    try:
+                        payload = json.loads(cached)
+                        payload["cached"] = True
+                        return payload
+                    except (json.JSONDecodeError, TypeError):
+                        pass
 
-        snap = await provider.fetch_snapshot()
+            snap = await p.fetch_snapshot()
+            payload = {
+                "name": p.name,
+                "ok": snap.ok,
+                "error": snap.error,
+                "coins": [_asdict(c) for c in snap.coins],
+                "total_value_usd": snap.total_value_usd,
+                "total_pnl_24h_usd": snap.total_pnl_24h_usd,
+                "total_pnl_all_time_usd": snap.total_pnl_all_time_usd,
+                "fetched_at": snap.fetched_at,
+                "cached": False,
+            }
+            # Cache any successful response (including empty-but-ok).
+            # Only error responses skip the cache so a transient outage
+            # doesn't pin a 5-min stale state.
+            if snap.ok:
+                await control.cache_set(
+                    cache_key, json.dumps(payload), ttl_seconds=300,
+                )
+            return payload
 
-        payload = {
+        # Fan out in parallel — providers don't share dependencies and
+        # each can take a few seconds. Sum dashboard latency = max(p.fetch),
+        # not sum.
+        import asyncio as _asyncio
+        results = await _asyncio.gather(*(_resolve(p) for p in providers))
+
+        return _cors({
             "configured": True,
-            "provider": provider.name,
-            "ok": snap.ok,
-            "error": snap.error,
-            "coins": [_asdict(c) for c in snap.coins],
-            "total_value_usd": snap.total_value_usd,
-            "total_pnl_24h_usd": snap.total_pnl_24h_usd,
-            "total_pnl_all_time_usd": snap.total_pnl_all_time_usd,
-            "fetched_at": snap.fetched_at,
-            "cached": False,
-        }
-        # Cache any successful response (including empty-but-ok — e.g.
-        # a brand-new portfolio with no holdings). Only error responses
-        # are skipped, so a transient outage doesn't pin a 5-min cache.
-        if snap.ok:
-            await control.cache_set(cache_key, json.dumps(payload), ttl_seconds=300)
-        return _cors(payload)
+            "providers": list(results),
+        })
 
     async def vault_snapshots(request: web.Request) -> web.Response:
         repo: Repository | None = request.app.get("repo")
