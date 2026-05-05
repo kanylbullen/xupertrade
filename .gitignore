@@ -19,9 +19,11 @@ __pycache__/
 dist/
 build/
 
-# Environment
+# Environment — block every .env variant; only allow explicit example files
 .env
-.env.local
+.env.*
+!.env.example
+!.env.*.example
 
 # IDE
 .vscode/

@@ -60,9 +60,13 @@ block "Cloudflare API token (heuristic)" \
 # AWS access key
 block "AWS access key" 'AKIA[0-9A-Z]{16}\b'
 
-# Generic high-entropy SECRET_KEY/API_KEY assignment (only with literal value)
+# Generic high-entropy SECRET_KEY/API_KEY assignment.
+# Matches: KEY = "value", KEY: "value" (YAML), KEY=value (dotenv).
+# `[:=]` covers both Python-style and YAML/compose syntax; quotes
+# optional so unquoted dotenv lines also fire. Kept in sync with
+# .gitleaks.toml — update both together.
 block "Hardcoded SECRET_KEY/API_KEY/PASSWORD literal" \
-    '(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*=[ ]*["'"'"'][A-Za-z0-9_+/=-]{16,}["'"'"']'
+    '(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*[:=][ ]*["'"'"']?[A-Za-z0-9_+/=-]{16,}["'"'"']?'
 
 # Personal/paid data sources — block by file path. Catches accidental
 # additions of files under bot/data/private/ or docs/ files matching
