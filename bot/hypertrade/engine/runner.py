@@ -49,7 +49,12 @@ class EngineRunner:
         self._vault_poller = None  # lazy-init on first use
 
     async def startup(self) -> None:
-        """Restore in-memory strategy state from DB after a restart."""
+        """Restore in-memory strategy state from DB after a restart, then
+        re-push any persisted Caddy TLS config so HTTPS comes back up
+        without requiring a manual click on the Options page.
+        """
+        await self._restore_caddy_tls_config()
+
         if not self.repo:
             return
         try:
@@ -96,6 +101,62 @@ class EngineRunner:
                 "State restoration complete: %d/%d positions restored",
                 restored, len(positions),
             )
+
+    async def _restore_caddy_tls_config(self) -> None:
+        """Re-push the persisted TLS config to Caddy on bot startup.
+
+        Caddy boots from the Caddyfile mount with `tls internal` (self-signed),
+        because the LE config is held in Redis on the bot side and pushed
+        dynamically. After every redeploy the dashboard reverts to the
+        self-signed bootstrap cert until somebody clicks Save on Options →
+        TLS, which is fragile. This brings it back automatically.
+
+        Gated to the testnet bot to avoid three containers racing to push
+        the same config at startup. Failures are logged but never abort —
+        a misconfigured CF token shouldn't take the whole bot down.
+        """
+        # Only the testnet bot owns operational tasks (Telegram, vault
+        # scanner, TLS re-apply). Other modes share the same Postgres/Redis
+        # but stay out of side-effecting orchestration.
+        if settings.exchange_mode != "testnet":
+            return
+        if self.control is None:
+            return
+        try:
+            cfg = await self.control.get_tls_config()
+        except Exception:
+            logger.exception("TLS restore: failed to read config from Redis")
+            return
+        if not cfg.get("enabled"):
+            logger.info("TLS restore: disabled in Redis state — skipping")
+            return
+        missing = [k for k in ("domain", "email", "cf_token") if not cfg.get(k)]
+        if missing:
+            logger.warning(
+                "TLS restore: enabled but missing fields %s — skipping",
+                missing,
+            )
+            return
+
+        from hypertrade.notify import caddy_admin
+
+        new_config = caddy_admin.build_https_config(
+            domain=cfg["domain"],
+            email=cfg["email"],
+            cf_token=cfg["cf_token"],
+        )
+        try:
+            ok, msg = await caddy_admin.apply_config(new_config)
+        except Exception:
+            logger.exception("TLS restore: apply_config raised")
+            return
+        if ok:
+            logger.info(
+                "TLS restore: re-pushed LE config to Caddy for %s",
+                cfg["domain"],
+            )
+        else:
+            logger.warning("TLS restore: Caddy rejected config: %s", msg)
 
     def _reset_strategy_state(self, strategy_name: str) -> None:
         """Called by reconcile when it closes a DB position outside the
