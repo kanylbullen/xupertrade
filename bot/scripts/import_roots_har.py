@@ -70,6 +70,7 @@ KNOWN_START_DATES: dict[str, str] = {
     "/sth-lth-ratio":             "2012-08-01",  # aligned so max-key = today's date
     "/multiplier":                "2010-07-17",  # placeholder; will auto-derive
     "/key-levels":                "2010-07-17",  # placeholder; will auto-derive
+    "/dxy":                       "2012-09-02",  # aligned so max-key = today
     "/cvdd":                      "2010-07-17",
 }
 

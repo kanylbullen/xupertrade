@@ -117,6 +117,17 @@ def load_bull_regime() -> dict[date, float] | None:
     return _load_csv("bull_regime.csv")
 
 
+def load_dxy() -> dict[date, float] | None:
+    """U.S. Dollar Index from /dxy chart.
+
+    DXY tracks USD vs basket of major currencies. Strong inverse correlation
+    with BTC: DXY > 100 = strong dollar (risk-off), DXY < 95 = weak dollar
+    (risk-on, historically good for BTC). Trading-day series — has gaps for
+    weekends and holidays.
+    """
+    return _load_csv("dxy.csv")
+
+
 def load_cvdd() -> dict[date, float] | None:
     return _load_csv("cvdd.csv")
 

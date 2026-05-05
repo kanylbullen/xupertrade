@@ -31,3 +31,4 @@ def load_all() -> None:
     import hypertrade.hodl.hype_accumulation  # noqa: F401
     import hypertrade.hodl.altseason  # noqa: F401
     import hypertrade.hodl.btc_accumulation_zone  # noqa: F401
+    import hypertrade.hodl.macro_backdrop  # noqa: F401
