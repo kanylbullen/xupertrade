@@ -86,6 +86,7 @@ services:
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
       TELEGRAM_EVENTS: "${TELEGRAM_EVENTS:-trade.executed,position.closed,error,vault.qualified,vault.disqualified}"
+      VAULT_TRACKING_ADDRESS: "${VAULT_TRACKING_ADDRESS:-}"
 
   bot-mainnet:
     <<: *bot-base

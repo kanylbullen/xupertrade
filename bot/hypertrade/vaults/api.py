@@ -177,6 +177,39 @@ async def fetch_details(
         return None
 
 
+async def fetch_user_vault_equities(
+    user_address: str, session: aiohttp.ClientSession | None = None
+) -> list[dict]:
+    """Return the user's stakes in each HL vault.
+
+    Response shape: `[{vaultAddress, equity (str USD), lockedUntilTimestamp (ms)}]`
+    Empty list if the user holds no vaults. Returns [] on any error so the
+    poller can degrade gracefully.
+    """
+    own_session = session is None
+    if own_session:
+        session = aiohttp.ClientSession()
+    payload = {"type": "userVaultEquities", "user": user_address}
+    try:
+        async with session.post(
+            INFO_URL,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=DETAIL_TIMEOUT_S),
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        logger.warning("userVaultEquities(%s) failed: %s", user_address, exc)
+        return []
+    finally:
+        if own_session:
+            await session.close()
+
+    if not isinstance(data, list):
+        return []
+    return data
+
+
 async def fetch_details_batch(
     addresses: list[str],
     *,

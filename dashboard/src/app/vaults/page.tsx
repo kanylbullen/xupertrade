@@ -29,6 +29,33 @@ type Vault = {
   is_closed: boolean;
 };
 
+type MyPosition = {
+  vault_address: string;
+  vault_name: string | null;
+  leader_address: string | null;
+  first_seen_at: string | null;
+  first_seen_equity_usd: number;
+  last_seen_at: string | null;
+  last_seen_equity_usd: number;
+  pnl_usd: number;
+  pnl_pct: number | null;
+  locked_until: string | null;
+  qualified: boolean;
+  failed_filters: string[];
+  current_apr: number | null;
+  current_sharpe_180d: number | null;
+  current_aum_usd: number | null;
+  current_max_drawdown_pct: number | null;
+  current_leader_equity_pct: number | null;
+  snapshot_at: string | null;
+};
+
+type MyPositionsResponse = {
+  address: string;
+  positions: MyPosition[];
+  total_equity_usd: number;
+};
+
 export default async function VaultsPage({
   searchParams,
 }: {
@@ -47,13 +74,20 @@ export default async function VaultsPage({
   const botApiUrl = botApiUrls[mode];
 
   let vaults: Vault[] = [];
+  let myPositions: MyPositionsResponse | null = null;
   let botApiOnline = false;
   try {
-    const res = await fetch(`${botApiUrl}/api/vaults`, { cache: "no-store" });
-    if (res.ok) {
-      const data = (await res.json()) as { vaults: Vault[] };
+    const [listRes, mineRes] = await Promise.all([
+      fetch(`${botApiUrl}/api/vaults`, { cache: "no-store" }),
+      fetch(`${botApiUrl}/api/vaults/mine`, { cache: "no-store" }),
+    ]);
+    if (listRes.ok) {
+      const data = (await listRes.json()) as { vaults: Vault[] };
       vaults = data.vaults;
       botApiOnline = true;
+    }
+    if (mineRes.ok) {
+      myPositions = (await mineRes.json()) as MyPositionsResponse;
     }
   } catch {
     // bot offline
@@ -76,6 +110,19 @@ export default async function VaultsPage({
         <Card className="mb-4 border-destructive/50">
           <CardContent className="pt-6 text-sm text-destructive">
             Bot API ({mode}) unreachable — vault data unavailable.
+          </CardContent>
+        </Card>
+      )}
+
+      {myPositions && myPositions.positions.length > 0 && (
+        <MyPositionsCard data={myPositions} />
+      )}
+      {myPositions && myPositions.address && myPositions.positions.length === 0 && (
+        <Card className="mb-6">
+          <CardContent className="pt-6 text-sm text-muted-foreground">
+            Tracking <code className="rounded bg-muted px-1 py-0.5 text-xs">{myPositions.address}</code>{" "}
+            — no vault deposits seen yet. Check back after the next daily
+            scan, or after your first deposit clears HL&apos;s 1-day lockup.
           </CardContent>
         </Card>
       )}
@@ -204,4 +251,122 @@ function fmtPct(v: number | null, signed = true): string {
 function fmtNum(v: number | null, decimals: number): string {
   if (v === null || v === undefined) return "—";
   return v.toFixed(decimals);
+}
+
+function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
+  return (
+    <Card className="mb-6 border-primary/30">
+      <CardHeader>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <CardTitle>My vault positions</CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Tracking{" "}
+              <code className="rounded bg-muted px-1 py-0.5">
+                {shortAddr(data.address)}
+              </code>{" "}
+              — refreshed daily by the scanner. P&amp;L is approximate
+              (first-seen vs current equity), not a true cost basis.
+            </p>
+          </div>
+          <div className="text-right">
+            <div className="text-xs text-muted-foreground">Total equity</div>
+            <div className="font-mono text-lg font-semibold">
+              ${data.total_equity_usd.toLocaleString(undefined, {
+                maximumFractionDigits: 2,
+              })}
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-3">
+          {data.positions.map((p) => (
+            <PositionRow key={p.vault_address} p={p} />
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function PositionRow({ p }: { p: MyPosition }) {
+  const pnlSign = p.pnl_usd >= 0 ? "+" : "";
+  const pnlColor = p.pnl_usd >= 0 ? "text-green-500" : "text-red-500";
+  const lockMs = p.locked_until ? new Date(p.locked_until).getTime() : 0;
+  const locked = lockMs > Date.now();
+  const stillQualifies = p.qualified;
+  const verdict = !p.snapshot_at
+    ? { tone: "outline" as const, text: "no scoring yet" }
+    : stillQualifies
+      ? { tone: "default" as const, text: "still qualifies" }
+      : { tone: "destructive" as const, text: "no longer qualifies" };
+
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <a
+              href={`https://app.hyperliquid.xyz/vaults/${p.vault_address}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium hover:underline"
+            >
+              {p.vault_name || shortAddr(p.vault_address)}
+            </a>
+            <Badge variant={verdict.tone}>{verdict.text}</Badge>
+            {locked && (
+              <Badge variant="outline" title={p.locked_until ?? ""}>
+                locked
+              </Badge>
+            )}
+          </div>
+          <div className="mt-1 font-mono text-xs text-muted-foreground">
+            {shortAddr(p.vault_address)}
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="font-mono text-base font-semibold">
+            ${p.last_seen_equity_usd.toLocaleString(undefined, {
+              maximumFractionDigits: 2,
+            })}
+          </div>
+          <div className={`font-mono text-xs ${pnlColor}`}>
+            {pnlSign}${p.pnl_usd.toFixed(2)}{" "}
+            {p.pnl_pct !== null && (
+              <>({pnlSign}{(p.pnl_pct * 100).toFixed(1)}%)</>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+        <Metric label="APR" value={fmtPct(p.current_apr)} />
+        <Metric label="Sharpe (180d)" value={fmtNum(p.current_sharpe_180d, 2)} />
+        <Metric label="Max DD" value={fmtPct(p.current_max_drawdown_pct, false)} />
+        <Metric label="Mgr equity" value={fmtPct(p.current_leader_equity_pct, false)} />
+      </div>
+      {!stillQualifies && p.failed_filters.length > 0 && (
+        <div className="mt-3 rounded bg-destructive/10 p-2 text-xs text-destructive">
+          Failed filters:{" "}
+          <span className="font-mono">{p.failed_filters.join(", ")}</span>{" "}
+          — consider exiting after lockup expires.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-muted-foreground">{label}</div>
+      <div className="font-mono font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function shortAddr(a: string): string {
+  if (!a) return "";
+  return `${a.slice(0, 8)}…${a.slice(-6)}`;
 }

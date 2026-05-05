@@ -16,6 +16,7 @@ from hypertrade.db.models import (
     ManualOnchainLevel,
     PositionRecord,
     Trade,
+    UserVaultEntry,
     Vault,
     VaultNavPoint,
     VaultSnapshot,
@@ -734,6 +735,64 @@ class Repository:
     async def get_vault(self, address: str) -> Vault | None:
         async with self._session_factory() as session:
             return await session.get(Vault, address)
+
+    # ------------------------------------------------------------------
+    # User vault positions: track which vaults the user holds + P&L
+    # ------------------------------------------------------------------
+
+    async def upsert_user_vault_entry(
+        self,
+        user_address: str,
+        vault_address: str,
+        equity_usd: float,
+        locked_until: datetime | None,
+    ) -> None:
+        """Update the user's stake in a vault. New row sets first_seen
+        from current values; existing row only updates last_seen and
+        locked_until. If equity drops near zero, mark exited; if it
+        re-enters from zero, clear exited and reset first_seen."""
+        async with self._session_factory() as session:
+            row = await session.get(
+                UserVaultEntry, (user_address, vault_address)
+            )
+            now = datetime.now(timezone.utc)
+            if row is None:
+                row = UserVaultEntry(
+                    user_address=user_address,
+                    vault_address=vault_address,
+                    first_seen_at=now,
+                    first_seen_equity_usd=equity_usd,
+                    last_seen_at=now,
+                    last_seen_equity_usd=equity_usd,
+                    locked_until=locked_until,
+                )
+                session.add(row)
+            else:
+                if row.exited_at is not None and equity_usd > 1.0:
+                    # Re-entry after an exit: treat as a fresh deposit.
+                    row.first_seen_at = now
+                    row.first_seen_equity_usd = equity_usd
+                    row.exited_at = None
+                row.last_seen_at = now
+                row.last_seen_equity_usd = equity_usd
+                row.locked_until = locked_until
+                # Treat sub-$1 dust as fully exited so the dashboard can
+                # archive cleanly without false "you still hold $0.04".
+                if equity_usd < 1.0 and row.exited_at is None:
+                    row.exited_at = now
+            await session.commit()
+
+    async def list_user_vault_entries(
+        self, user_address: str, *, include_exited: bool = False
+    ) -> list[UserVaultEntry]:
+        async with self._session_factory() as session:
+            stmt = select(UserVaultEntry).where(
+                UserVaultEntry.user_address == user_address
+            )
+            if not include_exited:
+                stmt = stmt.where(UserVaultEntry.exited_at.is_(None))
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
 
     async def close(self) -> None:
         await self._engine.dispose()

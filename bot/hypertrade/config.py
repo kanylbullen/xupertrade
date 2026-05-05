@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     # hyperliquid_private_key but executed on this account's behalf.
     # Leave empty to trade on the signing wallet's own account.
     hyperliquid_account_address: str = ""
+    # Mainnet wallet address (read-only) used to query the user's vault
+    # equities via HL's `userVaultEquities` endpoint. Public address only —
+    # no private key needed since vault equities are public on-chain. Leave
+    # empty to disable the "My vault positions" panel. Distinct from
+    # hyperliquid_account_address because that's the trading account on
+    # whichever network this bot runs on (often a testnet wallet), but
+    # vaults only exist on mainnet.
+    vault_tracking_address: str = ""
 
     @property
     def is_paper(self) -> bool:

@@ -268,6 +268,43 @@ class VaultSnapshot(Base):
     )
 
 
+class UserVaultEntry(Base):
+    """The user's stake in a HyperLiquid vault. One row per vault we've ever
+    seen them deposit into. Updated daily by the user-position poller.
+
+    Tracks first-seen equity (used as the cost basis for a rough P&L since
+    we lack actual deposit-time receipts), last-seen equity, and lockup.
+    Composite PK on (user_address, vault_address) so exiting+re-entering
+    a vault refreshes the same row.
+    """
+
+    __tablename__ = "user_vault_entries"
+
+    user_address = Column(String(42), primary_key=True)
+    vault_address = Column(
+        String(42),
+        ForeignKey("vaults.address", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    first_seen_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    first_seen_equity_usd = Column(Float, nullable=False)
+    last_seen_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    last_seen_equity_usd = Column(Float, nullable=False)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+    # When equity drops to ~0 (full withdrawal) we keep the row but mark
+    # it exited so the dashboard can show historical positions. A subsequent
+    # deposit clears this and updates first_seen_*.
+    exited_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class VaultNavPoint(Base):
     """One historical NAV observation. Backfilled from HL on first encounter,
     appended daily thereafter. Composite PK = (address, timestamp)."""

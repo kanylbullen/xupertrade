@@ -20,7 +20,9 @@ from hypertrade.events.types import VaultDisqualified, VaultQualified
 from hypertrade.vaults.api import (
     DEFAULT_DETAIL_CONCURRENCY,
     fetch_catalog,
+    fetch_details,
     fetch_details_batch,
+    fetch_user_vault_equities,
 )
 from hypertrade.vaults.filters import FilterConfig, coarse_prefilter, evaluate
 from hypertrade.vaults.metrics import compute_metrics
@@ -45,12 +47,16 @@ class VaultPoller:
         config: FilterConfig | None = None,
         detail_concurrency: int = DEFAULT_DETAIL_CONCURRENCY,
         debounce_seconds: float = 86400.0,
+        track_user_address: str = "",
     ) -> None:
         self.repo = repo
         self.event_bus = event_bus
         self.config = config or FilterConfig()
         self.detail_concurrency = detail_concurrency
         self.debounce_seconds = debounce_seconds
+        # Public mainnet wallet whose vault deposits we'll track. Empty
+        # string disables user-position tracking entirely.
+        self.track_user_address = track_user_address.strip().lower()
         # (address, new_state) -> last fired ts (epoch seconds)
         self._last_alert: dict[tuple[str, str], float] = {}
 
@@ -190,15 +196,28 @@ class VaultPoller:
                     )
                 )
 
+        # Track the user's own vault deposits if a tracking address is set.
+        # Done after the main scan so any user-held vault that's already in
+        # `vaults` has fresh metadata; vaults the user holds that AREN'T
+        # in our candidates get on-demand vaultDetails fetched.
+        user_positions = 0
+        if self.track_user_address:
+            try:
+                user_positions = await self._poll_user_positions()
+            except Exception:
+                logger.exception("vault poller: user-position poll failed")
+
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         logger.info(
             "vault poller: scanned=%d candidates=%d qualified=%d "
-            "newly_qualified=%d newly_disqualified=%d elapsed=%.1fs",
+            "newly_qualified=%d newly_disqualified=%d "
+            "user_positions=%d elapsed=%.1fs",
             len(catalog),
             len(candidates),
             qualified_count,
             len(new_qualified),
             len(new_disqualified),
+            user_positions,
             elapsed,
         )
         return {
@@ -207,8 +226,80 @@ class VaultPoller:
             "qualified": qualified_count,
             "newly_qualified": len(new_qualified),
             "newly_disqualified": len(new_disqualified),
+            "user_positions": user_positions,
             "elapsed_s": elapsed,
         }
+
+    async def _poll_user_positions(self) -> int:
+        """Refresh `user_vault_entries` from HL's userVaultEquities.
+
+        For any vault the user holds that's NOT already in our `vaults`
+        table, fetch its details on-demand so the dashboard has metadata
+        + scoring even for vaults that don't pass the coarse pre-filter
+        (small AUM, young, fee too high — user can hold them anyway).
+        """
+        equities = await fetch_user_vault_equities(self.track_user_address)
+        if not equities:
+            return 0
+
+        async with aiohttp.ClientSession() as session:
+            for entry in equities:
+                addr = str(entry.get("vaultAddress") or "").lower()
+                if not addr:
+                    continue
+                try:
+                    equity = float(entry.get("equity") or 0.0)
+                except (TypeError, ValueError):
+                    equity = 0.0
+                locked_ms = entry.get("lockedUntilTimestamp")
+                locked_until = None
+                if locked_ms:
+                    try:
+                        locked_until = datetime.fromtimestamp(
+                            float(locked_ms) / 1000.0, tz=timezone.utc
+                        )
+                    except (TypeError, ValueError):
+                        locked_until = None
+
+                # Make sure we have metadata for this vault — user can hold
+                # vaults that fail our coarse filter, and we still want to
+                # show name/leader/age on the dashboard.
+                vault = await self.repo.get_vault(addr)
+                if vault is None:
+                    det = await fetch_details(addr, session)
+                    if det is not None:
+                        await self.repo.upsert_vault(
+                            address=det.address,
+                            name=det.name,
+                            leader_address=det.leader_address,
+                            description=det.description,
+                            # We don't have catalogue createTimeMillis
+                            # without a catalog scan, so leave it None
+                            # rather than fabricate. The next daily
+                            # catalog scan will fill it in if visible.
+                            created_at=None,
+                            profit_share_pct=det.leader_commission,
+                            relationship_type=det.relationship_type,
+                        )
+                        if det.nav_history:
+                            await self.repo.append_nav_history(
+                                addr,
+                                [(p.timestamp, p.nav) for p in det.nav_history],
+                            )
+
+                try:
+                    await self.repo.upsert_user_vault_entry(
+                        user_address=self.track_user_address,
+                        vault_address=addr,
+                        equity_usd=equity,
+                        locked_until=locked_until,
+                    )
+                except Exception:
+                    logger.exception(
+                        "vault poller: upsert_user_vault_entry(%s) failed",
+                        addr,
+                    )
+        return len(equities)
 
     async def _load_merged_history(
         self, address: str, fresh: list[NavPoint]

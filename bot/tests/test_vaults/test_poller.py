@@ -25,12 +25,50 @@ class FakeRepo:
         # Vaults that should appear in `latest_qualified_vaults` — driven by
         # the most recent save_vault_snapshot with qualified=True.
         self._qualified_state: dict[str, dict] = {}
+        # User vault entries: {(user, vault) -> dict}
+        self.user_entries: dict[tuple[str, str], dict] = {}
+        self._known_vaults: set[str] = set()
 
     async def latest_vault_snapshot(self, address: str):
         return self.latest.get(address)
 
     async def upsert_vault(self, **kwargs):
         self.upserts.append(kwargs)
+        self._known_vaults.add(kwargs["address"])
+
+    async def get_vault(self, address):
+        if address in self._known_vaults:
+            return type("V", (), {"address": address, "name": "v" + address[-4:]})()
+        return None
+
+    async def upsert_user_vault_entry(
+        self, user_address, vault_address, equity_usd, locked_until
+    ):
+        key = (user_address, vault_address)
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        existing = self.user_entries.get(key)
+        if existing is None:
+            self.user_entries[key] = {
+                "user_address": user_address,
+                "vault_address": vault_address,
+                "first_seen_at": now,
+                "first_seen_equity_usd": equity_usd,
+                "last_seen_at": now,
+                "last_seen_equity_usd": equity_usd,
+                "locked_until": locked_until,
+                "exited_at": None,
+            }
+        else:
+            if existing["exited_at"] is not None and equity_usd > 1.0:
+                existing["first_seen_at"] = now
+                existing["first_seen_equity_usd"] = equity_usd
+                existing["exited_at"] = None
+            existing["last_seen_at"] = now
+            existing["last_seen_equity_usd"] = equity_usd
+            existing["locked_until"] = locked_until
+            if equity_usd < 1.0 and existing["exited_at"] is None:
+                existing["exited_at"] = now
 
     async def append_nav_history(self, address, points):
         self.nav_appends.append((address, len(points)))
@@ -241,3 +279,105 @@ async def test_poller_handles_empty_candidate_set():
         assert result["candidates"] == 0
         assert result["qualified"] == 0
         assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_user_position_tracking_records_held_vaults():
+    """When `track_user_address` is set, the poller pulls user equities and
+    upserts them. Vaults the user holds that aren't already known get their
+    metadata fetched on-demand."""
+    repo = FakeRepo()
+    bus = CapturingBus()
+    user_addr = "0x" + "aa" * 20
+    held_vault = "0x" + "55" * 20
+    poller = VaultPoller(
+        repo=repo, event_bus=bus, track_user_address=user_addr,
+    )
+
+    user_equities = [{
+        "vaultAddress": held_vault,
+        "equity": "150.42",
+        "lockedUntilTimestamp": 1830000000000,
+    }]
+    held_details = _details(held_vault)
+
+    with (
+        patch("hypertrade.vaults.poller.fetch_catalog", new=AsyncMock(return_value=[])),
+        patch("hypertrade.vaults.poller.fetch_details_batch", new=AsyncMock(return_value={})),
+        patch("hypertrade.vaults.poller.fetch_user_vault_equities", new=AsyncMock(return_value=user_equities)),
+        patch("hypertrade.vaults.poller.fetch_details", new=AsyncMock(return_value=held_details)),
+    ):
+        result = await poller.poll()
+
+    assert result["user_positions"] == 1
+    key = (user_addr, held_vault)
+    assert key in repo.user_entries
+    assert repo.user_entries[key]["last_seen_equity_usd"] == 150.42
+    assert repo.user_entries[key]["first_seen_equity_usd"] == 150.42
+    # Vault metadata was fetched on-demand because user held it but
+    # it didn't appear in the catalog.
+    assert held_vault in repo._known_vaults
+
+
+@pytest.mark.asyncio
+async def test_user_position_tracking_disabled_without_address():
+    """No address → no equities call, no DB writes."""
+    repo = FakeRepo()
+    bus = CapturingBus()
+    poller = VaultPoller(repo=repo, event_bus=bus, track_user_address="")
+    fetch_mock = AsyncMock(return_value=[])
+
+    with (
+        patch("hypertrade.vaults.poller.fetch_catalog", new=AsyncMock(return_value=[])),
+        patch("hypertrade.vaults.poller.fetch_details_batch", new=AsyncMock(return_value={})),
+        patch("hypertrade.vaults.poller.fetch_user_vault_equities", new=fetch_mock),
+    ):
+        result = await poller.poll()
+
+    assert result["user_positions"] == 0
+    assert repo.user_entries == {}
+    fetch_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_user_position_tracking_marks_exit_on_dust():
+    """Equity dropping under $1 (full withdrawal) marks the entry exited."""
+    repo = FakeRepo()
+    bus = CapturingBus()
+    user_addr = "0x" + "bb" * 20
+    vault = "0x" + "66" * 20
+    poller = VaultPoller(
+        repo=repo, event_bus=bus, track_user_address=user_addr,
+    )
+
+    # Day 1: deposit $200
+    with (
+        patch("hypertrade.vaults.poller.fetch_catalog", new=AsyncMock(return_value=[])),
+        patch("hypertrade.vaults.poller.fetch_details_batch", new=AsyncMock(return_value={})),
+        patch("hypertrade.vaults.poller.fetch_user_vault_equities",
+              new=AsyncMock(return_value=[{
+                  "vaultAddress": vault, "equity": "200.0",
+                  "lockedUntilTimestamp": 0,
+              }])),
+        patch("hypertrade.vaults.poller.fetch_details",
+              new=AsyncMock(return_value=_details(vault))),
+    ):
+        await poller.poll()
+
+    assert repo.user_entries[(user_addr, vault)]["exited_at"] is None
+
+    # Day 2: withdrew everything → equity dust
+    with (
+        patch("hypertrade.vaults.poller.fetch_catalog", new=AsyncMock(return_value=[])),
+        patch("hypertrade.vaults.poller.fetch_details_batch", new=AsyncMock(return_value={})),
+        patch("hypertrade.vaults.poller.fetch_user_vault_equities",
+              new=AsyncMock(return_value=[{
+                  "vaultAddress": vault, "equity": "0.04",
+                  "lockedUntilTimestamp": 0,
+              }])),
+        patch("hypertrade.vaults.poller.fetch_details",
+              new=AsyncMock(return_value=_details(vault))),
+    ):
+        await poller.poll()
+
+    assert repo.user_entries[(user_addr, vault)]["exited_at"] is not None
