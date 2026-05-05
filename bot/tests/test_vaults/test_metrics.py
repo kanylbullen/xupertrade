@@ -225,6 +225,90 @@ def test_period_returns_falls_back_when_pnl_missing_anywhere():
     assert max(rets) < 1.0  # sanity: no garbage 15000.0
 
 
+def test_seed_phase_trim_drops_low_nav_leading_samples():
+    """Real-world Growi-style scenario: vault grew from $0 → $7M peak.
+    Early samples around $100 should NOT count toward max-DD because a
+    +$1k pnl on $100 NAV computes as 1000% — that's seed dynamics, not
+    strategy performance. Once NAV > 1% of peak, real returns matter."""
+    end = datetime.now(tz=timezone.utc)
+    # Day 1-3: seed phase ($100, $1k, $10k — all < 1% of $1M peak)
+    # Day 4-10: real phase ($1M, $1.1M, $1.05M, ...)
+    pts = [
+        NavPoint(end - timedelta(days=10), nav=100.0,    pnl_cum=0.0),
+        NavPoint(end - timedelta(days=9),  nav=1_000.0,  pnl_cum=900.0),
+        NavPoint(end - timedelta(days=8),  nav=10_000.0, pnl_cum=9_000.0),
+        NavPoint(end - timedelta(days=7),  nav=1_000_000.0, pnl_cum=991_000.0),
+        NavPoint(end - timedelta(days=5),  nav=1_100_000.0, pnl_cum=1_091_000.0),
+        NavPoint(end - timedelta(days=3),  nav=1_050_000.0, pnl_cum=1_041_000.0),
+        NavPoint(end - timedelta(days=1),  nav=1_080_000.0, pnl_cum=1_071_000.0),
+    ]
+    dd = max_drawdown(pts)
+    assert dd is not None
+    # Real DD: peak $1.1M → trough $1.05M = ~4.5%. NOT 99% (which is
+    # what we'd get if seed samples weren't trimmed).
+    assert dd < 0.10  # well under 10%
+
+
+def test_windowed_metric_does_not_re_trim_against_window_local_max():
+    """Regression test for the Copilot-caught bug: when a windowed metric
+    (sharpe(180d), roi_over(...)) slices the series, the slice's start
+    must NOT be re-trimmed against the WINDOW's local max NAV. Trim is
+    a once-per-series operation done in compute_metrics; downstream
+    functions take the trimmed series as-is.
+
+    Scenario: a long-lived vault that drew down to $50k inside the
+    window and recovered to $5M peak by the end. Window-local trim
+    would drop those early $50k samples (they're <1% of $5M), losing
+    real drawdown signal. Once-trimmed-upstream behavior preserves them.
+    """
+    end = datetime.now(tz=timezone.utc)
+    # 200d series of a mature vault — never near zero.
+    pts = []
+    for d in range(200):
+        # Days 0-100: cruising at $1M with small wiggle
+        if d < 100:
+            nav = 1_000_000.0 + (d * 100)
+            pnl = float(d * 1_000)
+        # Days 100-130: catastrophic drawdown to $50k
+        elif d < 130:
+            nav = 1_000_000.0 - (d - 100) * 30_000
+            pnl = float(100 * 1_000 - (d - 100) * 30_000)
+        # Days 130-200: explosive recovery to $5M
+        else:
+            nav = 100_000.0 + (d - 130) * 70_000
+            pnl = float(-2_900_000 + (d - 130) * 70_000)
+        pts.append(NavPoint(end - timedelta(days=200 - d), nav=nav, pnl_cum=pnl))
+
+    m = compute_metrics(pts)
+    # The within-window drawdown of -95% (1M → 50k) should be visible.
+    # If trim is per-window we'd see something like -5% only.
+    assert m.max_drawdown_pct is not None
+    assert m.max_drawdown_pct > 0.50
+
+
+def test_seed_phase_trim_preserves_real_drawdowns_late_in_history():
+    """A vault that grows past the threshold and THEN dips back below
+    it has a real drawdown — don't trim that. Trim only the LEADING
+    seed-phase prefix."""
+    end = datetime.now(tz=timezone.utc)
+    pts = [
+        # Seed (gets trimmed)
+        NavPoint(end - timedelta(days=10), nav=100.0,    pnl_cum=0.0),
+        NavPoint(end - timedelta(days=9),  nav=10_000.0, pnl_cum=9_900.0),
+        # Real growth → peak
+        NavPoint(end - timedelta(days=7),  nav=1_000_000.0, pnl_cum=999_900.0),
+        NavPoint(end - timedelta(days=5),  nav=2_000_000.0, pnl_cum=1_999_900.0),
+        # Catastrophic real drawdown — even though NAV ($5k) is below
+        # 1% of peak (1% of $2M = $20k), this is a REAL loss, not seed
+        # noise, so the cumulative-return curve must reflect it.
+        NavPoint(end - timedelta(days=2),  nav=5_000.0, pnl_cum=4_900.0),
+    ]
+    dd = max_drawdown(pts)
+    assert dd is not None
+    # Drawdown should be enormous — peak $2M → trough $5k = ~99.75%.
+    assert dd > 0.99
+
+
 def test_period_returns_uses_pnl_when_available_everywhere():
     """When EVERY point has pnl_cum, returns are pnl-delta based
     (flow-neutral). NAV deltas are ignored."""

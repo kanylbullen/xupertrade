@@ -30,6 +30,40 @@ from datetime import datetime, timedelta, timezone
 from hypertrade.vaults.models import NavPoint, VaultMetrics
 
 
+# Drop the leading "seed phase" of a vault's history: any sample where
+# NAV is below this fraction of the eventual peak NAV is treated as
+# "vault not yet capitalized". Without this trim, an early sample of
+# nav=$100 followed by a +$1k of pnl produces a 1000% return and
+# permanently dominates max-DD / Sharpe even years later. 1% is
+# generous enough to keep most legitimate early growth while excluding
+# the truly seed-stage noise.
+SEED_PHASE_NAV_FRACTION = 0.01
+
+
+def _trim_seed_phase(points: list[NavPoint]) -> list[NavPoint]:
+    """Return `points` with the leading low-NAV seed phase dropped.
+
+    A vault that grew from $0 → $10M would have early samples around
+    $100. Period returns computed against $100 NAV produce 100x-1000x
+    spikes that aren't real performance — they're the manager seeding
+    the strategy. We treat any prefix of points whose NAV is < 1% of
+    the series max as the seed phase and exclude it.
+    """
+    if not points:
+        return points
+    max_nav = max(p.nav for p in points)
+    if max_nav <= 0:
+        return points
+    threshold = max_nav * SEED_PHASE_NAV_FRACTION
+    # Drop the LEADING low-NAV samples only — once the vault has crossed
+    # the threshold, even a temporary later dip back below it is real
+    # performance (an actual drawdown), not seed noise.
+    start = 0
+    while start < len(points) and points[start].nav < threshold:
+        start += 1
+    return points[start:]
+
+
 def _period_returns(points: list[NavPoint]) -> list[float]:
     """Compute per-period returns from cumulative-PnL deltas, normalized
     by NAV at the start of each period. Returns one value per consecutive
@@ -44,6 +78,12 @@ def _period_returns(points: list[NavPoint]) -> list[float]:
     consistent. The two regimes are NEVER mixed in one series, because
     a boundary pair (None → 1.7M) would compute a giant artificial
     pnl_delta.
+
+    Seed-phase trim must happen UPSTREAM (in `compute_metrics`), not here.
+    Trimming inside `_period_returns` would re-trim every windowed slice
+    against its own local max NAV, which incorrectly drops the start of a
+    180d Sharpe window if the vault has drawn down then recovered inside
+    the window. Trim once on the full series, slice afterwards.
     """
     has_pnl_everywhere = bool(points) and all(
         p.pnl_cum is not None for p in points
@@ -51,7 +91,8 @@ def _period_returns(points: list[NavPoint]) -> list[float]:
     rets: list[float] = []
     for prev, cur in zip(points[:-1], points[1:]):
         if prev.nav <= 0:
-            # Skip the seed period — division would explode.
+            # Skip seed period — division would explode. Belt-and-braces
+            # backstop in case the caller didn't trim.
             continue
         if has_pnl_everywhere:
             # mypy: pnl_cum can't be None inside this branch
@@ -180,7 +221,17 @@ def sharpe(
 
 def compute_metrics(points: list[NavPoint]) -> VaultMetrics:
     """One-shot: compute every metric we care about from a vault's
-    (NAV, PnL) series."""
+    (NAV, PnL) series.
+
+    Trims the leading seed phase ONCE here against the full series'
+    peak NAV. Downstream functions (`_roi_over`, `max_drawdown`,
+    `sharpe`) then receive a series whose seed has already been
+    excluded — they don't re-trim. This avoids a subtle bug where
+    a windowed slice (e.g. last 180d) would be re-trimmed against
+    its own local max NAV and incorrectly drop the start of the
+    window when the vault has drawn down then recovered within it.
+    """
+    points = _trim_seed_phase(points)
     return VaultMetrics(
         roi_7d=_roi_over(points, 7),
         roi_30d=_roi_over(points, 30),
