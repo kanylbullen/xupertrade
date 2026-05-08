@@ -47,7 +47,16 @@ class AthBreakoutStrategy(Strategy):
     name = "ath_breakout"
     symbol = "BTC"
     timeframe = "1d"
-    leverage = 1
+    # 2x is the leverage sweet spot per backtest sweep:
+    #   1x → APR 33%, Sharpe 0.93
+    #   2x → APR 51%, Sharpe 1.04 ← peak
+    #   3x → APR 64% but liq distance ~32% < trail 35% → realistically
+    #         liquidated on a deep BTC dip (e.g. covid-crash 2020)
+    # Trail-stop fires before liquidation at 2x (liq ~-48% spot, trail
+    # at -35% from peak), so the strategy keeps its risk discipline.
+    # Backtest doesn't model funding rate (~10-30% APR drag on leveraged
+    # longs in bull regimes) — real-world APR will be lower.
+    leverage = 2
 
     # Look-back window for "ATH". 100 daily bars ≈ 3 months; treats
     # a fresh 3-month high as the buy signal. Tuned via 5-year sweep.
