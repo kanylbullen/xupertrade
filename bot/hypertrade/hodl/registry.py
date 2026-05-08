@@ -33,3 +33,4 @@ def load_all() -> None:
     import hypertrade.hodl.btc_accumulation_zone  # noqa: F401
     import hypertrade.hodl.macro_backdrop  # noqa: F401
     import hypertrade.hodl.vault_picks  # noqa: F401
+    import hypertrade.hodl.btc_ath_breakout  # noqa: F401
