@@ -48,6 +48,7 @@ def load_all() -> None:
     import hypertrade.strategies.oleg_aryukov  # noqa: F401
     import hypertrade.strategies.qullamagi_breakout  # noqa: F401
     import hypertrade.strategies.vvv_hedge  # noqa: F401
+    import hypertrade.strategies.ath_breakout  # noqa: F401
     # golden_cross — backtested 5y on BTC/ETH/SOL/DOGE/XRP/AVAX/SUI 1d via
     # Binance dump on 2026-05-04. All positive APR but lags buy-and-hold by
     # huge margin (BTC +1.5% vs hold +150%, SOL +4.3% vs hold +700%). Late

@@ -1248,3 +1248,76 @@ class TestGoldenCrossStrategy:
         result = await strat.on_candle(df)
         assert result is None or result.action != SignalAction.OPEN_LONG
 
+
+
+# ===========================================================================
+# ATH Breakout Strategy — buy new N-day high, exit on trailing stop
+# ===========================================================================
+
+from hypertrade.strategies.ath_breakout import AthBreakoutStrategy  # noqa: E402
+
+
+class TestAthBreakoutStrategy:
+    """Long-only N-day breakout with trailing-stop exit."""
+
+    WARMUP = AthBreakoutStrategy.lookback + 2  # 202
+
+    @pytest.mark.asyncio
+    async def test_warmup_returns_none(self):
+        strat = AthBreakoutStrategy()
+        df = _flat_df(self.WARMUP - 1)
+        assert await strat.on_candle(df) is None
+
+    @pytest.mark.asyncio
+    async def test_entry_signal_fires(self):
+        """Flat history then a breakout bar above the prior 200d high → OPEN_LONG."""
+        prices = [100.0] * (AthBreakoutStrategy.lookback + 1)
+        prices.append(120.0)  # current bar — breaks the 100 plateau
+        df = _df_from_prices(prices, spread=0.001)
+        strat = AthBreakoutStrategy()
+        result = await strat.on_candle(df)
+        assert result is not None
+        assert result.action == SignalAction.OPEN_LONG
+        assert "new" in result.reason.lower() and "high" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_signal_below_prior_high(self):
+        """Equal-to-high or below should not fire."""
+        prices = [100.0] * (AthBreakoutStrategy.lookback + 1)
+        prices.append(100.0)  # same as prior high — no break
+        df = _df_from_prices(prices, spread=0.001)
+        strat = AthBreakoutStrategy()
+        assert await strat.on_candle(df) is None
+
+    @pytest.mark.asyncio
+    async def test_trail_stop_fires(self):
+        """In long, peak set to 200, then close drops below 200*(1-trail_pct)."""
+        strat = AthBreakoutStrategy(trail_pct=0.15)
+        strat.restore_state("long", entry_price=100.0)
+        # First tick at price 200 to set peak; then crash to 160
+        # (160 < 200 * 0.85 = 170 → trail stop hit).
+        prices = [100.0] * (AthBreakoutStrategy.lookback + 1)
+        prices.append(200.0)  # this bar sets peak via high
+        df1 = _df_from_prices(prices, spread=0.001)
+        # First tick — should update peak, no signal
+        first = await strat.on_candle(df1)
+        assert first is None
+        # Second tick: append a crash bar
+        prices.append(160.0)
+        df2 = _df_from_prices(prices, spread=0.001)
+        result = await strat.on_candle(df2)
+        assert result is not None
+        assert result.action == SignalAction.CLOSE_LONG
+        assert "trail stop" in result.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_long_when_already_in_position(self):
+        """If already long and a fresh new-high happens, do not re-emit OPEN_LONG."""
+        strat = AthBreakoutStrategy()
+        strat.restore_state("long", entry_price=100.0)
+        prices = [100.0] * (AthBreakoutStrategy.lookback + 1)
+        prices.append(120.0)
+        df = _df_from_prices(prices, spread=0.001)
+        result = await strat.on_candle(df)
+        # Already in position — should not emit OPEN_LONG even on fresh breakout
+        assert result is None or result.action != SignalAction.OPEN_LONG
