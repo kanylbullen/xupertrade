@@ -59,13 +59,19 @@ def hodl_metrics(candles: pd.DataFrame, deploy_usd: float) -> dict:
     }
 
 
-def dca_metrics(candles: pd.DataFrame, deploy_usd: float, months: int = 12) -> dict:
+def dca_metrics(candles: pd.DataFrame, deploy_usd: float) -> dict:
     """Equal-slice DCA over the window. Splits deploy_usd into ~one slice
     per month, buying at the close of the first bar of each month."""
     df = candles.copy()
-    df["month"] = pd.to_datetime(df["timestamp"]).dt.to_period("M")
-    first_bars = df.groupby("month").head(1)
+    # Group by (year, month) instead of pandas Period so tz-aware
+    # timestamps from the candle feed don't trigger a timezone-drop
+    # warning on `.dt.to_period("M")`.
+    ts = pd.to_datetime(df["timestamp"])
+    df["_ym"] = ts.dt.year * 12 + ts.dt.month
+    first_bars = df.groupby("_ym").head(1)
     n_slices = len(first_bars)
+    if n_slices == 0:
+        raise ValueError("DCA: empty candle window")
     slice_usd = deploy_usd / n_slices
 
     btc = 0.0
@@ -140,6 +146,10 @@ def fmt_row(r: dict) -> str:
 async def main(days: int) -> None:
     print(f"Fetching BTC 1d ({days}d)...")
     candles = await fetch_candles("BTC", "1d", limit=days)
+    if candles is None or candles.empty:
+        # The feed returns an empty DataFrame on HTTP/network failures.
+        # Bail explicitly rather than crashing inside metric helpers.
+        raise SystemExit("fetch_candles returned no data — HL API down?")
     actual_days = (
         candles["timestamp"].iloc[-1] - candles["timestamp"].iloc[0]
     ).days

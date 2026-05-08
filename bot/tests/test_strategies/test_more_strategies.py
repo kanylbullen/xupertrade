@@ -37,6 +37,7 @@ from hypertrade.strategies.oleg_aryukov import OlegAryukovStrategy
 from hypertrade.strategies.qullamagi_breakout import QullamagiBreakoutStrategy
 from hypertrade.strategies.supertrend import SuperTrendStrategy
 from hypertrade.strategies.golden_cross import GoldenCrossStrategy
+from hypertrade.strategies.ath_breakout import AthBreakoutStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -1254,13 +1255,12 @@ class TestGoldenCrossStrategy:
 # ATH Breakout Strategy — buy new N-day high, exit on trailing stop
 # ===========================================================================
 
-from hypertrade.strategies.ath_breakout import AthBreakoutStrategy  # noqa: E402
-
-
 class TestAthBreakoutStrategy:
     """Long-only N-day breakout with trailing-stop exit."""
 
-    WARMUP = AthBreakoutStrategy.lookback + 2  # 202
+    # Strategy needs `lookback` prior bars + 1 current bar = lookback + 1.
+    # Tests pass one fewer to confirm warmup-guard returns None.
+    WARMUP = AthBreakoutStrategy.lookback + 1
 
     @pytest.mark.asyncio
     async def test_warmup_returns_none(self):
@@ -1270,7 +1270,7 @@ class TestAthBreakoutStrategy:
 
     @pytest.mark.asyncio
     async def test_entry_signal_fires(self):
-        """Flat history then a breakout bar above the prior 200d high → OPEN_LONG."""
+        """Flat history then a breakout bar above the prior N-day high → OPEN_LONG."""
         prices = [100.0] * (AthBreakoutStrategy.lookback + 1)
         prices.append(120.0)  # current bar — breaks the 100 plateau
         df = _df_from_prices(prices, spread=0.001)

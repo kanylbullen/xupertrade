@@ -73,7 +73,12 @@ class AthBreakoutStrategy(Strategy):
         self._peak_since_entry: float | None = None
 
     def restore_state(self, side: str, entry_price: float) -> None:
-        # Only long is supported; ignore side defensively.
+        # Long-only strategy. If DB row says anything other than long
+        # (sync glitch, manual edit, schema drift), fail closed: stay
+        # flat. The runner will reconcile and reset us cleanly.
+        if side != "long":
+            self.reset_state()
+            return
         self._in_position = True
         self._entry_price = entry_price
         # No persisted peak → start from entry; first tick will update.
@@ -90,6 +95,11 @@ class AthBreakoutStrategy(Strategy):
     def restore_from_json(
         self, side: str, entry_price: float, state: dict
     ) -> None:
+        # Same defensive guard as restore_state — only restore as
+        # in-position when the DB confirms long.
+        if side != "long":
+            self.reset_state()
+            return
         self._in_position = True
         self._entry_price = state.get("entry_price", entry_price)
         # Persisted peak survives restart so the trail doesn't reset and
@@ -102,9 +112,9 @@ class AthBreakoutStrategy(Strategy):
         self._peak_since_entry = None
 
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
-        # Need lookback + 2 bars: lookback for the rolling-max window,
-        # plus the current bar being evaluated.
-        if len(candles) < self.lookback + 2:
+        # Need lookback + 1 bars: `lookback` prior bars for the rolling-max
+        # window plus the current bar being evaluated.
+        if len(candles) < self.lookback + 1:
             return None
 
         latest = candles.iloc[-1]
