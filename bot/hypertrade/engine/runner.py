@@ -87,6 +87,37 @@ class EngineRunner:
                         pos.strategy_name,
                     )
             if state is not None:
+                # Defensive sanity check on the persisted dict shape
+                # (audit L7). Strategies' restore_from_json silently
+                # falls back to defaults when expected keys are missing,
+                # which makes silent state corruption hard to spot. We
+                # also need an `isinstance(dict)` guard because
+                # `state_json` can deserialize to non-dict values
+                # (`null`, `[]`, `"foo"` from corrupted/hand-edited rows)
+                # — `set(state.keys())` would AttributeError otherwise
+                # and break startup (audit-bundle-4 review fix).
+                if not isinstance(state, dict):
+                    logger.warning(
+                        "[%s] state_json deserialized to non-dict %r — "
+                        "falling back to recompute restore",
+                        pos.strategy_name, type(state).__name__,
+                    )
+                    strat.restore_state(pos.side, pos.entry_price)
+                    restored += 1
+                    continue
+                _expected = {"in_long", "in_short", "entry", "sl", "tp"}
+                _missing = _expected - set(state.keys())
+                if _missing and any(
+                    hasattr(strat, "_" + k.removeprefix("in_"))
+                    or hasattr(strat, "_" + k)
+                    for k in _missing
+                ):
+                    logger.warning(
+                        "[%s] state_json missing keys %s — fields will "
+                        "use restore_from_json defaults (likely safe but "
+                        "indicates schema drift)",
+                        pos.strategy_name, sorted(_missing),
+                    )
                 strat.restore_from_json(pos.side, pos.entry_price, state)
                 logger.info(
                     "Restored %s state from JSON: %s @ %.2f (state=%s)",
@@ -181,7 +212,22 @@ class EngineRunner:
         # for the task to complete.
         import asyncio
         try:
-            asyncio.create_task(_restore())
+            task = asyncio.create_task(_restore())
+            # Done-callback so an unhandled exception inside _restore
+            # surfaces in logs immediately, not only at GC. Audit L6.
+            def _on_done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    # exc_info needs an info-tuple; bare exception loses
+                    # the traceback (audit-bundle-4 review fix).
+                    logger.error(
+                        "TLS restore task died with unhandled exception: %s",
+                        exc,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+            task.add_done_callback(_on_done)
         except RuntimeError:
             # No running event loop (shouldn't happen — startup is async),
             # but keep startup robust against weird call paths.
@@ -718,25 +764,15 @@ class EngineRunner:
                     else:
                         realized_pnl = (open_pos.entry_price - filled_price) * size - fee
 
-        # Record to DB
+        # Record to DB — atomic Trade + PositionRecord write. Audit M8:
+        # pre-fix the trade and position writes were two separate sessions,
+        # so a SIGTERM / crash between them left a Trade row with no
+        # matching PositionRecord (or vice versa for close), which the
+        # next reconcile loop would treat as a divergence and force-close.
         if self.repo:
-            await self.repo.record_trade(
-                order_id=order.id,
-                strategy_name=signal.strategy_name,
-                symbol=signal.symbol,
-                side=order.side,
-                size=size,
-                price=filled_price,
-                fee=fee,
-                pnl=realized_pnl,
-                reason=signal.reason,
-            )
-
             if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
                 import json as _json
                 side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
-                # Snapshot strategy state at signal time so restart can
-                # restore the exact SL/TP/etc. without recomputation drift.
                 strat = next(
                     (s for s in self.strategies if s.name == signal.strategy_name),
                     None,
@@ -752,20 +788,29 @@ class EngineRunner:
                             "[%s] export_state failed (continuing without)",
                             signal.strategy_name,
                         )
-                await self.repo.open_position(
-                    signal.strategy_name,
-                    signal.symbol,
-                    side,
-                    size,
-                    filled_price,
+                await self.repo.record_trade_and_open_position(
+                    order_id=order.id,
+                    strategy_name=signal.strategy_name,
+                    symbol=signal.symbol,
+                    trade_side=order.side,
+                    position_side=side,
+                    size=size,
+                    price=filled_price,
+                    fee=fee,
+                    reason=signal.reason,
                     state_json=state_json,
                 )
             elif signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
-                await self.repo.close_position(
-                    signal.strategy_name,
-                    signal.symbol,
-                    filled_price,
-                    realized_pnl or 0,
+                await self.repo.record_trade_and_close_position(
+                    order_id=order.id,
+                    strategy_name=signal.strategy_name,
+                    symbol=signal.symbol,
+                    trade_side=order.side,
+                    size=size,
+                    price=filled_price,
+                    fee=fee,
+                    pnl=realized_pnl or 0,
+                    reason=signal.reason,
                 )
                 self.portfolio.record_pnl(realized_pnl or 0)
 

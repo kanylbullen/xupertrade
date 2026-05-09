@@ -92,6 +92,120 @@ class Repository:
             await session.commit()
             return pos
 
+    async def record_trade_and_open_position(
+        self,
+        *,
+        order_id: str,
+        strategy_name: str,
+        symbol: str,
+        trade_side: str,         # "buy"/"sell" — exchange side
+        position_side: str,      # "long"/"short" — strategy side
+        size: float,
+        price: float,
+        fee: float = 0.0,
+        reason: str = "",
+        state_json: str | None = None,
+    ) -> tuple[Trade, PositionRecord]:
+        """Insert Trade + PositionRecord atomically in one transaction.
+
+        Audit M8 (2026-05-09): pre-fix the runner did `record_trade()`
+        then `open_position()` in two separate sessions. A SIGTERM /
+        crash between the two writes left a Trade row with no matching
+        PositionRecord — at next startup the reconcile loop saw the
+        exchange position as an orphan and closed it, forcing an
+        unintended exit. Atomic commit eliminates that gap entirely.
+
+        OPEN-only — close path uses `record_trade_and_close_position`
+        (mirror) since UPDATE-then-INSERT has the same partial-write risk.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                trade = Trade(
+                    order_id=order_id,
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    side=trade_side,
+                    size=size,
+                    price=price,
+                    fee=fee,
+                    pnl=None,  # opens have no realized pnl
+                    reason=reason,
+                    is_paper=self._is_paper,
+                    mode=self._mode,
+                )
+                pos = PositionRecord(
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    side=position_side,
+                    size=size,
+                    entry_price=price,
+                    is_paper=self._is_paper,
+                    mode=self._mode,
+                    state_json=state_json,
+                )
+                session.add(trade)
+                session.add(pos)
+            return trade, pos
+
+    async def record_trade_and_close_position(
+        self,
+        *,
+        order_id: str,
+        strategy_name: str,
+        symbol: str,
+        trade_side: str,
+        size: float,
+        price: float,
+        fee: float = 0.0,
+        pnl: float = 0.0,
+        reason: str = "",
+    ) -> Trade:
+        """Insert Trade + UPDATE matching open PositionRecord atomically.
+
+        Mirror of record_trade_and_open_position for the close path
+        (audit M8). Without atomicity, a crash between recording the
+        trade and closing the position would leave the position-record
+        flagged is_open=true while the trade row says we exited.
+
+        Always returns the Trade row. If no matching open position
+        exists, the trade is still recorded (defensive — caller may
+        have a reason to log the close-side trade even when the
+        position-record is already gone, e.g. earlier reconcile-orphan
+        close); only the position UPDATE is skipped in that case.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                # Find matching open position
+                result = await session.execute(
+                    select(PositionRecord).where(
+                        PositionRecord.strategy_name == strategy_name,
+                        PositionRecord.symbol == symbol,
+                        PositionRecord.is_open == True,
+                        PositionRecord.mode == self._mode,
+                    )
+                )
+                pos = result.scalar_one_or_none()
+                trade = Trade(
+                    order_id=order_id,
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    side=trade_side,
+                    size=size,
+                    price=price,
+                    fee=fee,
+                    pnl=pnl,
+                    reason=reason,
+                    is_paper=self._is_paper,
+                    mode=self._mode,
+                )
+                session.add(trade)
+                if pos is not None:
+                    pos.is_open = False
+                    pos.exit_price = price
+                    pos.pnl = pnl
+                    pos.closed_at = datetime.now(timezone.utc)
+            return trade
+
     async def close_position(
         self,
         strategy_name: str,
