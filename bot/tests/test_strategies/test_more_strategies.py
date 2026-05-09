@@ -270,8 +270,6 @@ class TestHashMomentumStrategy:
         the strategy 50 times with no new bar; expect at most one
         signal (the original SL exit), then nothing.
         """
-        from datetime import datetime, timedelta, timezone
-
         strat = HashMomentumStrategy()
         entry = 100.0
         strat.restore_state("long", entry)
@@ -296,24 +294,40 @@ class TestHashMomentumStrategy:
 
     @pytest.mark.asyncio
     async def test_cooldown_advances_per_bar_not_per_tick(self):
-        """Bar-timestamp-based cooldown: 6 ticks on the same bar = 0 cooldown
-        progress. One new closed bar = 1 cooldown step."""
+        """Bar-timestamp-based cooldown: ticks on the same bar = no
+        cooldown advance. Each NEW closed bar = exactly 1 cooldown step.
+        Initial observation establishes baseline without phantom bump."""
+        from datetime import timedelta
+
         strat = HashMomentumStrategy(cooldown_bars=3)
-        # Manually flag closed and zero out cooldown to start in a known state.
         strat._in_long = False
         strat._in_short = False
         strat._bars_since_close = 0
         strat._last_closed_bar_ts = None
 
         df = _flat_df(self.WARMUP + 5, price=100.0)
-        # Tick 60 times on the SAME df (no new bar). Cooldown counter
-        # should land at exactly 1 (incremented once when latest_bar_ts
-        # transitions from None → first observed bar), not 60.
+        # Phase 1: tick 60 times on the SAME bar. Counter must stay at
+        # 0 — first observation establishes baseline (no bump), and
+        # subsequent identical-ts ticks shouldn't advance.
         for _ in range(60):
             await strat.on_candle(df)
+        assert strat._bars_since_close == 0, (
+            f"Same-bar ticks must not advance cooldown; got "
+            f"{strat._bars_since_close} (off-by-one phantom-bump regression)"
+        )
+
+        # Phase 2: append ONE new closed bar (different timestamp).
+        # Counter must go to exactly 1.
+        new_ts = df["timestamp"].iloc[-1] + timedelta(hours=1)
+        df2 = pd.concat([df, pd.DataFrame([{
+            "open": 100.0, "high": 100.1, "low": 99.9,
+            "close": 100.0, "volume": 1000.0, "timestamp": new_ts,
+        }])], ignore_index=True)
+        for _ in range(10):
+            await strat.on_candle(df2)
         assert strat._bars_since_close == 1, (
-            f"Cooldown should advance once on first observation, got "
-            f"{strat._bars_since_close} — tick-based bug regression"
+            f"Single new bar should bump counter once; got "
+            f"{strat._bars_since_close}"
         )
 
 

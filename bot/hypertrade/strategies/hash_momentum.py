@@ -189,9 +189,16 @@ class HashMomentumStrategy(Strategy):
         # same stale bar data. Track the closed bar's timestamp; only
         # bump the counter when a new bar has actually closed.
         latest_bar_ts = latest["timestamp"] if "timestamp" in latest.index else None
-        if latest_bar_ts is not None and latest_bar_ts != self._last_closed_bar_ts:
-            self._bars_since_close += 1
-            self._last_closed_bar_ts = latest_bar_ts
+        if latest_bar_ts is not None:
+            if self._last_closed_bar_ts is None:
+                # First observation — establish baseline WITHOUT bumping
+                # the counter. Otherwise a fresh restart / restore would
+                # phantom-increment cooldown by 1 on the very next tick
+                # (the None → first-ts transition counts as "changed").
+                self._last_closed_bar_ts = latest_bar_ts
+            elif latest_bar_ts != self._last_closed_bar_ts:
+                self._bars_since_close += 1
+                self._last_closed_bar_ts = latest_bar_ts
         in_cooldown = self._bars_since_close < self.cooldown_bars
         flat = not self._in_long and not self._in_short
 
