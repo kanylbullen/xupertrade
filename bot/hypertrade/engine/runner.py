@@ -89,10 +89,22 @@ class EngineRunner:
             if state is not None:
                 # Defensive sanity check on the persisted dict shape
                 # (audit L7). Strategies' restore_from_json silently
-                # falls back to defaults when expected keys are missing
-                # (likely from schema drift / hand-edited DB JSON), which
-                # makes silent state corruption hard to spot. Log once
-                # per restore so a partial-state dict doesn't go unnoticed.
+                # falls back to defaults when expected keys are missing,
+                # which makes silent state corruption hard to spot. We
+                # also need an `isinstance(dict)` guard because
+                # `state_json` can deserialize to non-dict values
+                # (`null`, `[]`, `"foo"` from corrupted/hand-edited rows)
+                # — `set(state.keys())` would AttributeError otherwise
+                # and break startup (audit-bundle-4 review fix).
+                if not isinstance(state, dict):
+                    logger.warning(
+                        "[%s] state_json deserialized to non-dict %r — "
+                        "falling back to recompute restore",
+                        pos.strategy_name, type(state).__name__,
+                    )
+                    strat.restore_state(pos.side, pos.entry_price)
+                    restored += 1
+                    continue
                 _expected = {"in_long", "in_short", "entry", "sl", "tp"}
                 _missing = _expected - set(state.keys())
                 if _missing and any(
@@ -208,9 +220,12 @@ class EngineRunner:
                     return
                 exc = t.exception()
                 if exc is not None:
+                    # exc_info needs an info-tuple; bare exception loses
+                    # the traceback (audit-bundle-4 review fix).
                     logger.error(
                         "TLS restore task died with unhandled exception: %s",
-                        exc, exc_info=exc,
+                        exc,
+                        exc_info=(type(exc), exc, exc.__traceback__),
                     )
             task.add_done_callback(_on_done)
         except RuntimeError:

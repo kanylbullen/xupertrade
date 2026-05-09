@@ -159,14 +159,19 @@ class Repository:
         fee: float = 0.0,
         pnl: float = 0.0,
         reason: str = "",
-    ) -> Trade | None:
+    ) -> Trade:
         """Insert Trade + UPDATE matching open PositionRecord atomically.
 
         Mirror of record_trade_and_open_position for the close path
         (audit M8). Without atomicity, a crash between recording the
         trade and closing the position would leave the position-record
         flagged is_open=true while the trade row says we exited.
-        Returns the Trade row (None if no matching open position found).
+
+        Always returns the Trade row. If no matching open position
+        exists, the trade is still recorded (defensive — caller may
+        have a reason to log the close-side trade even when the
+        position-record is already gone, e.g. earlier reconcile-orphan
+        close); only the position UPDATE is skipped in that case.
         """
         async with self._session_factory() as session:
             async with session.begin():

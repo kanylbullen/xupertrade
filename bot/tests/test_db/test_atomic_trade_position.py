@@ -9,9 +9,8 @@ inserts in one transaction so that gap can't open.
 
 from __future__ import annotations
 
-import os
-
 import pytest
+from sqlalchemy import select
 
 from hypertrade.db import models
 from hypertrade.db.repo import Repository
@@ -51,12 +50,18 @@ async def test_record_trade_and_open_position_writes_both(in_memory_repo):
     assert trade.id is not None
     assert pos.id is not None
     assert pos.is_open is True
-    # Verify reads
-    trades = await repo.get_trades_since_strategy("ath_breakout") if hasattr(
-        repo, "get_trades_since_strategy") else None
+    # Verify both rows are readable from the DB (was a dead-code
+    # `hasattr(...)` branch that never asserted anything; review fix).
     open_pos = await repo.get_open_position("ath_breakout", "BTC")
     assert open_pos is not None
     assert open_pos.entry_price == 50000.0
+    async with repo._session_factory() as session:
+        result = await session.execute(
+            select(models.Trade).where(models.Trade.order_id == "test-1")
+        )
+        rows = list(result.scalars().all())
+    assert len(rows) == 1
+    assert rows[0].fee == 0.225
 
 
 @pytest.mark.asyncio
@@ -95,7 +100,6 @@ async def test_record_trade_and_open_position_atomic_on_failure(in_memory_repo):
         models.PositionRecord.__init__ = original_init
 
     # Trade row must NOT exist (atomic rollback)
-    from sqlalchemy import select
     async with repo._session_factory() as session:
         result = await session.execute(
             select(models.Trade).where(models.Trade.order_id == "rollback-test")

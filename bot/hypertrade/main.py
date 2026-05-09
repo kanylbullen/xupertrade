@@ -152,7 +152,13 @@ async def main() -> None:
             return  # explicit cancel during shutdown — not an error
         exc = t.exception()
         if exc is not None:
-            logger.error("WebSocket task died: %s", exc, exc_info=exc)
+            # `exc_info` accepts True (current `except` context) or an
+            # exception-info 3-tuple. Passing the bare exception loses
+            # the traceback (audit-bundle-4 review fix).
+            logger.error(
+                "WebSocket task died: %s", exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     ws_task.add_done_callback(_ws_done)
     logger.info("WebSocket feed started (real-time prices)")
