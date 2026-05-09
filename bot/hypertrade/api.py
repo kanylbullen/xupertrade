@@ -617,7 +617,13 @@ def _control_routes(
         })
 
     async def vaults_list(request: web.Request) -> web.Response:
-        """Currently qualified vaults with latest snapshot metrics."""
+        """Currently qualified vaults with latest snapshot metrics.
+
+        Auth-gated: reveals which vaults this user is monitoring + the
+        scanner's qualification state. Less personally identifying than
+        /api/vaults/mine but still tracking metadata."""
+        if (err := _require_auth(request)) is not None:
+            return err
         repo: Repository | None = request.app.get("repo")
         if repo is None:
             return _cors({"vaults": []})
@@ -657,6 +663,8 @@ def _control_routes(
         return _cors({"vaults": out})
 
     async def vault_detail(request: web.Request) -> web.Response:
+        if (err := _require_auth(request)) is not None:
+            return err
         repo: Repository | None = request.app.get("repo")
         address = request.match_info.get("address", "").lower()
         if repo is None or not address:
@@ -709,6 +717,8 @@ def _control_routes(
         }})
 
     async def vault_snapshots(request: web.Request) -> web.Response:
+        if (err := _require_auth(request)) is not None:
+            return err
         repo: Repository | None = request.app.get("repo")
         address = request.match_info.get("address", "").lower()
         if repo is None or not address:

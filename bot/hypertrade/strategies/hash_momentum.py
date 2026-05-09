@@ -72,14 +72,30 @@ class HashMomentumStrategy(Strategy):
         self._entry = entry_price
 
     def export_state(self) -> dict | None:
-        if not (self._in_long or self._in_short):
+        # Always export when there's something meaningful — either an
+        # open position OR an active cooldown. The runner snapshots
+        # this to Redis on every signal; on restart, restore_from_json
+        # gets called if either kind of state exists. Without exporting
+        # cooldown when flat, restart-inside-cooldown bypassed the 24h
+        # re-entry block (audit M6 / PR #19 review).
+        in_position = self._in_long or self._in_short
+        cooldown_active = (
+            self._bars_since_close < self.cooldown_bars
+            and self._last_closed_bar_ts is not None
+        )
+        if not (in_position or cooldown_active):
             return None
+        last_ts = self._last_closed_bar_ts
+        if last_ts is not None and hasattr(last_ts, "isoformat"):
+            last_ts = last_ts.isoformat()
         return {
             "in_long": self._in_long,
             "in_short": self._in_short,
             "entry": self._entry,
             "sl": self._sl,
             "tp": self._tp,
+            "bars_since_close": self._bars_since_close,
+            "last_closed_bar_ts": last_ts,
         }
 
     def restore_from_json(
@@ -90,6 +106,18 @@ class HashMomentumStrategy(Strategy):
         self._entry = state.get("entry", entry_price)
         self._sl = state.get("sl")
         self._tp = state.get("tp")
+        # Cooldown state restoration (audit M6). Default to 999 + None
+        # if the persisted dict predates this field — equivalent to the
+        # legacy behavior, no regression for old DB rows.
+        self._bars_since_close = int(state.get("bars_since_close", 999))
+        last_ts_raw = state.get("last_closed_bar_ts")
+        if isinstance(last_ts_raw, str):
+            try:
+                self._last_closed_bar_ts = pd.Timestamp(last_ts_raw)
+            except Exception:
+                self._last_closed_bar_ts = None
+        else:
+            self._last_closed_bar_ts = last_ts_raw
 
     def reset_state(self) -> None:
         self._in_long = False

@@ -87,12 +87,13 @@ class MoonPhasesStrategy(Strategy):
         if len(candles) < 35:
             return None
 
-        closed = candles.iloc[:-1]
-        latest = closed.iloc[-1]
-        prev = closed.iloc[-2]
-        # Live (in-progress) bar for SL/TP exit checks — see ema_crossover
-        # for rationale (avoids stale bar low/high triggering false exits).
-        live = candles.iloc[-1]
+        # Runner already strips the forming bar before calling us
+        # (runner.py:434), so `candles.iloc[-1]` IS the latest closed bar.
+        # Pre-2026-05-09 we double-stripped here, delaying every signal
+        # by one full bar (1d on this strategy → missing the lunar
+        # transition cusp). Use candles directly. (Audit M5.)
+        latest = candles.iloc[-1]
+        prev = candles.iloc[-2]
 
         # Get timestamps in ms
         ts_latest = float(latest["timestamp"].timestamp() * 1000) if hasattr(latest["timestamp"], "timestamp") else float(latest["timestamp"])
@@ -110,26 +111,31 @@ class MoonPhasesStrategy(Strategy):
         new_moon_start = is_new_cur and not is_new_prev
 
         close = float(latest["close"])
-        live_high = float(live["high"])
-        live_low = float(live["low"])
+        # SL/TP comparisons use the latest closed bar's high/low. Since
+        # the runner has already stripped the forming bar, this is the
+        # freshest data available — the "live = candles.iloc[-1]" alias
+        # we used post-PR-15 was misleading (audit C1) and was the same
+        # bar as latest in production. Rename for clarity.
+        bar_high = float(latest["high"])
+        bar_low = float(latest["low"])
 
         # ---- Manage open position ----
         if self._in_position and self._sl is not None and self._tp is not None:
-            if live_low <= self._sl:
+            if bar_low <= self._sl:
                 self._in_position = False
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: low ${live_low:,.2f} <= ${self._sl:,.2f} (lunar day {ld_cur})",
+                    reason=f"SL hit: low ${bar_low:,.2f} <= ${self._sl:,.2f} (lunar day {ld_cur})",
                 )
-            if live_high >= self._tp:
+            if bar_high >= self._tp:
                 self._in_position = False
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"TP hit: high ${live_high:,.2f} >= ${self._tp:,.2f} (lunar day {ld_cur})",
+                    reason=f"TP hit: high ${bar_high:,.2f} >= ${self._tp:,.2f} (lunar day {ld_cur})",
                 )
             if new_moon_start:
                 self._in_position = False

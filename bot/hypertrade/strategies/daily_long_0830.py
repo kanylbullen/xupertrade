@@ -50,12 +50,16 @@ class DailyLong0830Strategy(Strategy):
         self._in_position = bool(state.get("in_position", side == "long"))
 
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
-        if len(candles) < 2:
+        if len(candles) < 1:
             return None
 
-        # Latest closed candle (mirror ema_crossover convention)
-        closed = candles.iloc[:-1]
-        latest = closed.iloc[-1]
+        # The runner already strips the forming bar before passing
+        # candles in (runner.py:434). Double-stripping here used to
+        # delay every entry/exit by one full timeframe — for a 15m
+        # strategy that's a 15-minute lag, so the 08:30 entry actually
+        # fired at 08:45 and the 08:00 exit at 08:15 (audit M5,
+        # 2026-05-09). Use candles.iloc[-1] directly.
+        latest = candles.iloc[-1]
 
         ts = latest["timestamp"]
         if hasattr(ts, "tz_convert"):

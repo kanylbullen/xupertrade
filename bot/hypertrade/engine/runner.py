@@ -100,6 +100,43 @@ class EngineRunner:
                 )
             restored += 1
 
+        # Audit M6 follow-up: also restore Redis-backed strategy state for
+        # strategies that are FLAT but might be in cooldown. The
+        # position-table state_json only covers in-position windows; the
+        # Redis snapshot covers the post-close cooldown window. Without
+        # this, a restart inside the cooldown window would reset the
+        # counter and let the strategy immediately re-enter on the same
+        # stale bar.
+        if self.control:
+            for strat in self.strategies:
+                if strat.name in {p.strategy_name for p in positions}:
+                    continue  # already restored from DB above
+                try:
+                    redis_state = await self.control.load_strategy_state(strat.name)
+                except Exception:
+                    logger.exception(
+                        "load_strategy_state failed for %s (skipping)", strat.name,
+                    )
+                    continue
+                if not redis_state:
+                    continue
+                # Strategy is flat but had persisted cooldown state.
+                # restore_from_json supports the "side defensively reset
+                # if not long" path — pass the sentinel "flat" so any
+                # strategy that doesn't expect non-{long,short} side
+                # falls back cleanly.
+                try:
+                    strat.restore_from_json("flat", 0.0, redis_state)
+                    logger.info(
+                        "Restored %s cooldown state from Redis: %s",
+                        strat.name, redis_state,
+                    )
+                except Exception:
+                    logger.exception(
+                        "restore_from_json failed for %s redis state %s",
+                        strat.name, redis_state,
+                    )
+
         if positions:
             logger.info(
                 "State restoration complete: %d/%d positions restored",
@@ -463,7 +500,14 @@ class EngineRunner:
                 )
             )
 
-    async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> None:
+    async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> bool:
+        """Execute a signal end-to-end. Returns True on full success
+        (order filled + DB written + parity OK), False on any abort
+        (risk-blocked, kill-switch, order rejected, close-size unresolved,
+        cap-breached). Callers performing flip-close-then-open MUST check
+        the close return value — opening a new opposite position when the
+        close failed leaves the DB and exchange permanently divergent.
+        """
         if not await self.portfolio.check_risk_limits():
             logger.warning(
                 "[%s] Risk limit breached — skipping execution of %s %s",
@@ -478,11 +522,11 @@ class EngineRunner:
                         message=f"Risk limit breached — execution of {signal.action.value} {signal.symbol} blocked",
                     )
                 )
-            return
+            return False
 
         if settings.kill_switch:
             logger.warning("Kill switch is ON — skipping execution")
-            return
+            return False
 
         # Idempotency / flip detection: don't open a same-side duplicate;
         # if we already hold the opposite side, synthesize a CLOSE first
@@ -503,7 +547,7 @@ class EngineRunner:
                             signal.symbol,
                             existing.side,
                         )
-                        return
+                        return False
                     # Opposite side → flip. Close the existing position first
                     # via a synthesized CLOSE signal that goes through the
                     # standard close path (DB-driven size, trade record, etc.).
@@ -524,10 +568,38 @@ class EngineRunner:
                         strategy_name=signal.strategy_name,
                         reason=f"Auto-close before flip ({signal.reason[:60]})",
                     )
-                    await self._execute_signal(flip_close, current_price, leverage)
-                    # Fall through to the open path below; the close above
-                    # has already cleared the DB position so the next
-                    # get_open_position call would return None.
+                    flip_ok = await self._execute_signal(
+                        flip_close, current_price, leverage,
+                    )
+                    if not flip_ok:
+                        # ABORT: opening a new opposite-direction position
+                        # while the close failed leaves DB+exchange divergent
+                        # (audit H1, 2026-05-09). The reconcile loop will
+                        # eventually catch the leftover, but we mustn't
+                        # actively make it worse here.
+                        logger.warning(
+                            "[%s] Flip-close FAILED for %s %s — aborting "
+                            "follow-up %s to prevent double-side divergence",
+                            signal.strategy_name,
+                            existing.side, signal.symbol,
+                            signal.action.value,
+                        )
+                        if self.event_bus:
+                            try:
+                                await self.event_bus.publish(
+                                    ErrorOccurred(
+                                        strategy=signal.strategy_name,
+                                        message=(
+                                            f"Flip-close failed on {signal.symbol} "
+                                            f"({existing.side}→{wanted_side}); "
+                                            f"open aborted to keep DB and "
+                                            f"exchange consistent."
+                                        ),
+                                    )
+                                )
+                            except Exception:
+                                logger.exception("flip-abort: event publish failed")
+                        return False
 
             # Cross-strategy check: block if another strategy already holds
             # this coin and allow_multi_coin is disabled.
@@ -545,7 +617,7 @@ class EngineRunner:
                             blocking.side,
                             signal.symbol,
                         )
-                        return
+                        return False
 
             # Total exposure cap: block if opening this would exceed the
             # configured margin sum across all open strategy positions.
@@ -572,7 +644,7 @@ class EngineRunner:
                         settings.max_position_size_usd,
                         settings.max_total_exposure_usd,
                     )
-                    return
+                    return False
 
         size = signal.size or self._calculate_size(current_price, leverage)
 
@@ -585,7 +657,7 @@ class EngineRunner:
                 signal.strategy_name, signal.symbol, "long"
             )
             if close_size is None:
-                return
+                return False
             order = await self.exchange.place_order(
                 signal.symbol, "sell", close_size, OrderType.MARKET
             )
@@ -599,13 +671,13 @@ class EngineRunner:
                 signal.strategy_name, signal.symbol, "short"
             )
             if close_size is None:
-                return
+                return False
             order = await self.exchange.place_order(
                 signal.symbol, "buy", close_size, OrderType.MARKET
             )
             size = close_size
         else:
-            return
+            return False
 
         if self.event_bus:
             await self.event_bus.publish(
@@ -619,7 +691,7 @@ class EngineRunner:
 
         if order.status.value != "filled":
             logger.warning("Order not filled: %s", order.status)
-            return
+            return False
 
         filled_price = order.filled_price or 0
         fee = filled_price * size * settings.taker_fee_rate
@@ -697,6 +769,26 @@ class EngineRunner:
                 )
                 self.portfolio.record_pnl(realized_pnl or 0)
 
+        # Snapshot post-signal strategy state to Redis. Covers the
+        # cooldown-after-close gap (audit M6 / PR #19 review): position
+        # table state_json only persists during in-position windows;
+        # this Redis snapshot persists post-close cooldown so a restart
+        # inside the cooldown window can't bypass the re-entry block.
+        if self.control:
+            strat = next(
+                (s for s in self.strategies if s.name == signal.strategy_name),
+                None,
+            )
+            if strat is not None:
+                try:
+                    snap = strat.export_state()
+                    await self.control.save_strategy_state(strat.name, snap)
+                except Exception:
+                    logger.exception(
+                        "[%s] save_strategy_state failed (non-fatal)",
+                        signal.strategy_name,
+                    )
+
         # Publish events
         if self.event_bus:
             await self.event_bus.publish(
@@ -716,15 +808,22 @@ class EngineRunner:
         # strategies. Catches partial-fill drift instantly (5min reconcile
         # is too slow — the 2026-05-09 SOL spam accumulated 1.1 SOL of
         # divergence in 4 hours before the 5min reconcile noticed).
+        # Parity result propagates into the return value: a flip-detect
+        # caller MUST NOT proceed to open if the close left exchange
+        # diverged from DB (audit H1 / PR #19 review). Internal exceptions
+        # are non-fatal but mismatch is.
+        parity_ok = True
         try:
-            await self._check_parity_after_trade(signal.symbol)
+            parity_ok = await self._check_parity_after_trade(signal.symbol)
         except Exception:
             logger.exception(
                 "parity check after %s %s failed (non-fatal)",
                 signal.action.value, signal.symbol,
             )
 
-    async def _check_parity_after_trade(self, symbol: str) -> None:
+        return parity_ok
+
+    async def _check_parity_after_trade(self, symbol: str) -> bool:
         """Verify exchange position for `symbol` matches DB sum across
         all open strategies. Lightweight — only fires on the trade event,
         not every tick.
@@ -735,11 +834,15 @@ class EngineRunner:
         without false alerts (BTC szDecimals=5 → 1e-5 step → tolerance
         1e-4; SOL/ETH szDecimals=2-3 → tolerance 5e-2).
 
-        Action is alert-only; the trade-rate alarm (PR #16) handles the
-        downstream auto-pause when divergence triggers spam-trading.
+        Action: alert (Telegram via ErrorOccurred); ALSO returns False
+        so the caller can refuse to proceed (e.g. flip-detect must not
+        open opposite side if the close left exchange diverged). Returns
+        True when in-tolerance (the happy path). Returns True on internal
+        exceptions too (don't block trade flow on parity-check failures
+        — those go through the existing exception path in the caller).
         """
         if self.repo is None:
-            return
+            return True
 
         # DB side: signed-net for the symbol across all open strategies.
         # Long contributes +size, short contributes -size — engine's
@@ -757,7 +860,7 @@ class EngineRunner:
             logger.exception(
                 "parity: exchange.get_positions() failed for %s", symbol,
             )
-            return
+            return True  # don't block trade flow when we can't read exchange
         ex_net = 0.0
         for p in ex_positions:
             if p.symbol == symbol:
@@ -772,7 +875,7 @@ class EngineRunner:
         # SOL/ETH: szDecimals=2-3 (step 0.01-0.001) → tolerance 5e-2
         tolerance = 1e-4 if symbol == "BTC" else 5e-2
         if diff <= tolerance:
-            return
+            return True
 
         msg = (
             f"PARITY MISMATCH on {symbol}: DB net {db_net:.6f} vs "
@@ -792,6 +895,7 @@ class EngineRunner:
                 )
             except Exception:
                 logger.exception("parity: event publish failed")
+        return False
 
     async def _check_trade_rate_anomalies(self) -> None:
         """Detect spam-trading strategies and auto-pause via Redis.
