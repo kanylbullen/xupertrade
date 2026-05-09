@@ -749,6 +749,13 @@ class Repository:
             # Pick the newest snapshot per vault; filter to qualified later.
             # Sorting by (vault, snapshot_at desc) lets us pluck the head row
             # per vault in one pass.
+            #
+            # Stream via the scalars iterator (NOT .all()) so the early
+            # `break` actually saves work — `.all()` would materialize
+            # every snapshot row into memory before our break, defeating
+            # the limit's whole point. Audit M7 / PR #21 review.
+            # Long-term: push DISTINCT ON / window function + LIMIT into
+            # SQL so the DB itself stops fetching at `limit` rows.
             result = await session.execute(
                 select(VaultSnapshot)
                 .order_by(
@@ -758,7 +765,7 @@ class Repository:
             )
             seen: set[str] = set()
             picks: list[VaultSnapshot] = []
-            for snap in result.scalars().all():
+            for snap in result.scalars():
                 if snap.vault_address in seen:
                     continue
                 seen.add(snap.vault_address)

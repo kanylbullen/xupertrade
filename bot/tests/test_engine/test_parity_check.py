@@ -195,16 +195,14 @@ async def test_btc_tolerance_is_tightest():
 
 
 @pytest.mark.asyncio
-async def test_default_tolerance_when_exchange_has_no_precision_method():
-    """Paper exchange and others using base-class default (szDecimals=4)
-    get tolerance 1e-3 — strict enough to catch drifts but lenient
-    enough to absorb HL rounding."""
+async def test_default_precision_for_unknown_symbol():
+    """Coins not cataloged by the exchange's szDecimals map fall back
+    to default 4dp (per Exchange base) → tolerance 1e-3. A 0.05 DOGE
+    drift trips the alert."""
     runner, bus = _runner_with(
         db_positions=[_pos("DOGE", "long", 100.0)],
         exchange_positions=[_pos("DOGE", "long", 100.05)],
     )
-    # DOGE not in our default sz_decimals dict → falls back to default 4
-    # → tolerance 1e-3 → 0.05 diff triggers alert.
     ok = await runner._check_parity_after_trade("DOGE")
     assert ok is False
     bus.publish.assert_called_once()
