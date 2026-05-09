@@ -229,37 +229,106 @@ class TestHashMomentumStrategy:
     async def test_restore_state_no_instant_close(self):
         """After restore_state(long, entry), benign next candle must not close.
 
-        This is the test that catches the _sl=0.0 instant-close bug.
-        After restore, _sl = entry*0.978. Feed candle with low > _sl.
+        Post-fix (2026-05-09): SL/TP are checked against the LIVE (in-progress)
+        bar `df[-1]`, not the closed bar `df[-2]`. Both must stay benign.
         """
         strat = HashMomentumStrategy()
         entry = 100.0
         strat.restore_state("long", entry)
         # _sl = 100 * 0.978 = 97.8 ; _tp = 100 + 2.2*2.5 = 105.5
-        # Use closed[-1] (= df[-2]) low = 99 > 97.8 and high = 101 < 105.5
         df = _flat_df(self.WARMUP + 5, price=entry)
-        # closed[-1] = df[-2]: keep neutral
-        df.at[df.index[-2], "low"] = 99.0
-        df.at[df.index[-2], "high"] = 101.0
-        df.at[df.index[-2], "close"] = 100.0
+        # Live bar (df[-1]) is what SL/TP now reads — keep it benign.
+        df.at[df.index[-1], "low"] = 99.0
+        df.at[df.index[-1], "high"] = 101.0
+        df.at[df.index[-1], "close"] = 100.0
         result = await strat.on_candle(df)
         assert result is None
 
     @pytest.mark.asyncio
     async def test_sl_exit_closes_long(self):
-        """A bar with low < SL fires CLOSE_LONG. SL/TP on closed[-1] = df[-2]."""
+        """A live bar with low < SL fires CLOSE_LONG (post-fix uses live bar)."""
         strat = HashMomentumStrategy()
         entry = 100.0
         strat.restore_state("long", entry)
-        # _sl = 97.8. Force df[-2] low far below SL.
+        # _sl = 97.8. Force the live bar's low far below SL.
         df = _flat_df(self.WARMUP + 5, price=entry)
-        df.at[df.index[-2], "low"] = 90.0
-        df.at[df.index[-2], "close"] = 95.0
-        df.at[df.index[-2], "high"] = 99.0
+        df.at[df.index[-1], "low"] = 90.0
+        df.at[df.index[-1], "close"] = 95.0
+        df.at[df.index[-1], "high"] = 99.0
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_LONG
         assert "SL hit" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_no_spam_on_sub_bar_polling_after_sl(self):
+        """Regression for 2026-05-09 SOL-spam incident.
+
+        After SL fires on bar N, strategy must NOT immediately re-enter
+        on subsequent ticks of the SAME bar (which is what the live
+        engine does — polls every 60s on a 4h candle DataFrame). Tick
+        the strategy 50 times with no new bar; expect at most one
+        signal (the original SL exit), then nothing.
+        """
+        strat = HashMomentumStrategy()
+        entry = 100.0
+        strat.restore_state("long", entry)
+        # Live bar that breaches SL
+        df = _flat_df(self.WARMUP + 5, price=entry)
+        df.at[df.index[-1], "low"] = 90.0
+        df.at[df.index[-1], "close"] = 95.0
+        df.at[df.index[-1], "high"] = 99.0
+
+        signals: list = []
+        for _ in range(50):
+            r = await strat.on_candle(df)
+            if r is not None:
+                signals.append(r.action)
+        # Expect: 1 CLOSE_LONG on the first tick, then silence forever.
+        # The cooldown counter must NOT advance on every tick — without
+        # the bar-timestamp guard it would expire in 6 ticks and re-entry
+        # would spam (the actual bug behavior).
+        assert signals == [SignalAction.CLOSE_LONG], (
+            f"Expected single CLOSE_LONG; got {signals} — re-entry spam regression"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cooldown_advances_per_bar_not_per_tick(self):
+        """Bar-timestamp-based cooldown: ticks on the same bar = no
+        cooldown advance. Each NEW closed bar = exactly 1 cooldown step.
+        Initial observation establishes baseline without phantom bump."""
+        from datetime import timedelta
+
+        strat = HashMomentumStrategy(cooldown_bars=3)
+        strat._in_long = False
+        strat._in_short = False
+        strat._bars_since_close = 0
+        strat._last_closed_bar_ts = None
+
+        df = _flat_df(self.WARMUP + 5, price=100.0)
+        # Phase 1: tick 60 times on the SAME bar. Counter must stay at
+        # 0 — first observation establishes baseline (no bump), and
+        # subsequent identical-ts ticks shouldn't advance.
+        for _ in range(60):
+            await strat.on_candle(df)
+        assert strat._bars_since_close == 0, (
+            f"Same-bar ticks must not advance cooldown; got "
+            f"{strat._bars_since_close} (off-by-one phantom-bump regression)"
+        )
+
+        # Phase 2: append ONE new closed bar (different timestamp).
+        # Counter must go to exactly 1.
+        new_ts = df["timestamp"].iloc[-1] + timedelta(hours=1)
+        df2 = pd.concat([df, pd.DataFrame([{
+            "open": 100.0, "high": 100.1, "low": 99.9,
+            "close": 100.0, "volume": 1000.0, "timestamp": new_ts,
+        }])], ignore_index=True)
+        for _ in range(10):
+            await strat.on_candle(df2)
+        assert strat._bars_since_close == 1, (
+            f"Single new bar should bump counter once; got "
+            f"{strat._bars_since_close}"
+        )
 
 
 # ===========================================================================
@@ -394,16 +463,21 @@ class TestMoonPhasesStrategy:
 
     @pytest.mark.asyncio
     async def test_sl_exit_closes_long(self):
-        """Restored long with df[-2] low < SL fires CLOSE_LONG."""
+        """Restored long with live bar low < SL fires CLOSE_LONG.
+
+        Post-2026-05-09 fix: SL/TP exit now reads the LIVE (in-progress)
+        bar `df[-1]` instead of the last-closed bar `df[-2]`. Tests
+        updated accordingly.
+        """
         strat = MoonPhasesStrategy()
         strat.restore_state("long", 100.0)
-        # SL = 95.0 — force df[-2] low to 90
+        # SL = 95.0 — force live bar (df[-1]) low to 90
         n = 50
         timestamps = [_ts_daily(i) for i in range(n)]
         df = _flat_df(n, price=100.0, timestamps=timestamps)
-        df.at[df.index[-2], "low"] = 90.0
-        df.at[df.index[-2], "high"] = 99.0
-        df.at[df.index[-2], "close"] = 92.0
+        df.at[df.index[-1], "low"] = 90.0
+        df.at[df.index[-1], "high"] = 99.0
+        df.at[df.index[-1], "close"] = 92.0
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_LONG
@@ -593,14 +667,14 @@ class TestPivotSuperTrendStrategy:
 
     @pytest.mark.asyncio
     async def test_sl_exit_closes_long(self):
-        """df[-2] low < SL=99.0 fires CLOSE_LONG."""
+        """Live bar low < SL=99.0 fires CLOSE_LONG (post-2026-05-09 fix)."""
         strat = PivotSuperTrendStrategy()
         strat.restore_state("long", 100.0)
         df = _flat_df(self.WARMUP + 5, price=100.0)
-        # SL = 99.0; force df[-2] low to 95
-        df.at[df.index[-2], "low"] = 95.0
-        df.at[df.index[-2], "close"] = 97.0
-        df.at[df.index[-2], "high"] = 99.0
+        # SL = 99.0; force live bar (df[-1]) low to 95
+        df.at[df.index[-1], "low"] = 95.0
+        df.at[df.index[-1], "close"] = 97.0
+        df.at[df.index[-1], "high"] = 99.0
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_LONG

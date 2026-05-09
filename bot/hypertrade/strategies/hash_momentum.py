@@ -51,6 +51,13 @@ class HashMomentumStrategy(Strategy):
         self._sl: float | None = None
         self._tp: float | None = None
         self._bars_since_close: int = 999
+        # Track the last fully-closed bar's timestamp so we only advance
+        # `_bars_since_close` when a NEW bar closes — not on every tick.
+        # Without this, a 6-bar cooldown on a 4h strategy expires in 6
+        # minutes (60s polling × 6 ticks), defeating the purpose and
+        # causing rapid-fire re-entry loops on stale bar data. See
+        # 2026-05-09 incident: hash_momentum spammed 30 SOL trades in 4h.
+        self._last_closed_bar_ts: object | None = None
 
     def restore_state(self, side: str, entry_price: float) -> None:
         risk = entry_price * (self.stop_loss_pct / 100)
@@ -91,6 +98,7 @@ class HashMomentumStrategy(Strategy):
         self._sl = None
         self._tp = None
         self._bars_since_close = 999
+        self._last_closed_bar_ts = None
 
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         warmup = self.mom_length * 3 + 20
@@ -111,6 +119,12 @@ class HashMomentumStrategy(Strategy):
 
         closed = df.iloc[:-1]
         latest = closed.iloc[-1]
+        # Live (in-progress) bar — its high/low/close update tick-by-tick
+        # while the bar is forming. Use this for SL/TP exit checks so we
+        # don't fire on a 4h-stale low that's been bouncing around all
+        # day. The closed bar is still used for indicator inputs (mom,
+        # atr, ema) which require complete data.
+        live = df.iloc[-1]
 
         for col in ("mom0", "mom1", "mom_stdev", "mom_norm", "atr", "ema"):
             if pd.isna(latest[col]):
@@ -123,53 +137,68 @@ class HashMomentumStrategy(Strategy):
         mom_norm = float(latest["mom_norm"])
         atr = float(latest["atr"])
         ema = float(latest["ema"])
-        high = float(latest["high"])
-        low = float(latest["low"])
+        live_high = float(live["high"])
+        live_low = float(live["low"])
 
         threshold = atr * self.mom_threshold_atr_mult
 
-        # ---- Manage open positions ----
+        # ---- Manage open positions (use LIVE bar for SL/TP) ----
         if self._in_long and self._sl is not None and self._tp is not None:
-            if low <= self._sl:
+            if live_low <= self._sl:
                 self._in_long = False
                 self._bars_since_close = 0
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: low ${low:,.2f} <= SL ${self._sl:,.2f}",
+                    reason=f"SL hit: low ${live_low:,.2f} <= SL ${self._sl:,.2f}",
                 )
-            if high >= self._tp:
+            if live_high >= self._tp:
                 self._in_long = False
                 self._bars_since_close = 0
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"TP hit: high ${high:,.2f} >= TP ${self._tp:,.2f}",
+                    reason=f"TP hit: high ${live_high:,.2f} >= TP ${self._tp:,.2f}",
                 )
 
         if self._in_short and self._sl is not None and self._tp is not None:
-            if high >= self._sl:
+            if live_high >= self._sl:
                 self._in_short = False
                 self._bars_since_close = 0
                 return Signal(
                     action=SignalAction.CLOSE_SHORT,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: high ${high:,.2f} >= SL ${self._sl:,.2f}",
+                    reason=f"SL hit: high ${live_high:,.2f} >= SL ${self._sl:,.2f}",
                 )
-            if low <= self._tp:
+            if live_low <= self._tp:
                 self._in_short = False
                 self._bars_since_close = 0
                 return Signal(
                     action=SignalAction.CLOSE_SHORT,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"TP hit: low ${low:,.2f} <= TP ${self._tp:,.2f}",
+                    reason=f"TP hit: low ${live_low:,.2f} <= TP ${self._tp:,.2f}",
                 )
 
-        self._bars_since_close += 1
+        # Cooldown advances per BAR, not per tick. Bot polls every 60s
+        # but strategy is on 4h candles — without this guard, the 6-bar
+        # cooldown expires in 6 minutes and re-entry storms back on the
+        # same stale bar data. Track the closed bar's timestamp; only
+        # bump the counter when a new bar has actually closed.
+        latest_bar_ts = latest["timestamp"] if "timestamp" in latest.index else None
+        if latest_bar_ts is not None:
+            if self._last_closed_bar_ts is None:
+                # First observation — establish baseline WITHOUT bumping
+                # the counter. Otherwise a fresh restart / restore would
+                # phantom-increment cooldown by 1 on the very next tick
+                # (the None → first-ts transition counts as "changed").
+                self._last_closed_bar_ts = latest_bar_ts
+            elif latest_bar_ts != self._last_closed_bar_ts:
+                self._bars_since_close += 1
+                self._last_closed_bar_ts = latest_bar_ts
         in_cooldown = self._bars_since_close < self.cooldown_bars
         flat = not self._in_long and not self._in_short
 
