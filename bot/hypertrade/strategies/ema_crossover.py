@@ -82,6 +82,12 @@ class EMACrossoverStrategy(Strategy):
         closed = df.iloc[:-1]
         latest = closed.iloc[-1]
         prev = closed.iloc[-2]
+        # Live (in-progress) bar for SL exit check — its high/low update
+        # tick-by-tick. Without this, a 1h-old bar's `low` would trigger
+        # SL on every poll (60s) until the next bar closes, even though
+        # the live price has long bounced back. See hash_momentum SOL
+        # spam incident 2026-05-09.
+        live = df.iloc[-1]
 
         for col in ("ema_fast", "ema_slow"):
             if pd.isna(latest[col]) or pd.isna(prev[col]):
@@ -92,8 +98,8 @@ class EMACrossoverStrategy(Strategy):
         prev_fast = float(prev["ema_fast"])
         prev_slow = float(prev["ema_slow"])
         close = float(latest["close"])
-        high = float(latest["high"])
-        low = float(latest["low"])
+        live_high = float(live["high"])
+        live_low = float(live["low"])
 
         bullish_cross = prev_fast <= prev_slow and cur_fast > cur_slow
         bearish_cross = prev_fast >= prev_slow and cur_fast < cur_slow
@@ -107,25 +113,25 @@ class EMACrossoverStrategy(Strategy):
         if self._in_long:
             if self._sl is None:
                 self._sl = float(closed["low"].iloc[-self.sl_candles:].min())
-            if low <= self._sl:
+            if live_low <= self._sl:
                 self._in_long = False
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: low ${low:,.2f} <= ${self._sl:,.2f}",
+                    reason=f"SL hit: low ${live_low:,.2f} <= ${self._sl:,.2f}",
                 )
 
         if self._in_short:
             if self._sl is None:
                 self._sl = float(closed["high"].iloc[-self.sl_candles:].max())
-            if high >= self._sl:
+            if live_high >= self._sl:
                 self._in_short = False
                 return Signal(
                     action=SignalAction.CLOSE_SHORT,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: high ${high:,.2f} >= ${self._sl:,.2f}",
+                    reason=f"SL hit: high ${live_high:,.2f} >= ${self._sl:,.2f}",
                 )
 
         # ---- Fresh entry ----

@@ -162,6 +162,8 @@ class PivotSuperTrendStrategy(Strategy):
         closed = df.iloc[:-1]
         latest = closed.iloc[-1]
         prev = closed.iloc[-2]
+        # Live (in-progress) bar for SL exit checks — see ema_crossover.
+        live = df.iloc[-1]
 
         for col in ("ps_trend", "ema200"):
             if pd.isna(latest[col]):
@@ -170,8 +172,8 @@ class PivotSuperTrendStrategy(Strategy):
         cur_trend = int(latest["ps_trend"])
         prev_trend = int(prev["ps_trend"])
         close = float(latest["close"])
-        high = float(latest["high"])
-        low = float(latest["low"])
+        live_high = float(live["high"])
+        live_low = float(live["low"])
         ema200 = float(latest["ema200"])
 
         bsignal = cur_trend == 1 and prev_trend == -1   # flip to bullish
@@ -179,13 +181,13 @@ class PivotSuperTrendStrategy(Strategy):
 
         # ---- Manage open positions ----
         if self._in_long and self._sl is not None:
-            if low <= self._sl:
+            if live_low <= self._sl:
                 self._in_long = False
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: low ${low:,.2f} <= ${self._sl:,.2f}",
+                    reason=f"SL hit: low ${live_low:,.2f} <= ${self._sl:,.2f}",
                 )
             if ssignal and close < ema200:
                 self._in_long = False
@@ -200,13 +202,13 @@ class PivotSuperTrendStrategy(Strategy):
                 )
 
         if self._in_short and self._sl is not None:
-            if high >= self._sl:
+            if live_high >= self._sl:
                 self._in_short = False
                 return Signal(
                     action=SignalAction.CLOSE_SHORT,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: high ${high:,.2f} >= ${self._sl:,.2f}",
+                    reason=f"SL hit: high ${live_high:,.2f} >= ${self._sl:,.2f}",
                 )
             if bsignal and close > ema200:
                 self._in_short = False

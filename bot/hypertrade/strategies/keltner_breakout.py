@@ -93,14 +93,16 @@ class KeltnerBreakoutStrategy(Strategy):
 
         closed = df.iloc[:-1]
         latest = closed.iloc[-1]
+        # Live (in-progress) bar for SL/TP exit checks — see ema_crossover.
+        live = df.iloc[-1]
 
         for col in ("ema200", "atr", "kc_upper", "kc_lower"):
             if pd.isna(latest[col]):
                 return None
 
         close = float(latest["close"])
-        high = float(latest["high"])
-        low = float(latest["low"])
+        live_high = float(live["high"])
+        live_low = float(live["low"])
         ema200 = float(latest["ema200"])
         atr = float(latest["atr"])
         kc_upper = float(latest["kc_upper"])
@@ -110,21 +112,21 @@ class KeltnerBreakoutStrategy(Strategy):
         if self._in_position:
             if self._sl is None:
                 self._sl = self._entry - atr * self.sl_atr_mult
-            if low <= self._sl:
+            if live_low <= self._sl:
                 self._in_position = False
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"SL hit: low ${low:,.2f} <= ${self._sl:,.2f}",
+                    reason=f"SL hit: low ${live_low:,.2f} <= ${self._sl:,.2f}",
                 )
-            if high >= self._tp:
+            if live_high >= self._tp:
                 self._in_position = False
                 return Signal(
                     action=SignalAction.CLOSE_LONG,
                     symbol=self.symbol,
                     strategy_name=self.name,
-                    reason=f"TP hit: high ${high:,.2f} >= ${self._tp:,.2f} (20%)",
+                    reason=f"TP hit: high ${live_high:,.2f} >= ${self._tp:,.2f} (20%)",
                 )
             if close < kc_lower:
                 self._in_position = False
