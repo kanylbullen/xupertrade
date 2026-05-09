@@ -28,7 +28,12 @@
 
 set -uo pipefail
 
-PR="${1:?Usage: $0 <PR_NUMBER>}"
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $0 <PR_NUMBER>" >&2
+    echo "  Env: PR_WATCH_REPO, PR_WATCH_INTERVAL_S, PR_WATCH_TIMEOUT_MIN" >&2
+    exit 2  # explicit; ${1:?…} would exit 1, contradicting the docstring
+fi
+PR="$1"
 if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
     echo "ERROR: PR number must be numeric, got: $PR" >&2
     exit 2
@@ -42,6 +47,15 @@ fi
 
 INTERVAL_S="${PR_WATCH_INTERVAL_S:-30}"
 TIMEOUT_MIN="${PR_WATCH_TIMEOUT_MIN:-30}"
+# Validate numeric + positive — INTERVAL_S=0 would tight-loop forever
+# since elapsed_s wouldn't advance past TIMEOUT_S.
+for var in INTERVAL_S TIMEOUT_MIN; do
+    val="${!var}"
+    if ! [[ "$val" =~ ^[0-9]+$ ]] || [[ "$val" -le 0 ]]; then
+        echo "ERROR: $var must be a positive integer, got: $val" >&2
+        exit 2
+    fi
+done
 TIMEOUT_S=$((TIMEOUT_MIN * 60))
 # Two distinct GitHub identities involved:
 #   - REVIEW author:  `copilot-pull-request-reviewer[bot]`
@@ -57,35 +71,46 @@ elapsed_s=0
 while [[ $elapsed_s -lt $TIMEOUT_S ]]; do
     # Note the [bot] suffix — easy to miss; this is the entire reason
     # for the script to exist.
+    # --paginate handles long-lived PRs with >30 reviews/comments
+    # (gh's default page size is 30).
     review_count=$(
-        gh api "repos/$REPO/pulls/$PR/reviews" \
+        gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
             --jq "[.[] | select(.user.login == \"$REVIEW_BOT\")] | length" \
-            2>/dev/null || echo 0
+            2>/dev/null \
+            | awk '{s+=$1} END {print s+0}'
     )
     if [[ "$review_count" -gt 0 ]]; then
         # Filter to Copilot-authored comments only — excludes thread
-        # replies (mine, the user's, etc.) so the agent sees exactly
-        # the actionable review items.
+        # replies so the agent sees exactly the actionable review items.
         comment_count=$(
-            gh api "repos/$REPO/pulls/$PR/comments" \
+            gh api --paginate "repos/$REPO/pulls/$PR/comments?per_page=100" \
                 --jq "[.[] | select(.user.login == \"$COMMENT_BOT\")] | length" \
-                2>/dev/null || echo 0
+                2>/dev/null \
+                | awk '{s+=$1} END {print s+0}'
         )
         elapsed_min=$((elapsed_s / 60))
         echo "COPILOT_REVIEW_READY pr=$PR comments=$comment_count elapsed=${elapsed_min}min"
         echo
         echo "--- REVIEW BODY ---"
-        gh api "repos/$REPO/pulls/$PR/reviews" \
-            --jq ".[] | select(.user.login == \"$REVIEW_BOT\") | .body" \
+        # Pick the LATEST Copilot review by submitted_at — there can be
+        # multiple if Copilot was re-run. head -50 ensures we don't dump
+        # multiple bodies interleaved.
+        gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
+            --jq "[.[] | select(.user.login == \"$REVIEW_BOT\")]
+                  | sort_by(.submitted_at)
+                  | last
+                  | (.body // \"(empty review body)\")" \
             | head -50
         echo
         if [[ "$comment_count" -gt 0 ]]; then
             echo "--- INLINE COMMENTS ($comment_count Copilot-authored) ---"
-            # Format: ===COMMENT id=N path=F:L === markers let the agent
-            # split the dump cleanly even when bodies contain newlines.
-            gh api "repos/$REPO/pulls/$PR/comments" --jq "
+            # Line fallback chain: .line is null for outdated/out-of-diff
+            # comments; .original_line keeps the position pinned to the
+            # diff at review time — much more useful than "?" for fixes.
+            gh api --paginate "repos/$REPO/pulls/$PR/comments?per_page=100" \
+                --jq "
                 .[] | select(.user.login == \"$COMMENT_BOT\") |
-                \"===COMMENT id=\(.id) path=\(.path):\(.line // \"?\") ===\n\(.body)\n\"
+                \"===COMMENT id=\(.id) path=\(.path):\(.line // .original_line // \"?\") ===\n\(.body)\n\"
             "
         else
             echo "--- NO INLINE COMMENTS — review is clean, proceed to merge ---"

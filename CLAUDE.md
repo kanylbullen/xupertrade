@@ -531,8 +531,9 @@ When the notification fires, the agent:
 1. Reads the dump from the task output file
 2. For each `===COMMENT===` block: classifies (real bug / style nit /
    spurious) and applies the fix
-3. Runs `pytest`
-4. Commits + pushes the fix-bundle
+3. Runs `pytest` — **always**, even if `comments=0`. CI checks aren't
+   enabled, so the suite is the merge gate.
+4. Commits + pushes the fix-bundle (skip if no fixes were needed)
 5. Replies inline to each addressed comment via `gh api`
 6. Merges via `gh pr merge --squash --delete-branch`
 7. Deploys via the standard SSH command
@@ -542,8 +543,9 @@ prompting between steps. The user only sees the final "deployed"
 notification or an interrupt request if something genuinely surprising
 comes up.
 
-If `comments=0` in the dump: review is clean, skip steps 2–5 and go
-straight to merge + deploy.
+If `comments=0` in the dump: review is clean — skip steps 2, 4, 5
+(no fixes to apply, no commit to push, nothing to reply to) but
+**still run pytest** before merging.
 
 ### When to ask the user vs. just do it
 
