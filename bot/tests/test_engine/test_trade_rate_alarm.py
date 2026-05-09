@@ -8,7 +8,7 @@ event is emitted to Telegram.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -124,11 +124,11 @@ async def test_dedupe_skips_already_disabled_strategy():
 
 
 @pytest.mark.asyncio
-async def test_alarm_disabled_via_settings_skips_check():
-    """When trade_rate_alarm_enabled=False, runner main loop never calls
-    _check_trade_rate_anomalies. We can't test the main loop here, so we
-    verify the method itself is a no-op-friendly dry path: with no recent
-    trades it returns cleanly and doesn't disable anything."""
+async def test_no_trades_is_clean_no_op():
+    """Empty hourly counts → method returns immediately without touching
+    Redis or the event bus. The settings-gate (trade_rate_alarm_enabled)
+    lives in the runner main loop, not inside this method, so we can't
+    exercise it here — that's a higher-level integration concern."""
     runner, control, bus = _runner_with(hourly={}, weekly={})
     await runner._check_trade_rate_anomalies()
     control.disable_strategy.assert_not_called()
