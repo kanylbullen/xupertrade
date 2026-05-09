@@ -510,6 +510,41 @@ List comment IDs:
 gh api repos/<owner>/<repo>/pulls/<N>/comments --jq '.[] | {id, path, line}'
 ```
 
+#### Auto-cycle: scripts/pr-watch.sh
+
+Default workflow for the agent: after `gh pr create`, immediately arm
+the watcher via Bash `run_in_background`:
+```
+./scripts/pr-watch.sh <PR_NUMBER>
+```
+
+The script polls Copilot's review (handles BOTH bot user-logins —
+`copilot-pull-request-reviewer[bot]` for the review object,
+`Copilot` for inline comments — easy to get wrong). Single completion
+notification dumps:
+- `COPILOT_REVIEW_READY pr=N comments=K` header
+- Review summary (first ~50 lines of body)
+- One `===COMMENT id=N path=F:L ===` block per actionable Copilot
+  comment (replies / human comments are filtered out)
+
+When the notification fires, the agent:
+1. Reads the dump from the task output file
+2. For each `===COMMENT===` block: classifies (real bug / style nit /
+   spurious) and applies the fix
+3. Runs `pytest`
+4. Commits + pushes the fix-bundle
+5. Replies inline to each addressed comment via `gh api`
+6. Merges via `gh pr merge --squash --delete-branch`
+7. Deploys via the standard SSH command
+
+Whole cycle (open → fix → merge → deploy) runs without operator
+prompting between steps. The user only sees the final "deployed"
+notification or an interrupt request if something genuinely surprising
+comes up.
+
+If `comments=0` in the dump: review is clean, skip steps 2–5 and go
+straight to merge + deploy.
+
 ### When to ask the user vs. just do it
 
 **Just do it (still requires PR):**
