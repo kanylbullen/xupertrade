@@ -81,13 +81,27 @@ class HyperLiquidExchange(Exchange):
             settings.hyperliquid_account_address.strip()
             or self._account.address
         )
-        self._info = Info(base_url, skip_ws=True)
+        # Pass `timeout` into the SDK so the underlying requests.Session
+        # actually kills hung TCP connections at the socket level. Without
+        # this, asyncio.wait_for would raise TimeoutError but leave the
+        # executor thread stuck on a hanging requests.post — eventually
+        # exhausting the pool (audit M2 / PR #20 review). The SDK uses
+        # the order-timeout deadline since the same Info/Exchange object
+        # serves both reads and writes; reads complete much faster than
+        # the order-timeout window in normal conditions, and our Python-
+        # level wait_for still applies the tighter read-timeout on top.
+        sdk_timeout = settings.hl_order_timeout_seconds
+        self._info = Info(base_url, skip_ws=True, timeout=sdk_timeout)
         self._exchange = HLExchange(
             self._account,
             base_url=base_url,
             account_address=self._account_address,
+            timeout=sdk_timeout,
         )
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        # Bumped from 4 → 16. Even with the SDK timeout above, a long
+        # outage where many ticks queue up could still saturate the
+        # pool briefly; 16 gives more headroom while still being modest.
+        self._executor = ThreadPoolExecutor(max_workers=16)
         # HL price rules: max 5 sig figs AND max (MAX_DECIMALS - szDecimals)
         # decimals (MAX_DECIMALS = 6 for perps). Cache szDecimals per coin
         # so we can round limit_px before submission.
@@ -127,18 +141,43 @@ class HyperLiquidExchange(Exchange):
         """Trading account address (may differ from signer in API-wallet mode)."""
         return self._account_address
 
-    async def _run(self, fn, *args, **kwargs):
+    async def _run(self, fn, *args, timeout: float | None = None, **kwargs):
+        """Run a blocking HL SDK call in the thread executor with a
+        deadline. Without the timeout, a hung HL API call blocks the
+        executor thread indefinitely, which then blocks the runner tick
+        (heartbeat stops, risk caps freeze). Audit M2.
+
+        `timeout=None` defaults to settings.hl_read_timeout_seconds. Order
+        placement passes a longer explicit timeout via
+        settings.hl_order_timeout_seconds. Per-call override allowed for
+        special cases (e.g. cancel = short, leverage update = medium).
+
+        Raises asyncio.TimeoutError on deadline; callers wrap as
+        appropriate (retry for reads, REJECTED order for writes).
+        """
+        deadline = (
+            timeout if timeout is not None
+            else settings.hl_read_timeout_seconds
+        )
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._executor, lambda: fn(*args, **kwargs)
+        return await asyncio.wait_for(
+            loop.run_in_executor(
+                self._executor, lambda: fn(*args, **kwargs)
+            ),
+            timeout=deadline,
         )
 
-    async def _run_with_retry(self, fn, *args, **kwargs):
+    async def _run_with_retry(self, fn, *args, timeout: float | None = None, **kwargs):
         """Run a HyperLiquid SDK call with retry on transient errors.
 
         Use ONLY for idempotent read calls (get_positions, get_balance,
         all_mids, user_state, meta). Never wrap order placement — retrying
         a partial order placement risks duplicate fills.
+
+        Each attempt has its own `timeout` (default = read timeout).
+        TimeoutError from `_run` IS retryable (counts as transient
+        network issue) per the _RETRYABLE_ERRORS tuple including
+        TimeoutError.
         """
         try:
             async for attempt in AsyncRetrying(
@@ -154,7 +193,7 @@ class HyperLiquidExchange(Exchange):
                             attempt.retry_state.attempt_number,
                             fn.__name__,
                         )
-                    return await self._run(fn, *args, **kwargs)
+                    return await self._run(fn, *args, timeout=timeout, **kwargs)
         except RetryError as e:
             raise e.last_attempt.exception() from e
 
@@ -205,6 +244,11 @@ class HyperLiquidExchange(Exchange):
                 status=OrderStatus.REJECTED,
             )
         try:
+            # Order placement gets the longer write timeout. HL match
+            # engine can take a few seconds under load; we'd rather
+            # accept that than risk a duplicate fill from a too-eager
+            # timeout-then-retry loop. Order is NOT in _run_with_retry
+            # — a single timed-out attempt becomes REJECTED, not retried.
             result = await self._run(
                 self._exchange.order,
                 symbol,
@@ -212,9 +256,10 @@ class HyperLiquidExchange(Exchange):
                 rounded_size,
                 float(limit_px),
                 {"limit": {"tif": tif}},
+                timeout=settings.hl_order_timeout_seconds,
             )
         except Exception:
-            logger.exception("HyperLiquid order failed")
+            logger.exception("HyperLiquid order failed (or timed out)")
             return Order(
                 id=str(uuid.uuid4()),
                 symbol=symbol,
@@ -283,8 +328,14 @@ class HyperLiquidExchange(Exchange):
 
     async def update_leverage(self, symbol: str, leverage: int, is_cross: bool = True) -> bool:
         try:
+            # Write call — use the longer order timeout. update_leverage
+            # is also non-retryable (calling it twice is harmless on HL,
+            # but timing out and being asked to abort the dependent open
+            # is the safer pattern).
             result = await self._run(
-                self._exchange.update_leverage, int(leverage), symbol, bool(is_cross)
+                self._exchange.update_leverage,
+                int(leverage), symbol, bool(is_cross),
+                timeout=settings.hl_order_timeout_seconds,
             )
             ok = result.get("status") == "ok"
             if ok:
@@ -298,12 +349,17 @@ class HyperLiquidExchange(Exchange):
                 logger.warning("update_leverage rejected for %s: %s", symbol, result)
             return ok
         except Exception:
-            logger.exception("Failed to set leverage for %s", symbol)
+            logger.exception("Failed to set leverage for %s (or timed out)", symbol)
             return False
 
     async def cancel_order(self, order_id: str) -> bool:
         try:
-            await self._run(self._exchange.cancel, order_id)
+            # Cancel uses the order timeout — same reasoning as
+            # place_order / update_leverage above.
+            await self._run(
+                self._exchange.cancel, order_id,
+                timeout=settings.hl_order_timeout_seconds,
+            )
             return True
         except Exception:
             logger.exception("Cancel order failed")

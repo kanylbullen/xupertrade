@@ -86,6 +86,16 @@ class Settings(BaseSettings):
     trade_rate_alarm_min_hourly_floor: int = 5
     trade_rate_alarm_absolute_ceiling: int = 20
 
+    # HyperLiquid SDK timeouts (audit M2). Without these, a hung HL API
+    # call would block the executor thread → block the runner tick →
+    # stop the heartbeat → freeze risk-cap checks. The SDK uses
+    # `requests` internally with no explicit timeouts. Reads are short
+    # because tenacity retries them (3×); writes get a more generous
+    # window since order placement isn't retried (would risk duplicate
+    # fills) and HL's match engine can take a few seconds under load.
+    hl_read_timeout_seconds: float = 5.0
+    hl_order_timeout_seconds: float = 15.0
+
     # API authentication
     api_key: str = ""  # if set, all POST endpoints require X-Api-Key header
 
