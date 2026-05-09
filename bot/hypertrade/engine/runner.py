@@ -711,6 +711,85 @@ class EngineRunner:
                 )
             )
 
+        # Parity check: after the trade and DB write, verify exchange
+        # position for this coin matches the DB sum across all open
+        # strategies. Catches partial-fill drift instantly (5min reconcile
+        # is too slow — the 2026-05-09 SOL spam accumulated 1.1 SOL of
+        # divergence in 4 hours before the 5min reconcile noticed).
+        try:
+            await self._check_parity_after_trade(signal.symbol)
+        except Exception:
+            logger.exception(
+                "parity check after %s %s failed (non-fatal)",
+                signal.action.value, signal.symbol,
+            )
+
+    async def _check_parity_after_trade(self, symbol: str) -> None:
+        """Verify exchange position for `symbol` matches DB sum across
+        all open strategies. Lightweight — only fires on the trade event,
+        not every tick.
+
+        Triggers an alert (logged + Telegram via ErrorOccurred) when
+        |db_net_size - exchange_net_size| > tolerance. Per-coin tolerance
+        accounts for HL's szDecimals rounding (BTC=5dp, SOL=2dp).
+
+        Action is alert-only; the trade-rate alarm (PR #16) handles the
+        downstream auto-pause when divergence triggers spam-trading.
+        """
+        if self.repo is None:
+            return
+
+        # DB side: signed-net for the symbol across all open strategies.
+        # Long contributes +size, short contributes -size — engine's
+        # netting model matches HL's per-coin position.
+        db_positions = await self.repo.get_open_positions()
+        db_net = 0.0
+        for p in db_positions:
+            if p.symbol != symbol:
+                continue
+            db_net += p.size if p.side == "long" else -p.size
+
+        try:
+            ex_positions = await self.exchange.get_positions()
+        except Exception:
+            logger.exception(
+                "parity: exchange.get_positions() failed for %s", symbol,
+            )
+            return
+        ex_net = 0.0
+        for p in ex_positions:
+            if p.symbol == symbol:
+                ex_net = p.size if p.side == "long" else -p.size
+                break
+
+        diff = abs(db_net - ex_net)
+        # Generous tolerance to absorb HL szDecimals rounding. Tighter
+        # for BTC (5dp), looser for SOL/ETH (2-3dp). Anything bigger
+        # is a real divergence — partial fill not booked correctly,
+        # netting mismatch, manual exchange-side intervention, etc.
+        tolerance = 0.0001 if symbol == "BTC" else 0.05
+        if diff <= tolerance:
+            return
+
+        msg = (
+            f"PARITY MISMATCH on {symbol}: DB net {db_net:.6f} vs "
+            f"exchange {ex_net:.6f} (diff {diff:.6f})"
+        )
+        logger.warning("[%s] %s", settings.exchange_mode, msg)
+        if self.event_bus:
+            try:
+                await self.event_bus.publish(
+                    ErrorOccurred(
+                        strategy=f"parity/{symbol}",
+                        message=(
+                            f"{msg}. Investigate before next trade — likely "
+                            f"partial-fill drift or netting bug."
+                        ),
+                    )
+                )
+            except Exception:
+                logger.exception("parity: event publish failed")
+
     async def _check_trade_rate_anomalies(self) -> None:
         """Detect spam-trading strategies and auto-pause via Redis.
 
