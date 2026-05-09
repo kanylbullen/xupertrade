@@ -727,7 +727,7 @@ class Repository:
             return result.scalar_one_or_none()
 
     async def latest_qualified_vaults(
-        self, *, max_age_days: int = 7
+        self, *, max_age_days: int = 7, limit: int = 200,
     ) -> list[tuple[Vault, VaultSnapshot]]:
         """Return currently qualified vaults, joined with their latest snapshot.
 
@@ -737,12 +737,25 @@ class Repository:
         a week (scanner outage, mode switch, etc.) is treated as unknown
         rather than perpetually qualified. Default of 7 days survives a
         few missed daily polls without going silent.
+
+        `limit` (audit M7): hard cap on returned rows. The full HL vault
+        catalogue can grow into the thousands; an unbounded list pinned
+        the event loop on JSON encoding for several hundred-ms hits, and
+        repeated requests would amplify it. 200 covers the realistic
+        qualified set with significant headroom.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
         async with self._session_factory() as session:
             # Pick the newest snapshot per vault; filter to qualified later.
             # Sorting by (vault, snapshot_at desc) lets us pluck the head row
             # per vault in one pass.
+            #
+            # Stream via the scalars iterator (NOT .all()) so the early
+            # `break` actually saves work — `.all()` would materialize
+            # every snapshot row into memory before our break, defeating
+            # the limit's whole point. Audit M7 / PR #21 review.
+            # Long-term: push DISTINCT ON / window function + LIMIT into
+            # SQL so the DB itself stops fetching at `limit` rows.
             result = await session.execute(
                 select(VaultSnapshot)
                 .order_by(
@@ -752,7 +765,7 @@ class Repository:
             )
             seen: set[str] = set()
             picks: list[VaultSnapshot] = []
-            for snap in result.scalars().all():
+            for snap in result.scalars():
                 if snap.vault_address in seen:
                     continue
                 seen.add(snap.vault_address)
@@ -761,6 +774,8 @@ class Repository:
                 if snap.snapshot_at and snap.snapshot_at < cutoff:
                     continue
                 picks.append(snap)
+                if len(picks) >= limit:
+                    break
             out: list[tuple[Vault, VaultSnapshot]] = []
             for snap in picks:
                 vault = await session.get(Vault, snap.vault_address)

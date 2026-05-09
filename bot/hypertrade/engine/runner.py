@@ -830,9 +830,12 @@ class EngineRunner:
 
         Triggers an alert (logged + Telegram via ErrorOccurred) when
         |db_net_size - exchange_net_size| > tolerance. Per-coin tolerance
-        is set ~10× HL's szDecimals minimum step to absorb rounding
-        without false alerts (BTC szDecimals=5 → 1e-5 step → tolerance
-        1e-4; SOL/ETH szDecimals=2-3 → tolerance 5e-2).
+        is derived dynamically from `exchange.get_size_precision(symbol)`
+        — set to 10× HL's szDecimals minimum step (audit M4):
+          BTC szDecimals=5 → tolerance 1e-4
+          ETH szDecimals=4 → tolerance 1e-3
+          SOL szDecimals=2 → tolerance 1e-1
+        Default fallback (unknown coin) is szDecimals=4 → 1e-3.
 
         Action: alert (Telegram via ErrorOccurred); ALSO returns False
         so the caller can refuse to proceed (e.g. flip-detect must not
@@ -868,12 +871,11 @@ class EngineRunner:
                 break
 
         diff = abs(db_net - ex_net)
-        # Tolerance ≈ 10× HL's szDecimals minimum step. Anything bigger
-        # is a real divergence — partial fill not booked, netting bug,
-        # manual exchange-side intervention, etc.
-        # BTC: szDecimals=5 (step 1e-5) → tolerance 1e-4
-        # SOL/ETH: szDecimals=2-3 (step 0.01-0.001) → tolerance 5e-2
-        tolerance = 1e-4 if symbol == "BTC" else 5e-2
+        # Tolerance = 10× the exchange's minimum step. `Exchange` base
+        # defines `get_size_precision` with default 4dp, so the call
+        # is safe for any concrete exchange. (Audit M4.)
+        sz_decimals = self.exchange.get_size_precision(symbol)
+        tolerance = 10 * (10 ** -sz_decimals)
         if diff <= tolerance:
             return True
 
