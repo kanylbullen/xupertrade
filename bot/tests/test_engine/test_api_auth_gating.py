@@ -201,8 +201,12 @@ GATED_GET_ENDPOINTS = [
     "/api/hodl/purchases",
     "/api/vaults/mine",
     # Vault endpoints gated 2026-05-09 (audit H2): they reveal which
-    # vaults this user is monitoring + scanner state.
+    # vaults this user is monitoring + scanner state. Concrete sample
+    # paths included so future regressions on the dynamic-route variants
+    # are caught (a 0x… address and the snapshots subroute).
     "/api/vaults",
+    "/api/vaults/0x1111111111111111111111111111111111111111",
+    "/api/vaults/0x1111111111111111111111111111111111111111/snapshots",
 ]
 
 

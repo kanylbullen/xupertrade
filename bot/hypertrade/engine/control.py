@@ -282,3 +282,38 @@ class BotControl:
         new = secrets.token_urlsafe(48)
         await self._redis.set("dashboard:auth:session_secret", new)
         return new
+
+    # --- Per-strategy state snapshot (audit M6 fix completion).
+    # The position-table state_json only persists state during in-position
+    # windows. Cooldown-after-close needs a separate snapshot store —
+    # otherwise a restart inside the cooldown window resets bars_since_close
+    # to its init default (999), bypassing the 24h re-entry block.
+
+    def _strategy_state_key(self, strategy_name: str) -> str:
+        return _key(self._mode, f"strategy:{strategy_name}:state")
+
+    async def save_strategy_state(
+        self, strategy_name: str, state: dict | None,
+    ) -> None:
+        if self._redis is None or not state:
+            return
+        import json
+        try:
+            await self._redis.set(
+                self._strategy_state_key(strategy_name), json.dumps(state),
+            )
+        except Exception:
+            logger.exception("save_strategy_state failed for %s", strategy_name)
+
+    async def load_strategy_state(self, strategy_name: str) -> dict | None:
+        if self._redis is None:
+            return None
+        try:
+            raw = await self._redis.get(self._strategy_state_key(strategy_name))
+            if not raw:
+                return None
+            import json
+            return json.loads(raw)
+        except Exception:
+            logger.exception("load_strategy_state failed for %s", strategy_name)
+            return None

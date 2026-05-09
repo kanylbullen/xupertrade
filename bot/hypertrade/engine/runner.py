@@ -100,6 +100,43 @@ class EngineRunner:
                 )
             restored += 1
 
+        # Audit M6 follow-up: also restore Redis-backed strategy state for
+        # strategies that are FLAT but might be in cooldown. The
+        # position-table state_json only covers in-position windows; the
+        # Redis snapshot covers the post-close cooldown window. Without
+        # this, a restart inside the cooldown window would reset the
+        # counter and let the strategy immediately re-enter on the same
+        # stale bar.
+        if self.control:
+            for strat in self.strategies:
+                if strat.name in {p.strategy_name for p in positions}:
+                    continue  # already restored from DB above
+                try:
+                    redis_state = await self.control.load_strategy_state(strat.name)
+                except Exception:
+                    logger.exception(
+                        "load_strategy_state failed for %s (skipping)", strat.name,
+                    )
+                    continue
+                if not redis_state:
+                    continue
+                # Strategy is flat but had persisted cooldown state.
+                # restore_from_json supports the "side defensively reset
+                # if not long" path — pass the sentinel "flat" so any
+                # strategy that doesn't expect non-{long,short} side
+                # falls back cleanly.
+                try:
+                    strat.restore_from_json("flat", 0.0, redis_state)
+                    logger.info(
+                        "Restored %s cooldown state from Redis: %s",
+                        strat.name, redis_state,
+                    )
+                except Exception:
+                    logger.exception(
+                        "restore_from_json failed for %s redis state %s",
+                        strat.name, redis_state,
+                    )
+
         if positions:
             logger.info(
                 "State restoration complete: %d/%d positions restored",
@@ -732,6 +769,26 @@ class EngineRunner:
                 )
                 self.portfolio.record_pnl(realized_pnl or 0)
 
+        # Snapshot post-signal strategy state to Redis. Covers the
+        # cooldown-after-close gap (audit M6 / PR #19 review): position
+        # table state_json only persists during in-position windows;
+        # this Redis snapshot persists post-close cooldown so a restart
+        # inside the cooldown window can't bypass the re-entry block.
+        if self.control:
+            strat = next(
+                (s for s in self.strategies if s.name == signal.strategy_name),
+                None,
+            )
+            if strat is not None:
+                try:
+                    snap = strat.export_state()
+                    await self.control.save_strategy_state(strat.name, snap)
+                except Exception:
+                    logger.exception(
+                        "[%s] save_strategy_state failed (non-fatal)",
+                        signal.strategy_name,
+                    )
+
         # Publish events
         if self.event_bus:
             await self.event_bus.publish(
@@ -751,17 +808,22 @@ class EngineRunner:
         # strategies. Catches partial-fill drift instantly (5min reconcile
         # is too slow — the 2026-05-09 SOL spam accumulated 1.1 SOL of
         # divergence in 4 hours before the 5min reconcile noticed).
+        # Parity result propagates into the return value: a flip-detect
+        # caller MUST NOT proceed to open if the close left exchange
+        # diverged from DB (audit H1 / PR #19 review). Internal exceptions
+        # are non-fatal but mismatch is.
+        parity_ok = True
         try:
-            await self._check_parity_after_trade(signal.symbol)
+            parity_ok = await self._check_parity_after_trade(signal.symbol)
         except Exception:
             logger.exception(
                 "parity check after %s %s failed (non-fatal)",
                 signal.action.value, signal.symbol,
             )
 
-        return True
+        return parity_ok
 
-    async def _check_parity_after_trade(self, symbol: str) -> None:
+    async def _check_parity_after_trade(self, symbol: str) -> bool:
         """Verify exchange position for `symbol` matches DB sum across
         all open strategies. Lightweight — only fires on the trade event,
         not every tick.
@@ -772,11 +834,15 @@ class EngineRunner:
         without false alerts (BTC szDecimals=5 → 1e-5 step → tolerance
         1e-4; SOL/ETH szDecimals=2-3 → tolerance 5e-2).
 
-        Action is alert-only; the trade-rate alarm (PR #16) handles the
-        downstream auto-pause when divergence triggers spam-trading.
+        Action: alert (Telegram via ErrorOccurred); ALSO returns False
+        so the caller can refuse to proceed (e.g. flip-detect must not
+        open opposite side if the close left exchange diverged). Returns
+        True when in-tolerance (the happy path). Returns True on internal
+        exceptions too (don't block trade flow on parity-check failures
+        — those go through the existing exception path in the caller).
         """
         if self.repo is None:
-            return
+            return True
 
         # DB side: signed-net for the symbol across all open strategies.
         # Long contributes +size, short contributes -size — engine's
@@ -794,7 +860,7 @@ class EngineRunner:
             logger.exception(
                 "parity: exchange.get_positions() failed for %s", symbol,
             )
-            return
+            return True  # don't block trade flow when we can't read exchange
         ex_net = 0.0
         for p in ex_positions:
             if p.symbol == symbol:
@@ -809,7 +875,7 @@ class EngineRunner:
         # SOL/ETH: szDecimals=2-3 (step 0.01-0.001) → tolerance 5e-2
         tolerance = 1e-4 if symbol == "BTC" else 5e-2
         if diff <= tolerance:
-            return
+            return True
 
         msg = (
             f"PARITY MISMATCH on {symbol}: DB net {db_net:.6f} vs "
@@ -829,6 +895,7 @@ class EngineRunner:
                 )
             except Exception:
                 logger.exception("parity: event publish failed")
+        return False
 
     async def _check_trade_rate_anomalies(self) -> None:
         """Detect spam-trading strategies and auto-pause via Redis.

@@ -40,12 +40,14 @@ def _runner_with(db_positions: list, exchange_positions: list) -> tuple:
 
 @pytest.mark.asyncio
 async def test_no_alert_when_db_matches_exchange():
-    """DB has BTC long 0.01, exchange has BTC long 0.01 — no alert."""
+    """DB has BTC long 0.01, exchange has BTC long 0.01 — no alert,
+    returns True so the trade flow proceeds."""
     runner, bus = _runner_with(
         db_positions=[_pos("BTC", "long", 0.01)],
         exchange_positions=[_pos("BTC", "long", 0.01)],
     )
-    await runner._check_parity_after_trade("BTC")
+    ok = await runner._check_parity_after_trade("BTC")
+    assert ok is True
     bus.publish.assert_not_called()
 
 
@@ -57,7 +59,8 @@ async def test_no_alert_within_szdecimals_tolerance():
         db_positions=[_pos("SOL", "long", 2.13)],
         exchange_positions=[_pos("SOL", "long", 2.14)],
     )
-    await runner._check_parity_after_trade("SOL")
+    ok = await runner._check_parity_after_trade("SOL")
+    assert ok is True
     bus.publish.assert_not_called()
 
 
@@ -65,12 +68,13 @@ async def test_no_alert_within_szdecimals_tolerance():
 async def test_alerts_on_partial_fill_drift_sol():
     """Reproduces 2026-05-09: DB says 2.13 SOL, exchange has 3.24 SOL
     (1.11 excess from un-booked partial fills). 1.11 > 0.05 tolerance
-    → alert."""
+    → alert + return False so the caller can refuse to flip-then-open."""
     runner, bus = _runner_with(
         db_positions=[_pos("SOL", "long", 2.13)],
         exchange_positions=[_pos("SOL", "long", 3.24)],
     )
-    await runner._check_parity_after_trade("SOL")
+    ok = await runner._check_parity_after_trade("SOL")
+    assert ok is False, "mismatch must return False so flip-detect aborts"
     bus.publish.assert_called_once()
     event = bus.publish.call_args[0][0]
     assert isinstance(event, ErrorOccurred)

@@ -72,13 +72,19 @@ class HashMomentumStrategy(Strategy):
         self._entry = entry_price
 
     def export_state(self) -> dict | None:
-        if not (self._in_long or self._in_short):
+        # Always export when there's something meaningful — either an
+        # open position OR an active cooldown. The runner snapshots
+        # this to Redis on every signal; on restart, restore_from_json
+        # gets called if either kind of state exists. Without exporting
+        # cooldown when flat, restart-inside-cooldown bypassed the 24h
+        # re-entry block (audit M6 / PR #19 review).
+        in_position = self._in_long or self._in_short
+        cooldown_active = (
+            self._bars_since_close < self.cooldown_bars
+            and self._last_closed_bar_ts is not None
+        )
+        if not (in_position or cooldown_active):
             return None
-        # Persist the cooldown counter + last-bar timestamp too. Without
-        # them, restart inside the cooldown window resets the counter to
-        # 999 (init default) → cooldown is bypassed → strategy can
-        # immediately re-enter on the same stale bar that just stopped
-        # us out. Defeats the cooldown fix from PR #15. Audit M6.
         last_ts = self._last_closed_bar_ts
         if last_ts is not None and hasattr(last_ts, "isoformat"):
             last_ts = last_ts.isoformat()
