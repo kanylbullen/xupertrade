@@ -47,6 +47,8 @@ class EngineRunner:
         self._last_hodl_zones: dict[str, str] = {}  # signal_name -> last verdict
         self._last_vault_poll = 0.0
         self._vault_poller = None  # lazy-init on first use
+        self._last_rate_check = 0.0
+        self._rate_alarm_paused: set[str] = set()  # strategies auto-paused this run
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart, then
@@ -212,6 +214,24 @@ class EngineRunner:
             except Exception:
                 logger.exception("HODL signal evaluation failed")
             self._last_hodl_check = time.time()
+
+        # Trade-rate anomaly alarm. Catches strategies that start
+        # spam-trading vs their normal baseline (e.g. the 2026-05-09
+        # hash_momentum stale-bar SL bug that fired 30 SOL trades in 4h).
+        # Auto-pauses the offender via Redis disable_strategy + emits
+        # an error event so Telegram routes the alert.
+        if (
+            settings.trade_rate_alarm_enabled
+            and self.repo
+            and self.control
+            and (time.time() - self._last_rate_check)
+                > settings.trade_rate_alarm_check_interval_seconds
+        ):
+            try:
+                await self._check_trade_rate_anomalies()
+            except Exception:
+                logger.exception("Trade-rate alarm check failed")
+            self._last_rate_check = time.time()
 
         # Vault scanner: daily poll, owned by the testnet bot only. Both
         # paper and testnet share the same Postgres in the default Compose
@@ -690,6 +710,98 @@ class EngineRunner:
                     reason=signal.reason,
                 )
             )
+
+    async def _check_trade_rate_anomalies(self) -> None:
+        """Detect spam-trading strategies and auto-pause via Redis.
+
+        Triggers when EITHER:
+          (a) hourly trade count > baseline_multiplier × 7d-avg-per-hour
+              AND > min_hourly_floor (prevents 5×0=0 false-pass on quiet
+              strategies)
+          (b) hourly trade count > absolute_ceiling regardless of baseline
+              (catches first-time-active strategies whose 7d avg is 0)
+
+        Once a strategy trips, it goes into self._rate_alarm_paused for
+        the remainder of this process — we don't re-check it (the operator
+        must manually re-enable via /options or SREM after investigating).
+        Without this dedupe the alarm would fire on every check interval
+        as long as the spam burst is still in the 1h window.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        if self.repo is None or self.control is None:
+            return
+
+        now = datetime.now(timezone.utc)
+        one_hour_ago = now - timedelta(hours=1)
+        seven_days_ago = now - timedelta(days=7)
+
+        hourly = await self.repo.get_trade_counts_per_strategy(one_hour_ago)
+        if not hourly:
+            return  # nothing to evaluate
+        weekly = await self.repo.get_trade_counts_per_strategy(seven_days_ago)
+
+        already_disabled = await self.control.get_disabled_strategies()
+
+        floor = settings.trade_rate_alarm_min_hourly_floor
+        ceiling = settings.trade_rate_alarm_absolute_ceiling
+        mult = settings.trade_rate_alarm_baseline_multiplier
+
+        for strategy_name, hourly_count in hourly.items():
+            if strategy_name in self._rate_alarm_paused:
+                continue
+            if strategy_name in already_disabled:
+                continue
+
+            baseline_per_hour = weekly.get(strategy_name, 0) / (24 * 7)
+            spike = (
+                hourly_count > mult * baseline_per_hour
+                and hourly_count > floor
+            )
+            ceiling_breach = hourly_count > ceiling
+
+            if not (spike or ceiling_breach):
+                continue
+
+            reason_bits = []
+            if spike:
+                reason_bits.append(
+                    f"{hourly_count}/h vs 7d-baseline {baseline_per_hour:.2f}/h "
+                    f"({mult}× threshold)"
+                )
+            if ceiling_breach:
+                reason_bits.append(f"absolute ceiling {ceiling}/h breached")
+            why = "; ".join(reason_bits)
+
+            try:
+                await self.control.disable_strategy(strategy_name)
+            except Exception:
+                logger.exception(
+                    "rate-alarm: disable_strategy failed for %s", strategy_name,
+                )
+                continue
+
+            self._rate_alarm_paused.add(strategy_name)
+            logger.warning(
+                "rate-alarm: AUTO-PAUSED %s on %s — %s",
+                strategy_name, settings.exchange_mode, why,
+            )
+
+            # Route to Telegram via the existing error-event channel.
+            if self.event_bus:
+                try:
+                    await self.event_bus.publish(
+                        ErrorOccurred(
+                            strategy=strategy_name,
+                            message=(
+                                f"AUTO-PAUSED ({settings.exchange_mode}): "
+                                f"trade-rate spike — {why}. Strategy disabled "
+                                f"via Redis; investigate before re-enabling."
+                            ),
+                        )
+                    )
+                except Exception:
+                    logger.exception("rate-alarm: event publish failed")
 
     async def _evaluate_hodl_signals(self) -> None:
         """Run all HODL signals; on verdict change vs last tick, push a Telegram

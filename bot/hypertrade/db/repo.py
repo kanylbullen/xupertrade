@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from hypertrade.config import settings
@@ -332,6 +332,23 @@ class Repository:
                 .order_by(Trade.timestamp.desc())
             )
             return list(result.scalars().all())
+
+    async def get_trade_counts_per_strategy(
+        self, since: datetime,
+    ) -> dict[str, int]:
+        """Per-strategy trade count for this mode since `since`.
+
+        Used by the trade-rate anomaly alarm to detect strategies
+        spam-trading vs their normal baseline. Returns {} when no
+        trades match.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Trade.strategy_name, func.count(Trade.id))
+                .where(Trade.mode == self._mode, Trade.timestamp >= since)
+                .group_by(Trade.strategy_name)
+            )
+            return {name: count for name, count in result.all()}
 
     async def reconcile_positions(
         self, exchange, close_exchange_orphans: bool = True,
