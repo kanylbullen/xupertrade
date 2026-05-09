@@ -140,8 +140,21 @@ async def main() -> None:
     for strat in strategies:
         ws.subscribe_candles(strat.symbol, strat.timeframe)
 
-    # Start WebSocket in background
+    # Start WebSocket in background. Add a done-callback so a silently
+    # dying WS task surfaces in the logs immediately instead of only at
+    # garbage-collection time (audit L3, 2026-05-09). Without this a
+    # connection failure left the bot running without real-time prices
+    # but with no log line until much later.
     ws_task = asyncio.create_task(ws.connect())
+
+    def _ws_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return  # explicit cancel during shutdown — not an error
+        exc = t.exception()
+        if exc is not None:
+            logger.error("WebSocket task died: %s", exc, exc_info=exc)
+
+    ws_task.add_done_callback(_ws_done)
     logger.info("WebSocket feed started (real-time prices)")
 
     # Apply runtime leverage overrides + push leverage settings to exchange
