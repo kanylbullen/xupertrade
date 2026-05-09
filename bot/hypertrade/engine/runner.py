@@ -731,7 +731,9 @@ class EngineRunner:
 
         Triggers an alert (logged + Telegram via ErrorOccurred) when
         |db_net_size - exchange_net_size| > tolerance. Per-coin tolerance
-        accounts for HL's szDecimals rounding (BTC=5dp, SOL=2dp).
+        is set ~10× HL's szDecimals minimum step to absorb rounding
+        without false alerts (BTC szDecimals=5 → 1e-5 step → tolerance
+        1e-4; SOL/ETH szDecimals=2-3 → tolerance 5e-2).
 
         Action is alert-only; the trade-rate alarm (PR #16) handles the
         downstream auto-pause when divergence triggers spam-trading.
@@ -763,11 +765,12 @@ class EngineRunner:
                 break
 
         diff = abs(db_net - ex_net)
-        # Generous tolerance to absorb HL szDecimals rounding. Tighter
-        # for BTC (5dp), looser for SOL/ETH (2-3dp). Anything bigger
-        # is a real divergence — partial fill not booked correctly,
-        # netting mismatch, manual exchange-side intervention, etc.
-        tolerance = 0.0001 if symbol == "BTC" else 0.05
+        # Tolerance ≈ 10× HL's szDecimals minimum step. Anything bigger
+        # is a real divergence — partial fill not booked, netting bug,
+        # manual exchange-side intervention, etc.
+        # BTC: szDecimals=5 (step 1e-5) → tolerance 1e-4
+        # SOL/ETH: szDecimals=2-3 (step 0.01-0.001) → tolerance 5e-2
+        tolerance = 1e-4 if symbol == "BTC" else 5e-2
         if diff <= tolerance:
             return
 

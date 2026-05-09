@@ -28,9 +28,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncio
 import pandas as pd
-import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
-from hypothesis import assume
 
 from hypertrade.engine.signals import SignalAction
 from hypertrade.strategies.hash_momentum import HashMomentumStrategy
@@ -40,33 +38,44 @@ from hypertrade.strategies.hash_momentum import HashMomentumStrategy
 
 @st.composite
 def candle_sequence(draw, min_bars=80, max_bars=300, sub_ticks_per_bar_max=5):
-    """Generate a randomized sequence of (df, expected_bar_index) pairs
-    simulating sub-bar polling.
+    """Generate a list of pandas DataFrames simulating sub-bar polling.
 
     The sequence consists of:
     1. Initial warmup history (≥80 bars to satisfy hash_momentum's
        mom_length*3+20 requirement)
-    2. Random number of additional bar transitions, each with random
-       number of sub-bar polling ticks (0 to sub_ticks_per_bar_max).
+    2. Random number of additional bar transitions, each repeated
+       0..sub_ticks_per_bar_max times to mimic the bot's 60s polling
+       on a 4h-candle strategy (the spam scenario from 2026-05-09).
+
+    All prices are constrained to a positive realistic range
+    (10..10_000) and floats reject NaN+inf so pandas_ta math stays
+    well-defined. high/low are computed from close±0.5% but clamped
+    so low ≤ high always holds even on corner-case prices.
     """
-    # Build initial flat-ish history with small noise
     n_warmup = draw(st.integers(min_value=min_bars, max_value=min_bars + 20))
     base = 100.0
     noise = draw(st.lists(
-        st.floats(min_value=-2.0, max_value=2.0, allow_nan=False),
+        st.floats(
+            min_value=-2.0, max_value=2.0,
+            allow_nan=False, allow_infinity=False,
+        ),
         min_size=n_warmup, max_size=n_warmup,
     ))
-    closes = [base + n for n in noise]
+    closes = [max(10.0, base + n) for n in noise]
 
     base_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
     timestamps = [base_ts + timedelta(hours=4 * i) for i in range(n_warmup)]
 
-    # Build initial DataFrame
     def _df_from(closes_list, timestamps_list):
+        # min/max guards keep low ≤ high even when close is tiny — for
+        # any positive close the spread is symmetric, so this is just
+        # belt-and-suspenders against future generator changes.
+        highs = [max(c, c * 1.005) for c in closes_list]
+        lows = [min(c, c * 0.995) for c in closes_list]
         return pd.DataFrame({
             "open": closes_list,
-            "high": [c * 1.005 for c in closes_list],
-            "low": [c * 0.995 for c in closes_list],
+            "high": highs,
+            "low": lows,
             "close": closes_list,
             "volume": [1000.0] * len(closes_list),
             "timestamp": timestamps_list,
@@ -74,18 +83,21 @@ def candle_sequence(draw, min_bars=80, max_bars=300, sub_ticks_per_bar_max=5):
 
     sequence = [_df_from(closes, timestamps)]
 
-    # Generate random new-bar additions with sub-bar repeats
     n_new_bars = draw(st.integers(min_value=0, max_value=20))
     for _ in range(n_new_bars):
         sub_ticks = draw(st.integers(min_value=0, max_value=sub_ticks_per_bar_max))
-        # Append one new bar
-        delta = draw(st.floats(min_value=-5.0, max_value=5.0, allow_nan=False))
-        new_close = closes[-1] + delta
+        delta = draw(st.floats(
+            min_value=-5.0, max_value=5.0,
+            allow_nan=False, allow_infinity=False,
+        ))
+        # Floor at 10.0 so prices stay positive even after a long run
+        # of negative deltas. With unbounded negative drift, close→0
+        # would invert high/low and break ATR/EMA math.
+        new_close = max(10.0, closes[-1] + delta)
         new_ts = timestamps[-1] + timedelta(hours=4)
         closes = closes + [new_close]
         timestamps = timestamps + [new_ts]
         df_new = _df_from(closes, timestamps)
-        # Repeat the same df sub_ticks times to simulate sub-bar polling
         for _ in range(sub_ticks + 1):
             sequence.append(df_new)
 
@@ -94,7 +106,7 @@ def candle_sequence(draw, min_bars=80, max_bars=300, sub_ticks_per_bar_max=5):
 
 # -- Property assertions ------------------------------------------------------
 
-def _check_invariants(strat: HashMomentumStrategy, signals_so_far: list) -> None:
+def _check_invariants(strat: HashMomentumStrategy) -> None:
     """All invariants P1, P2, P6 — pure state checks. Run after each tick."""
     # P1: side exclusivity
     assert not (strat._in_long and strat._in_short), (
@@ -170,10 +182,10 @@ def test_state_invariants_hold_across_random_sequences(seq):
     async def run() -> None:
         for df in seq:
             sig = await strat.on_candle(df)
-            _check_invariants(strat, actions)
+            _check_invariants(strat)
             if sig is not None:
                 actions.append(sig.action)
-                _check_invariants(strat, actions)
+                _check_invariants(strat)
         _check_signal_legality(actions)
 
     asyncio.run(run())
