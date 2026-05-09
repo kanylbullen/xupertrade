@@ -1,7 +1,11 @@
 """Strategy engine runner — the core loop."""
 
+import asyncio
 import logging
+import socket
 import time
+
+import aiohttp
 
 from hypertrade.config import settings
 from hypertrade.data.feed import fetch_candles
@@ -22,6 +26,40 @@ from hypertrade.exchange.base import Exchange, OrderType
 from hypertrade.strategies.base import Strategy
 
 logger = logging.getLogger(__name__)
+
+
+# Errors that indicate transient HL/network issues — bot recovers
+# automatically on next tick, so we don't want to spam Telegram with
+# a separate alert per strategy per failed tick (22 strategies × 1/min
+# = 22 events/min during a HL outage). The 2026-05-09 4.5h outage
+# would have produced ~6000 events without this filter.
+_TRANSIENT_NETWORK_ERRORS = (
+    asyncio.TimeoutError,
+    ConnectionError,
+    socket.gaierror,
+    aiohttp.ClientError,
+)
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """True for HL/network outages where the bot recovers on its own."""
+    if isinstance(exc, _TRANSIENT_NETWORK_ERRORS):
+        return True
+    # HL SDK ServerError uses a single class for all 4xx/5xx — only
+    # the 5xx + 408/429 are transient (4xx validation/auth aren't).
+    try:
+        from hyperliquid.utils.error import ServerError  # noqa: PLC0415
+        if isinstance(exc, ServerError):
+            msg = str(exc)
+            return any(c in msg for c in ("502", "503", "504", "408", "429"))
+    except ImportError:  # SDK not installed (unlikely in prod, possible in tests)
+        pass
+    # Bare `requests.exceptions.ConnectionError` doesn't subclass our
+    # ConnectionError above (different base); name-match as fallback.
+    name = type(exc).__name__
+    if name in ("ConnectionError", "ConnectTimeout", "ReadTimeout"):
+        return True
+    return False
 
 _start_time = time.time()
 
@@ -371,9 +409,18 @@ class EngineRunner:
             for strategy in active:
                 try:
                     await self._run_strategy(strategy)
-                except Exception:
+                except Exception as e:
                     logger.exception("Error running strategy %s", strategy.name)
-                    if self.event_bus:
+                    # Skip Telegram alert for transient HL/network errors
+                    # — bot recovers on next tick automatically and we
+                    # don't want to flood during outages (CLAUDE.md backlog
+                    # Open-Low: "Suppress Telegram noise on transient
+                    # HL-fetch failures"). Heartbeat staleness is the
+                    # signal for monitoring real outages.
+                    if (
+                        self.event_bus
+                        and not _is_transient_network_error(e)
+                    ):
                         await self.event_bus.publish(
                             ErrorOccurred(
                                 strategy=strategy.name,

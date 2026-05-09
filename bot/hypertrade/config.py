@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     hl_read_timeout_seconds: float = 5.0
     hl_order_timeout_seconds: float = 15.0
 
+    # HyperLiquid init retry. The SDK's HLExchange constructor fetches
+    # meta + spot_meta synchronously, so a HL outage at bot startup
+    # would crash __init__ → container exit → docker restart-loop until
+    # HL recovers (4.5h on 2026-05-09). Retry with exponential backoff
+    # buys us through brief glitches. Total worst-case wait at defaults:
+    # 2s + 4s + 8s + 16s + 32s = 62s before declaring HL down.
+    hl_init_retry_attempts: int = 5
+    hl_init_retry_backoff_seconds: float = 2.0
+
     # API authentication
     api_key: str = ""  # if set, all POST endpoints require X-Api-Key header
 

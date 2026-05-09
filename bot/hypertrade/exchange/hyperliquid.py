@@ -91,13 +91,48 @@ class HyperLiquidExchange(Exchange):
         # the order-timeout window in normal conditions, and our Python-
         # level wait_for still applies the tighter read-timeout on top.
         sdk_timeout = settings.hl_order_timeout_seconds
-        self._info = Info(base_url, skip_ws=True, timeout=sdk_timeout)
-        self._exchange = HLExchange(
-            self._account,
-            base_url=base_url,
-            account_address=self._account_address,
-            timeout=sdk_timeout,
-        )
+        # Construct Info + Exchange with retry. The SDK's HLExchange
+        # constructor internally creates an Info() with `meta`/`spot_meta`
+        # positional args; if either is None it triggers a network fetch
+        # right there. Without the retry, a transient HL outage during
+        # bot start = container exit + restart-loop until HL recovers
+        # (witnessed 2026-05-09 — bot was in restart-loop for 4.5h while
+        # HL testnet was down, despite the meta() try/except on line 109
+        # which only protected our own meta call, not the SDK's internal
+        # one). Retry buys us through brief glitches.
+        last_exc: Exception | None = None
+        for attempt in range(1, settings.hl_init_retry_attempts + 1):
+            try:
+                self._info = Info(
+                    base_url, skip_ws=True, timeout=sdk_timeout,
+                )
+                self._exchange = HLExchange(
+                    self._account,
+                    base_url=base_url,
+                    account_address=self._account_address,
+                    timeout=sdk_timeout,
+                )
+                break
+            except Exception as e:
+                last_exc = e
+                if attempt < settings.hl_init_retry_attempts:
+                    backoff = settings.hl_init_retry_backoff_seconds * (2 ** (attempt - 1))
+                    logger.warning(
+                        "HL init attempt %d/%d failed (%s) — retrying in %.1fs",
+                        attempt, settings.hl_init_retry_attempts,
+                        type(e).__name__, backoff,
+                    )
+                    import time as _time
+                    _time.sleep(backoff)
+        else:
+            # All attempts failed; raise a clean error that names HL as
+            # the cause so the docker exit log shows the real reason
+            # (instead of a noisy SDK stack trace).
+            raise RuntimeError(
+                f"HyperLiquid API unreachable after "
+                f"{settings.hl_init_retry_attempts} attempts — last error: "
+                f"{type(last_exc).__name__}: {last_exc}"
+            ) from last_exc
         # Bumped from 4 → 16. Even with the SDK timeout above, a long
         # outage where many ticks queue up could still saturate the
         # pool briefly; 16 gives more headroom while still being modest.
