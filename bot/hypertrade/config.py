@@ -70,6 +70,22 @@ class Settings(BaseSettings):
     kill_switch: bool = False
     taker_fee_rate: float = 0.00045
 
+    # Trade-rate anomaly alarm. When a strategy starts spam-trading
+    # (e.g. due to a stale-bar SL bug like the 2026-05-09 hash_momentum
+    # incident), this catches it within ~5 min and auto-pauses the
+    # offender via Redis + emits a Telegram alert.
+    #
+    # Triggers when EITHER:
+    #   (a) hourly trade count > baseline_multiplier × 7d-avg-per-hour
+    #       AND > min_hourly_floor (prevents 5×0=0 false pass)
+    #   (b) hourly trade count > absolute_ceiling regardless of baseline
+    #       (catches first-time-active strategies bypass)
+    trade_rate_alarm_enabled: bool = True
+    trade_rate_alarm_check_interval_seconds: int = 300
+    trade_rate_alarm_baseline_multiplier: float = 5.0
+    trade_rate_alarm_min_hourly_floor: int = 5
+    trade_rate_alarm_absolute_ceiling: int = 20
+
     # API authentication
     api_key: str = ""  # if set, all POST endpoints require X-Api-Key header
 
