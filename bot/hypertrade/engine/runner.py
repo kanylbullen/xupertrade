@@ -463,7 +463,14 @@ class EngineRunner:
                 )
             )
 
-    async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> None:
+    async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> bool:
+        """Execute a signal end-to-end. Returns True on full success
+        (order filled + DB written + parity OK), False on any abort
+        (risk-blocked, kill-switch, order rejected, close-size unresolved,
+        cap-breached). Callers performing flip-close-then-open MUST check
+        the close return value — opening a new opposite position when the
+        close failed leaves the DB and exchange permanently divergent.
+        """
         if not await self.portfolio.check_risk_limits():
             logger.warning(
                 "[%s] Risk limit breached — skipping execution of %s %s",
@@ -478,11 +485,11 @@ class EngineRunner:
                         message=f"Risk limit breached — execution of {signal.action.value} {signal.symbol} blocked",
                     )
                 )
-            return
+            return False
 
         if settings.kill_switch:
             logger.warning("Kill switch is ON — skipping execution")
-            return
+            return False
 
         # Idempotency / flip detection: don't open a same-side duplicate;
         # if we already hold the opposite side, synthesize a CLOSE first
@@ -503,7 +510,7 @@ class EngineRunner:
                             signal.symbol,
                             existing.side,
                         )
-                        return
+                        return False
                     # Opposite side → flip. Close the existing position first
                     # via a synthesized CLOSE signal that goes through the
                     # standard close path (DB-driven size, trade record, etc.).
@@ -524,10 +531,38 @@ class EngineRunner:
                         strategy_name=signal.strategy_name,
                         reason=f"Auto-close before flip ({signal.reason[:60]})",
                     )
-                    await self._execute_signal(flip_close, current_price, leverage)
-                    # Fall through to the open path below; the close above
-                    # has already cleared the DB position so the next
-                    # get_open_position call would return None.
+                    flip_ok = await self._execute_signal(
+                        flip_close, current_price, leverage,
+                    )
+                    if not flip_ok:
+                        # ABORT: opening a new opposite-direction position
+                        # while the close failed leaves DB+exchange divergent
+                        # (audit H1, 2026-05-09). The reconcile loop will
+                        # eventually catch the leftover, but we mustn't
+                        # actively make it worse here.
+                        logger.warning(
+                            "[%s] Flip-close FAILED for %s %s — aborting "
+                            "follow-up %s to prevent double-side divergence",
+                            signal.strategy_name,
+                            existing.side, signal.symbol,
+                            signal.action.value,
+                        )
+                        if self.event_bus:
+                            try:
+                                await self.event_bus.publish(
+                                    ErrorOccurred(
+                                        strategy=signal.strategy_name,
+                                        message=(
+                                            f"Flip-close failed on {signal.symbol} "
+                                            f"({existing.side}→{wanted_side}); "
+                                            f"open aborted to keep DB and "
+                                            f"exchange consistent."
+                                        ),
+                                    )
+                                )
+                            except Exception:
+                                logger.exception("flip-abort: event publish failed")
+                        return False
 
             # Cross-strategy check: block if another strategy already holds
             # this coin and allow_multi_coin is disabled.
@@ -545,7 +580,7 @@ class EngineRunner:
                             blocking.side,
                             signal.symbol,
                         )
-                        return
+                        return False
 
             # Total exposure cap: block if opening this would exceed the
             # configured margin sum across all open strategy positions.
@@ -572,7 +607,7 @@ class EngineRunner:
                         settings.max_position_size_usd,
                         settings.max_total_exposure_usd,
                     )
-                    return
+                    return False
 
         size = signal.size or self._calculate_size(current_price, leverage)
 
@@ -585,7 +620,7 @@ class EngineRunner:
                 signal.strategy_name, signal.symbol, "long"
             )
             if close_size is None:
-                return
+                return False
             order = await self.exchange.place_order(
                 signal.symbol, "sell", close_size, OrderType.MARKET
             )
@@ -599,13 +634,13 @@ class EngineRunner:
                 signal.strategy_name, signal.symbol, "short"
             )
             if close_size is None:
-                return
+                return False
             order = await self.exchange.place_order(
                 signal.symbol, "buy", close_size, OrderType.MARKET
             )
             size = close_size
         else:
-            return
+            return False
 
         if self.event_bus:
             await self.event_bus.publish(
@@ -619,7 +654,7 @@ class EngineRunner:
 
         if order.status.value != "filled":
             logger.warning("Order not filled: %s", order.status)
-            return
+            return False
 
         filled_price = order.filled_price or 0
         fee = filled_price * size * settings.taker_fee_rate
@@ -723,6 +758,8 @@ class EngineRunner:
                 "parity check after %s %s failed (non-fatal)",
                 signal.action.value, signal.symbol,
             )
+
+        return True
 
     async def _check_parity_after_trade(self, symbol: str) -> None:
         """Verify exchange position for `symbol` matches DB sum across

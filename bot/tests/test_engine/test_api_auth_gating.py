@@ -200,6 +200,9 @@ GATED_GET_ENDPOINTS = [
     "/api/hodl/levels",
     "/api/hodl/purchases",
     "/api/vaults/mine",
+    # Vault endpoints gated 2026-05-09 (audit H2): they reveal which
+    # vaults this user is monitoring + scanner state.
+    "/api/vaults",
 ]
 
 
@@ -261,7 +264,6 @@ def app_with_all_routes_and_repo(fake_control, fake_repo_for_vaults):
 PUBLIC_GET_ENDPOINTS = [
     "/api/auth/config",   # login page renders pre-session
     "/health",            # Docker healthcheck
-    "/api/vaults",        # public HL data scraped by the scanner
 ]
 
 

@@ -86,7 +86,10 @@ export default async function VaultsPage({
   let botApiOnline = false;
   try {
     const [listRes, mineRes] = await Promise.all([
-      fetch(`${botApiUrl}/api/vaults`, { cache: "no-store" }),
+      fetch(`${botApiUrl}/api/vaults`, {
+        cache: "no-store",
+        headers: authHeaders,
+      }),
       fetch(`${botApiUrl}/api/vaults/mine`, {
         cache: "no-store",
         headers: authHeaders,

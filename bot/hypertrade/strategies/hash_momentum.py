@@ -74,12 +74,22 @@ class HashMomentumStrategy(Strategy):
     def export_state(self) -> dict | None:
         if not (self._in_long or self._in_short):
             return None
+        # Persist the cooldown counter + last-bar timestamp too. Without
+        # them, restart inside the cooldown window resets the counter to
+        # 999 (init default) → cooldown is bypassed → strategy can
+        # immediately re-enter on the same stale bar that just stopped
+        # us out. Defeats the cooldown fix from PR #15. Audit M6.
+        last_ts = self._last_closed_bar_ts
+        if last_ts is not None and hasattr(last_ts, "isoformat"):
+            last_ts = last_ts.isoformat()
         return {
             "in_long": self._in_long,
             "in_short": self._in_short,
             "entry": self._entry,
             "sl": self._sl,
             "tp": self._tp,
+            "bars_since_close": self._bars_since_close,
+            "last_closed_bar_ts": last_ts,
         }
 
     def restore_from_json(
@@ -90,6 +100,18 @@ class HashMomentumStrategy(Strategy):
         self._entry = state.get("entry", entry_price)
         self._sl = state.get("sl")
         self._tp = state.get("tp")
+        # Cooldown state restoration (audit M6). Default to 999 + None
+        # if the persisted dict predates this field — equivalent to the
+        # legacy behavior, no regression for old DB rows.
+        self._bars_since_close = int(state.get("bars_since_close", 999))
+        last_ts_raw = state.get("last_closed_bar_ts")
+        if isinstance(last_ts_raw, str):
+            try:
+                self._last_closed_bar_ts = pd.Timestamp(last_ts_raw)
+            except Exception:
+                self._last_closed_bar_ts = None
+        else:
+            self._last_closed_bar_ts = last_ts_raw
 
     def reset_state(self) -> None:
         self._in_long = False

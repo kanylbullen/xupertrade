@@ -412,13 +412,12 @@ class TestMoonPhasesStrategy:
                 break
         assert start_offset is not None, "couldn't find lunar 12→13 transition window"
 
-        # Build 50 daily bars ending so that df[-2] is the lunar-day-13 bar.
+        # Build 50 daily bars ending so that df[-1] IS the lunar-day-13
+        # bar (post-2026-05-09 audit M5 fix: runner already strips, so
+        # the strategy reads candles.iloc[-1] directly).
         n = 50
-        last_closed_date = base + timedelta(days=start_offset + 1)  # lunar 13
-        # df[-1] is one day after last_closed_date (chronological "current" tick)
-        timestamps = [last_closed_date - timedelta(days=(n - 2 - i)) for i in range(n)]
-        # Ensure the final timestamp is one day after last_closed_date
-        timestamps[-1] = last_closed_date + timedelta(days=1)
+        last_bar_date = base + timedelta(days=start_offset + 1)  # lunar 13
+        timestamps = [last_bar_date - timedelta(days=(n - 1 - i)) for i in range(n)]
         df = _flat_df(n, price=100.0, timestamps=timestamps)
         result = await strat.on_candle(df)
         assert result is not None
@@ -990,17 +989,22 @@ class TestDailyLong0830Strategy:
 
     @pytest.mark.asyncio
     async def test_warmup_returns_none(self):
+        """Empty df returns None — strategy needs at least 1 candle."""
         strat = DailyLong0830Strategy()
-        df = _flat_df(1, timestamps=[datetime(2024, 1, 1, 8, 30, tzinfo=timezone.utc)])
+        df = pd.DataFrame(columns=["open", "high", "low", "close", "volume", "timestamp"])
         assert await strat.on_candle(df) is None
 
     @pytest.mark.asyncio
     async def test_entry_signal_fires(self):
-        """Closed candle (df[-2]) timestamped 08:30 UTC fires OPEN_LONG."""
+        """Latest candle timestamped 08:30 UTC fires OPEN_LONG.
+
+        Post-2026-05-09 fix (audit M5): runner strips forming bar
+        before calling strategy, so candles[-1] is the latest closed
+        bar. Tests now feed df ending at the trigger time (08:30),
+        not 15min later as before."""
         strat = DailyLong0830Strategy()
         n = 10
-        # Last bar 08:45 -> df[-2] is 08:30
-        ts = self._15m_ts(n, end_hour=8, end_minute=45)
+        ts = self._15m_ts(n, end_hour=8, end_minute=30)
         df = _flat_df(n, price=100.0, timestamps=ts)
         result = await strat.on_candle(df)
         assert result is not None
@@ -1009,12 +1013,11 @@ class TestDailyLong0830Strategy:
 
     @pytest.mark.asyncio
     async def test_exit_signal_fires(self):
-        """Restored long, closed candle timestamped 08:00 UTC fires CLOSE_LONG."""
+        """Restored long, latest candle timestamped 08:00 UTC fires CLOSE_LONG."""
         strat = DailyLong0830Strategy()
         strat.restore_state("long", 100.0)
         n = 10
-        # Last bar 08:15 -> df[-2] is 08:00
-        ts = self._15m_ts(n, end_hour=8, end_minute=15)
+        ts = self._15m_ts(n, end_hour=8, end_minute=0)
         df = _flat_df(n, price=100.0, timestamps=ts)
         result = await strat.on_candle(df)
         assert result is not None
@@ -1027,8 +1030,7 @@ class TestDailyLong0830Strategy:
         strat = DailyLong0830Strategy()
         strat.restore_state("long", 100.0)
         n = 10
-        # Last bar 12:15 -> df[-2] is 12:00, neither 08:00 nor 08:30
-        ts = self._15m_ts(n, end_hour=12, end_minute=15)
+        ts = self._15m_ts(n, end_hour=12, end_minute=0)
         df = _flat_df(n, price=100.0, timestamps=ts)
         result = await strat.on_candle(df)
         assert result is None
