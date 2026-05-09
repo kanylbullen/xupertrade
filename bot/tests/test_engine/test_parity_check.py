@@ -1,0 +1,159 @@
+"""Tests for the post-trade DB↔exchange parity check.
+
+Catches the partial-fill drift class that produced the 1.1 SOL excess
+in the 2026-05-09 incident: HL filled only part of a close order, bot
+recorded the partial as full, exchange position remained, DB thought
+position was closed.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from hypertrade.engine.runner import EngineRunner
+from hypertrade.events.types import ErrorOccurred
+
+
+def _pos(symbol: str, side: str, size: float) -> MagicMock:
+    p = MagicMock()
+    p.symbol = symbol
+    p.side = side
+    p.size = size
+    return p
+
+
+def _runner_with(db_positions: list, exchange_positions: list) -> tuple:
+    repo = MagicMock()
+    repo.get_open_positions = AsyncMock(return_value=db_positions)
+    exchange = MagicMock()
+    exchange.get_positions = AsyncMock(return_value=exchange_positions)
+    event_bus = MagicMock()
+    event_bus.publish = AsyncMock()
+    runner = EngineRunner(
+        exchange=exchange, strategies=[], repo=repo,
+        event_bus=event_bus, control=MagicMock(),
+    )
+    return runner, event_bus
+
+
+@pytest.mark.asyncio
+async def test_no_alert_when_db_matches_exchange():
+    """DB has BTC long 0.01, exchange has BTC long 0.01 — no alert."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("BTC", "long", 0.01)],
+        exchange_positions=[_pos("BTC", "long", 0.01)],
+    )
+    await runner._check_parity_after_trade("BTC")
+    bus.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_alert_within_szdecimals_tolerance():
+    """HL rounds sizes to per-coin szDecimals. Tiny diffs are normal —
+    SOL has szDecimals=2, so a 0.01 diff is within the tolerance."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("SOL", "long", 2.13)],
+        exchange_positions=[_pos("SOL", "long", 2.14)],
+    )
+    await runner._check_parity_after_trade("SOL")
+    bus.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_alerts_on_partial_fill_drift_sol():
+    """Reproduces 2026-05-09: DB says 2.13 SOL, exchange has 3.24 SOL
+    (1.11 excess from un-booked partial fills). 1.11 > 0.05 tolerance
+    → alert."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("SOL", "long", 2.13)],
+        exchange_positions=[_pos("SOL", "long", 3.24)],
+    )
+    await runner._check_parity_after_trade("SOL")
+    bus.publish.assert_called_once()
+    event = bus.publish.call_args[0][0]
+    assert isinstance(event, ErrorOccurred)
+    assert event.strategy == "parity/SOL"
+    assert "PARITY MISMATCH" in event.message
+    assert "2.13" in event.message and "3.24" in event.message
+
+
+@pytest.mark.asyncio
+async def test_alerts_when_exchange_has_position_db_does_not():
+    """Exchange-side orphan: 0.5 BTC on exchange, 0 in DB. Real bug —
+    something opened a position the bot doesn't track. Alert."""
+    runner, bus = _runner_with(
+        db_positions=[],
+        exchange_positions=[_pos("BTC", "long", 0.5)],
+    )
+    await runner._check_parity_after_trade("BTC")
+    bus.publish.assert_called_once()
+    event = bus.publish.call_args[0][0]
+    assert "PARITY MISMATCH on BTC" in event.message
+
+
+@pytest.mark.asyncio
+async def test_alerts_when_db_has_position_exchange_does_not():
+    """DB-side orphan: bot thinks it has an ETH short, exchange shows
+    nothing. Likely close happened externally or fill failed silently."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("ETH", "short", 0.5)],
+        exchange_positions=[],
+    )
+    await runner._check_parity_after_trade("ETH")
+    bus.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_long_short_netting_summed_correctly():
+    """Two strategies on the same coin, opposing sides: long 1.0 + short 0.4
+    = net 0.6 long. Exchange shows 0.6 long → no mismatch."""
+    runner, bus = _runner_with(
+        db_positions=[
+            _pos("SOL", "long", 1.0),
+            _pos("SOL", "short", 0.4),
+        ],
+        exchange_positions=[_pos("SOL", "long", 0.6)],
+    )
+    await runner._check_parity_after_trade("SOL")
+    bus.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ignores_other_symbols():
+    """Mismatch on ETH should NOT alert when we just traded BTC.
+    Parity check is per-symbol after a trade — we only verify the coin
+    that just changed."""
+    runner, bus = _runner_with(
+        db_positions=[
+            _pos("BTC", "long", 0.01),
+            _pos("ETH", "long", 0.5),
+        ],
+        exchange_positions=[
+            _pos("BTC", "long", 0.01),
+            _pos("ETH", "long", 999.0),  # huge mismatch but not the symbol
+        ],
+    )
+    await runner._check_parity_after_trade("BTC")
+    bus.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handles_exchange_failure_without_raising():
+    """If exchange.get_positions() fails, parity check logs and exits —
+    must not propagate to break the trade flow."""
+    repo = MagicMock()
+    repo.get_open_positions = AsyncMock(return_value=[])
+    exchange = MagicMock()
+    exchange.get_positions = AsyncMock(side_effect=RuntimeError("HL down"))
+    event_bus = MagicMock()
+    event_bus.publish = AsyncMock()
+    runner = EngineRunner(
+        exchange=exchange, strategies=[], repo=repo,
+        event_bus=event_bus, control=MagicMock(),
+    )
+    # Must not raise
+    await runner._check_parity_after_trade("BTC")
+    bus_publish = event_bus.publish
+    bus_publish.assert_not_called()
