@@ -100,8 +100,9 @@ class Settings(BaseSettings):
     # meta + spot_meta synchronously, so a HL outage at bot startup
     # would crash __init__ → container exit → docker restart-loop until
     # HL recovers (4.5h on 2026-05-09). Retry with exponential backoff
-    # buys us through brief glitches. Total worst-case wait at defaults:
-    # 2s + 4s + 8s + 16s + 32s = 62s before declaring HL down.
+    # buys us through brief glitches. Sleeps happen BETWEEN attempts —
+    # with attempts=5, we sleep 4 times (2s + 4s + 8s + 16s = 30s
+    # total) before declaring HL down on the 5th failure.
     hl_init_retry_attempts: int = 5
     hl_init_retry_backoff_seconds: float = 2.0
 

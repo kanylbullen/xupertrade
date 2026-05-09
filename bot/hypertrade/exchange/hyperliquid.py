@@ -96,10 +96,13 @@ class HyperLiquidExchange(Exchange):
         # positional args; if either is None it triggers a network fetch
         # right there. Without the retry, a transient HL outage during
         # bot start = container exit + restart-loop until HL recovers
-        # (witnessed 2026-05-09 — bot was in restart-loop for 4.5h while
-        # HL testnet was down, despite the meta() try/except on line 109
-        # which only protected our own meta call, not the SDK's internal
-        # one). Retry buys us through brief glitches.
+        # (witnessed 2026-05-09 — bot was in restart-loop for 4.5h).
+        #
+        # Only retry on KNOWN transient errors. A retry-on-any-Exception
+        # would mask config / programming bugs (TypeError, AttributeError,
+        # bad credentials → AuthError) by re-raising them as "HL API
+        # unreachable" — much harder to diagnose. Non-transient errors
+        # propagate immediately. (PR #24 review fix.)
         last_exc: Exception | None = None
         for attempt in range(1, settings.hl_init_retry_attempts + 1):
             try:
@@ -114,6 +117,11 @@ class HyperLiquidExchange(Exchange):
                 )
                 break
             except Exception as e:
+                if not _is_retryable_server_error(e):
+                    # Non-transient (config bug, auth, programming error)
+                    # — re-raise as-is so the operator sees the real
+                    # cause, not a misleading "HL unreachable".
+                    raise
                 last_exc = e
                 if attempt < settings.hl_init_retry_attempts:
                     backoff = settings.hl_init_retry_backoff_seconds * (2 ** (attempt - 1))

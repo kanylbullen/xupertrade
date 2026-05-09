@@ -165,25 +165,28 @@ def test_init_raises_clean_runtime_error_when_hl_unreachable():
 
 
 def test_init_succeeds_on_retry_after_transient_failure():
-    """First N-1 attempts fail, last one succeeds → init completes."""
+    """First N-1 attempts fail, last one succeeds → init completes
+    cleanly (no exception raised). Mocks Info/HLExchange entirely so
+    no network access happens; then asserts both the retry happened
+    AND HyperLiquidExchange() returned successfully.
+    """
     from hyperliquid.utils.error import ServerError
     from hypertrade.exchange import hyperliquid as hl_module
 
     call_count = {"info": 0, "ex": 0}
-    real_info = hl_module.Info
-    real_ex = hl_module.HLExchange
 
     def _flaky_info(*args, **kwargs):
         call_count["info"] += 1
         if call_count["info"] < 3:
             raise ServerError(503, "transient")
-        return real_info(*args, **kwargs)
+        # Return a mock Info whose .meta() returns a minimal valid response
+        # so the post-construction meta-fetch loop on line 109 also passes.
+        info = MagicMock()
+        info.meta.return_value = {"universe": [{"name": "BTC", "szDecimals": 5}]}
+        return info
 
-    # We don't actually need the HLExchange to be real — just need
-    # construction to NOT raise. Use a MagicMock that accepts any args.
     def _ok_ex(*args, **kwargs):
         call_count["ex"] += 1
-        from unittest.mock import MagicMock
         return MagicMock()
 
     with patch.object(hl_module, "Info", side_effect=_flaky_info), \
@@ -192,15 +195,40 @@ def test_init_succeeds_on_retry_after_transient_failure():
          patch.object(settings, "hl_init_retry_backoff_seconds", 0.001), \
          patch.object(settings, "hyperliquid_private_key",
                       "0x" + "1" * 64):
-        # Real construction may still fail on real-network meta() —
-        # bypass that part by also patching Info.meta.
-        try:
-            ex = hl_module.HyperLiquidExchange()
-        except Exception:
-            # If post-init meta call still tries network, accept that;
-            # what we want to verify is that the retry path made it past
-            # the Info()/HLExchange() instantiation.
-            pass
+        # No try/except — if init fails after retry, the test must fail.
+        ex = hl_module.HyperLiquidExchange()
+
     assert call_count["info"] == 3, (
         f"expected 3 Info attempts (2 fail + 1 succeed), got {call_count['info']}"
+    )
+    assert call_count["ex"] == 1, (
+        f"HLExchange should be constructed exactly once after Info "
+        f"succeeded, got {call_count['ex']}"
+    )
+    # Verify the post-init meta cache was populated from our mock Info
+    assert ex._sz_decimals == {"BTC": 5}
+
+
+def test_init_does_not_retry_on_non_transient_error():
+    """Programming/config errors (TypeError, AuthError, etc.) re-raise
+    immediately instead of being misleadingly wrapped as 'HL API
+    unreachable'. (PR #24 review fix.)"""
+    from hypertrade.exchange import hyperliquid as hl_module
+
+    call_count = {"n": 0}
+
+    def _bug(*args, **kwargs):
+        call_count["n"] += 1
+        raise TypeError("bug in our config plumbing")
+
+    with patch.object(hl_module, "Info", side_effect=_bug), \
+         patch.object(settings, "hl_init_retry_attempts", 5), \
+         patch.object(settings, "hl_init_retry_backoff_seconds", 0.001), \
+         patch.object(settings, "hyperliquid_private_key",
+                      "0x" + "1" * 64):
+        with pytest.raises(TypeError, match="bug in our config plumbing"):
+            hl_module.HyperLiquidExchange()
+    assert call_count["n"] == 1, (
+        f"non-transient error should fire ONCE then propagate, "
+        f"got {call_count['n']} attempts"
     )
