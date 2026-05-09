@@ -87,3 +87,12 @@ class Exchange(ABC):
     ) -> list[dict]:
         """Fetch funding events. Default no-op for paper / non-perpetual."""
         return []
+
+    def get_size_precision(self, symbol: str) -> int:
+        """Return szDecimals (size-precision) for a coin. Drives the
+        parity-check tolerance — anything within `10**(-szDecimals)` is
+        within the exchange's minimum step and shouldn't trigger an alert.
+        Default 4 dp covers most coins (BTC=5, ETH=4, SOL=2 on HL).
+        Override in concrete exchanges that know per-coin precision.
+        """
+        return 4

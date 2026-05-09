@@ -868,12 +868,21 @@ class EngineRunner:
                 break
 
         diff = abs(db_net - ex_net)
-        # Tolerance ≈ 10× HL's szDecimals minimum step. Anything bigger
-        # is a real divergence — partial fill not booked, netting bug,
-        # manual exchange-side intervention, etc.
-        # BTC: szDecimals=5 (step 1e-5) → tolerance 1e-4
-        # SOL/ETH: szDecimals=2-3 (step 0.01-0.001) → tolerance 5e-2
-        tolerance = 1e-4 if symbol == "BTC" else 5e-2
+        # Per-coin tolerance derived dynamically from the exchange's
+        # szDecimals (audit M4). Tolerance = 10× the minimum step so
+        # routine rounding is absorbed but a real partial-fill drift
+        # (orders of magnitude bigger) trips the alert. Examples:
+        #   BTC szDecimals=5 → step 1e-5 → tolerance 1e-4
+        #   ETH szDecimals=4 → step 1e-4 → tolerance 1e-3
+        #   SOL szDecimals=2 → step 1e-2 → tolerance 1e-1
+        # Pre-fix all non-BTC coins got 5e-2 — ETH would miss 0.04 drift,
+        # ~$100 of position un-tracked.
+        sz_decimals = (
+            self.exchange.get_size_precision(symbol)
+            if hasattr(self.exchange, "get_size_precision")
+            else 4
+        )
+        tolerance = 10 * (10 ** -sz_decimals)
         if diff <= tolerance:
             return True
 

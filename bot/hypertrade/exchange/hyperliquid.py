@@ -132,6 +132,13 @@ class HyperLiquidExchange(Exchange):
     def _round_size(self, symbol: str, sz: float) -> float:
         return round(sz, self._sz_decimals.get(symbol, 4))
 
+    def get_size_precision(self, symbol: str) -> int:
+        """Return HL's szDecimals for the coin (cached at construction
+        from /info meta). Drives the parity-check tolerance per-coin
+        so ETH (szDecimals=4) doesn't get the same loose 5e-2 tolerance
+        as SOL (szDecimals=2). Audit M4."""
+        return self._sz_decimals.get(symbol, 4)
+
     @property
     def signer_address(self) -> str:
         return self._account.address
@@ -382,7 +389,10 @@ class HyperLiquidExchange(Exchange):
                 szi = float(p.get("szi", "0"))
             except (TypeError, ValueError):
                 continue
-            if szi == 0:
+            # Avoid float == 0 — sub-step residuals from SDK rounding
+            # (e.g. 1e-15) would otherwise slip past and create phantom
+            # near-zero positions. Audit L1.
+            if abs(szi) < 1e-9:
                 continue
             out.append(
                 Position(

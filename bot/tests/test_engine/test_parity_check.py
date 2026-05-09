@@ -24,11 +24,21 @@ def _pos(symbol: str, side: str, size: float) -> MagicMock:
     return p
 
 
-def _runner_with(db_positions: list, exchange_positions: list) -> tuple:
+_DEFAULT_SZ_DECIMALS = {"BTC": 5, "ETH": 4, "SOL": 2}
+
+
+def _runner_with(
+    db_positions: list,
+    exchange_positions: list,
+    sz_decimals: dict | None = None,
+) -> tuple:
     repo = MagicMock()
     repo.get_open_positions = AsyncMock(return_value=db_positions)
     exchange = MagicMock()
     exchange.get_positions = AsyncMock(return_value=exchange_positions)
+    # Per-coin szDecimals drives the dynamic parity tolerance (audit M4).
+    sz = sz_decimals if sz_decimals is not None else _DEFAULT_SZ_DECIMALS
+    exchange.get_size_precision = lambda s, sz=sz: sz.get(s, 4)
     event_bus = MagicMock()
     event_bus.publish = AsyncMock()
     runner = EngineRunner(
@@ -141,6 +151,63 @@ async def test_ignores_other_symbols():
     )
     await runner._check_parity_after_trade("BTC")
     bus.publish.assert_not_called()
+
+
+# --- M4: per-coin tolerance derived from szDecimals -----------------------
+
+@pytest.mark.asyncio
+async def test_eth_uses_tighter_tolerance_than_sol():
+    """Audit M4 regression: pre-fix, every non-BTC coin shared the SOL
+    tolerance (5e-2). ETH szDecimals=4 → tolerance should be 1e-3, so
+    a 0.04 ETH drift MUST alert (it would have been silently absorbed
+    pre-fix since 0.04 < 5e-2)."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("ETH", "long", 0.50)],
+        exchange_positions=[_pos("ETH", "long", 0.54)],
+    )
+    ok = await runner._check_parity_after_trade("ETH")
+    assert ok is False, "ETH 0.04 drift must trip the alert post-M4"
+    bus.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_eth_within_tightened_tolerance_no_alert():
+    """ETH 0.0005 diff is still under the 1e-3 tolerance — no alert."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("ETH", "long", 0.50)],
+        exchange_positions=[_pos("ETH", "long", 0.5005)],
+    )
+    ok = await runner._check_parity_after_trade("ETH")
+    assert ok is True
+    bus.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_btc_tolerance_is_tightest():
+    """BTC szDecimals=5 → tolerance 1e-4. 0.0005 diff alerts."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("BTC", "long", 0.01)],
+        exchange_positions=[_pos("BTC", "long", 0.0105)],
+    )
+    ok = await runner._check_parity_after_trade("BTC")
+    assert ok is False
+    bus.publish.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_default_tolerance_when_exchange_has_no_precision_method():
+    """Paper exchange and others using base-class default (szDecimals=4)
+    get tolerance 1e-3 — strict enough to catch drifts but lenient
+    enough to absorb HL rounding."""
+    runner, bus = _runner_with(
+        db_positions=[_pos("DOGE", "long", 100.0)],
+        exchange_positions=[_pos("DOGE", "long", 100.05)],
+    )
+    # DOGE not in our default sz_decimals dict → falls back to default 4
+    # → tolerance 1e-3 → 0.05 diff triggers alert.
+    ok = await runner._check_parity_after_trade("DOGE")
+    assert ok is False
+    bus.publish.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -272,16 +272,26 @@ class BotControl:
         await pipe.execute()
 
     async def ensure_session_secret(self) -> str:
-        """Generate session_secret if missing. Returns the current secret."""
+        """Generate session_secret if missing. Returns the current secret.
+
+        Uses SET NX (atomic set-if-not-exists) so two concurrent callers
+        racing on first-init don't each generate a different secret and
+        clobber each other's signed sessions. Audit M3.
+        """
         if self._redis is None:
             return ""
-        cur = await self._redis.get("dashboard:auth:session_secret")
+        key = "dashboard:auth:session_secret"
+        cur = await self._redis.get(key)
         if cur:
             return cur
         import secrets
-        new = secrets.token_urlsafe(48)
-        await self._redis.set("dashboard:auth:session_secret", new)
-        return new
+        candidate = secrets.token_urlsafe(48)
+        # `nx=True` → only set if key didn't exist. Returns truthy when
+        # we won the race; falsy when another caller beat us. Either way
+        # we re-read to get the canonical winner.
+        await self._redis.set(key, candidate, nx=True)
+        winner = await self._redis.get(key)
+        return winner or candidate
 
     # --- Per-strategy state snapshot (audit M6 fix completion).
     # The position-table state_json only persists state during in-position

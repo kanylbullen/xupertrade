@@ -16,9 +16,14 @@ class Strategy(ABC):
     # Bot sets HyperLiquid leverage per coin to the max across strategies
     # touching that coin. Can be overridden at runtime via dashboard.
     leverage: int = 1
-    params: dict = {}
+    # NOTE: do NOT use a class-level mutable default for `params` —
+    # `params: dict = {}` would be shared across every instance, so any
+    # strategy receiving an unknown kwarg would leak the value into
+    # every other strategy's `params`. Initialize per-instance in
+    # __init__ instead. Audit M1 (2026-05-09).
 
     def __init__(self, **kwargs: object) -> None:
+        self.params: dict = {}
         for key, value in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, value)
@@ -69,6 +74,10 @@ class Strategy(ABC):
 
     def configure(self, params: dict) -> None:
         """Update strategy parameters."""
+        # Defensive: subclasses might override __init__ without calling
+        # super().__init__(); ensure per-instance params dict exists.
+        if not hasattr(self, "params"):
+            self.params = {}
         for key, value in params.items():
             if hasattr(self, key):
                 setattr(self, key, value)
