@@ -81,13 +81,27 @@ class HyperLiquidExchange(Exchange):
             settings.hyperliquid_account_address.strip()
             or self._account.address
         )
-        self._info = Info(base_url, skip_ws=True)
+        # Pass `timeout` into the SDK so the underlying requests.Session
+        # actually kills hung TCP connections at the socket level. Without
+        # this, asyncio.wait_for would raise TimeoutError but leave the
+        # executor thread stuck on a hanging requests.post — eventually
+        # exhausting the pool (audit M2 / PR #20 review). The SDK uses
+        # the order-timeout deadline since the same Info/Exchange object
+        # serves both reads and writes; reads complete much faster than
+        # the order-timeout window in normal conditions, and our Python-
+        # level wait_for still applies the tighter read-timeout on top.
+        sdk_timeout = settings.hl_order_timeout_seconds
+        self._info = Info(base_url, skip_ws=True, timeout=sdk_timeout)
         self._exchange = HLExchange(
             self._account,
             base_url=base_url,
             account_address=self._account_address,
+            timeout=sdk_timeout,
         )
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        # Bumped from 4 → 16. Even with the SDK timeout above, a long
+        # outage where many ticks queue up could still saturate the
+        # pool briefly; 16 gives more headroom while still being modest.
+        self._executor = ThreadPoolExecutor(max_workers=16)
         # HL price rules: max 5 sig figs AND max (MAX_DECIMALS - szDecimals)
         # decimals (MAX_DECIMALS = 6 for perps). Cache szDecimals per coin
         # so we can round limit_px before submission.
@@ -244,7 +258,7 @@ class HyperLiquidExchange(Exchange):
                 {"limit": {"tif": tif}},
                 timeout=settings.hl_order_timeout_seconds,
             )
-        except (asyncio.TimeoutError, Exception):
+        except Exception:
             logger.exception("HyperLiquid order failed (or timed out)")
             return Order(
                 id=str(uuid.uuid4()),
@@ -334,7 +348,7 @@ class HyperLiquidExchange(Exchange):
             else:
                 logger.warning("update_leverage rejected for %s: %s", symbol, result)
             return ok
-        except (asyncio.TimeoutError, Exception):
+        except Exception:
             logger.exception("Failed to set leverage for %s (or timed out)", symbol)
             return False
 

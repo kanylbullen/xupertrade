@@ -24,20 +24,25 @@ def fake_exchange():
     """Build a HyperLiquidExchange with all SDK init bypassed.
 
     We don't need a real HL connection — just the wrapper methods.
+    Yields the instance and cancels the executor on teardown so worker
+    threads stuck inside `time.sleep` (from the hang-tests) don't leak
+    across the suite (would cause flaky hangs at process exit).
     """
+    from concurrent.futures import ThreadPoolExecutor
     with patch.object(
         HyperLiquidExchange, "__init__", return_value=None,
     ) as _:
         ex = HyperLiquidExchange()
-        # Manually set the attributes the wrapper methods read.
         ex._account = MagicMock()
         ex._account_address = "0xabc"
         ex._info = MagicMock()
         ex._exchange = MagicMock()
-        from concurrent.futures import ThreadPoolExecutor
         ex._executor = ThreadPoolExecutor(max_workers=2)
         ex._sz_decimals = {"BTC": 5, "SOL": 2, "ETH": 4}
-        return ex
+        try:
+            yield ex
+        finally:
+            ex._executor.shutdown(wait=False, cancel_futures=True)
 
 
 @pytest.mark.asyncio
