@@ -103,10 +103,16 @@ services:
       TELEGRAM_ENABLED: "false"
       # Audit C3 allowlist. EMPTY = no strategies trade on mainnet (the bot
       # boots and serves API but won't open any new positions). Set in
-      # .env to a comma-separated list to enable specific strategies, e.g.
-      # `MAINNET_ENABLED_STRATEGIES=bb_short`. There is no default — fail
-      # closed by design.
+      # the secrets manager (Phase) to a comma-separated list to enable
+      # specific strategies, e.g. `MAINNET_ENABLED_STRATEGIES=bb_short`.
+      # No default — fail-closed by design.
       MAINNET_ENABLED_STRATEGIES: "${MAINNET_ENABLED_STRATEGIES:-}"
+      # First-week tiny rollout per audit recommendation. Hardcoded
+      # rather than env-overridden so the operator can't accidentally
+      # pick up the *bot-env defaults ($1000 / $500) on the first
+      # mainnet deploy. Bump these via PR after first successful trades.
+      MAX_POSITION_SIZE_USD: "20"
+      MAX_DAILY_LOSS_USD: "20"
 
   dashboard:
     build: ./dashboard

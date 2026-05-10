@@ -19,16 +19,18 @@ lives in history. **Never commit any of these:**
 
 | Type | Example | Where it goes instead |
 |---|---|---|
-| Telegram bot token | `8639592584:AAGj…` (digits, colon, 35 base64 chars) | `.env` on the deploy host |
-| HyperLiquid private key | `0x` + 64 hex chars | `.env` on the deploy host |
+| Telegram bot token | `8639592584:AAGj…` (digits, colon, 35 base64 chars) | Phase secrets manager (see § 3) |
+| HyperLiquid private key | `0x` + 64 hex chars | Phase secrets manager |
 | Cloudflare API token | 40-char base64 | Redis (`dashboard:tls:cf_token`) via Options page |
 | OIDC client secret | provider-specific | Redis (`dashboard:auth:oidc_client_secret`) |
-| `API_KEY` for the bot HTTP API | random string | `.env` on the deploy host |
-| Personal email used live | `you@yourdomain.com` | `.env` (`TELEGRAM_*`, OIDC config); generic placeholder in docs (`you@example.com`) |
-| Telegram chat ID | 8-12 digit number used as your identity | `.env` on the deploy host |
+| `API_KEY` for the bot HTTP API | random string | Phase secrets manager |
+| Phase service token | base64 | only on the host's `~/.phase/` config; NEVER in repo |
+| Personal email used live | `you@yourdomain.com` | Phase (`TELEGRAM_*`, OIDC config); generic placeholder in docs (`you@example.com`) |
+| Telegram chat ID | 8-12 digit number used as your identity | Phase secrets manager |
 | Server IP / private LAN | `192.168.x.x`, `10.x.x.x` | `~/.ssh/config`, env vars (`$DEPLOY_HOST`, `$DEPLOY_IP`) |
 | Real production hostname | `mybot.example.com` | local env / SSH config; use `$DEPLOY_HOST` placeholder in docs |
-| Wallet addresses (HL trading account) | `0x` + 40 hex | not needed in repo; bot reads from env |
+| Phase / secrets-manager URL | `secrets.example.com` | local env; use `$PHASE_URL` placeholder in docs |
+| Wallet addresses (HL trading account) | `0x` + 40 hex | not needed in repo; bot reads from Phase |
 | Holdings / position sizes that identify you | "I have 400 VVV" in commit msg | discuss in chat, not in commits |
 
 **Before EVERY commit**, a pre-commit hook (see § Setup) blocks the diff
@@ -160,16 +162,59 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 - **HTTPS:** `https://$DEPLOY_HOST/` — Let's Encrypt cert auto-renewed by Caddy via Cloudflare DNS-01.
 - **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis.
 
+### Secrets management — Phase
+
+**Source of truth: a self-hosted [Phase](https://phase.dev) instance.**
+All runtime secrets (HL keys, Telegram token+chat, API_KEY, public URL,
+Caddy host, vault tracking address, mainnet allowlist) live there in the
+`hypertrade` app's `Development` env. The host has the `phase` CLI
+installed + authenticated via service token. **No `.env` file on the
+host** — anything that previously lived there is now in Phase.
+
+The deploy command wraps everything in `phase run` so secrets are
+injected as env vars only for the lifetime of the docker-compose call —
+they're never written to disk on the host.
+
+To add or change a secret:
+- Locally: `phase secrets create KEY=VALUE` or `phase secrets update KEY=VALUE`
+- Or via the Phase web UI on the operator's instance
+- Then redeploy (host pulls fresh values from Phase on the next `phase run`)
+
+Bootstrap on a new host (one-time):
+1. Create a service token in Phase UI → User Settings → Tokens
+2. `scp .phase.json` from the operator's local clone to `/opt/hypertrade/`
+   on the host (the file links the host to the operator's app/env IDs;
+   it is NOT a secret but is gitignored because it's per-instance)
+3. `ssh root@$DEPLOY_HOST 'cd /opt/hypertrade && phase auth --mode token'`
+   (paste token)
+4. Verify: `ssh root@$DEPLOY_HOST 'cd /opt/hypertrade && phase secrets list'`
+   should show the keys
+
+The Phase instance URL itself (operator's hostname for their Phase web
+UI) is treated as private operator info — see § 0. Use `$PHASE_URL`
+as a placeholder if a doc example needs to refer to it.
+
 ### Standard deploy command
 
 ```bash
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && \
    git fetch origin && git reset --hard origin/master && \
-   docker compose build && docker compose up -d"
+   phase run -- bash -c 'docker compose build && docker compose up -d'"
 ```
 
-Build only what changed for speed (e.g. `docker compose build bot-testnet bot-paper dashboard`).
+For mainnet (opt-in via `--profile mainnet`):
+
+```bash
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && \
+   git fetch origin && git reset --hard origin/master && \
+   phase run -- bash -c 'docker compose --profile mainnet build && \
+                          docker compose --profile mainnet up -d'"
+```
+
+Build only what changed for speed (e.g.
+`phase run -- bash -c 'docker compose build bot-testnet bot-paper dashboard'`).
 
 ### Standard "is the bot OK?" check
 
