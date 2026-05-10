@@ -117,6 +117,22 @@ async def test_mainnet_commands_degrade_when_not_wired():
         assert "not wired" in msg, f"{fn.__name__} did not degrade gracefully"
 
 
+def test_mainnet_commands_not_registered_without_wiring():
+    """PR #29 review: when `mainnet_control=None`, the /-mainnet commands
+    must NOT appear in the Telegram menu. Otherwise the operator sees
+    commands that always reply 'not wired'."""
+    notif = TelegramNotifier(token="t", chat_id="1", mainnet_control=None)
+    for cmd in ("/status-mainnet", "/pause-mainnet", "/resume-mainnet", "/flat-mainnet"):
+        assert cmd not in notif._commands, f"{cmd} must not be registered"
+
+
+def test_mainnet_commands_registered_with_wiring():
+    """When wired, the four /-mainnet commands appear in `_commands`."""
+    notif = TelegramNotifier(token="t", chat_id="1", mainnet_control=MagicMock())
+    for cmd in ("/status-mainnet", "/pause-mainnet", "/resume-mainnet", "/flat-mainnet"):
+        assert cmd in notif._commands, f"{cmd} must be registered"
+
+
 @pytest.mark.asyncio
 async def test_status_mainnet_stale_heartbeat():
     """Heartbeat older than 180s should render with the warning marker."""

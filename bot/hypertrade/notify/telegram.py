@@ -158,26 +158,29 @@ class TelegramNotifier:
             "/today": (self._cmd_today, "Today's PnL summary (per-strategy, current mode)"),
             "/eval": (self._cmd_eval, "Weekly per-strategy evaluation (7d)"),
             "/kelly": (self._cmd_kelly, "Half-Kelly sizing report (30d, advisory only)"),
-            # Mainnet variants (audit C4). Available only when this bot was
-            # constructed with a mainnet_control handle. The handlers
-            # themselves return "Mainnet control not wired" if not.
-            "/status-mainnet": (
-                self._cmd_status_mainnet,
-                "Mainnet bot state (paused, disabled strategies, heartbeat)",
-            ),
-            "/pause-mainnet": (
-                self._cmd_pause_mainnet,
-                "Pause the MAINNET bot (no new signals execute)",
-            ),
-            "/resume-mainnet": (
-                self._cmd_resume_mainnet,
-                "Resume the MAINNET bot",
-            ),
-            "/flat-mainnet": (
-                self._cmd_flat_mainnet,
-                "Close ALL MAINNET positions (with confirmation)",
-            ),
         }
+        # Mainnet variants (audit C4). Registered only when wiring is
+        # actually in place — otherwise the menu would advertise commands
+        # that always reply "not wired" and confuse the operator.
+        if self._mainnet_control is not None:
+            self._commands.update({
+                "/status-mainnet": (
+                    self._cmd_status_mainnet,
+                    "Mainnet bot state (paused, disabled strategies, heartbeat)",
+                ),
+                "/pause-mainnet": (
+                    self._cmd_pause_mainnet,
+                    "Pause the MAINNET bot (no new signals execute)",
+                ),
+                "/resume-mainnet": (
+                    self._cmd_resume_mainnet,
+                    "Resume the MAINNET bot",
+                ),
+                "/flat-mainnet": (
+                    self._cmd_flat_mainnet,
+                    "Close ALL MAINNET positions (with confirmation)",
+                ),
+            })
 
     @property
     def configured(self) -> bool:
