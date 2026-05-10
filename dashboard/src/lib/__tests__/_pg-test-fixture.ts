@@ -14,6 +14,8 @@
  *   - tenant (`tenant_<32hex>` role, RLS enforced)
  */
 
+import { randomUUID } from "node:crypto";
+
 import postgres, { type Sql } from "postgres";
 import {
   PostgreSqlContainer,
@@ -36,14 +38,36 @@ export type PgFixture = {
  * Drift between this and the real migrations is caught by the smoke
  * test (test_migration_0010_smoke.py) on the bot side, which checks
  * that the migration emits the same SQL fragments we mirror here.
+ *
+ * Production fidelity choices (PR #47 review):
+ * - NO pgcrypto extension; NO `gen_random_uuid()` server default on
+ *   tenants.id. Alembic 0009 explicitly avoids these (PR #36 review)
+ *   so the dashboard supplies UUIDs application-side via
+ *   `crypto.randomUUID()`. `seedTenants` does the same.
+ * - RLS is enabled + tenant_isolation policy applied to ALL 9
+ *   per-tenant tables (matches alembic 0010), not just `trades`.
+ *   This way a regression that drops RLS from any one of them
+ *   surfaces in this suite even if no test directly queries that
+ *   table.
  */
-const SCHEMA_SQL = `
-  -- pgcrypto for gen_random_uuid() — needed for our INSERTs in tests.
-  CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-  -- tenants table (Phase 1) — minimal columns.
+const TENANT_DATA_TABLES = [
+  "trades",
+  "positions",
+  "equity_snapshots",
+  "funding_payments",
+  "backtest_runs",
+  "strategy_configs",
+  "manual_onchain_levels",
+  "hodl_purchases",
+  "user_vault_entries",
+] as const;
+
+const SCHEMA_SQL = `
+  -- tenants table (Phase 1) — no pgcrypto / no server default;
+  -- application supplies UUIDs (matches alembic 0009).
   CREATE TABLE tenants (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     authentik_sub VARCHAR(128) NOT NULL UNIQUE,
     email VARCHAR(255) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT true,
@@ -122,12 +146,30 @@ const SCHEMA_SQL = `
   END;
   $$ LANGUAGE plpgsql STABLE;
 
-  -- Phase 5a: enable RLS + tenant_isolation policy on trades.
-  ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
-  CREATE POLICY tenant_isolation ON trades
-    FOR ALL
-    USING (tenant_id = app_tenant_id())
-    WITH CHECK (tenant_id = app_tenant_id());
+  -- Phase 5a: enable RLS + tenant_isolation policy on every
+  -- per-tenant table (PR #47 review fix). The tests directly
+  -- exercise \`trades\`, but applying the policy across all 9
+  -- tables makes any "missed an ALTER TABLE in alembic 0010"
+  -- regression surface here too.
+  ALTER TABLE trades                ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE positions             ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE equity_snapshots      ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE funding_payments      ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE backtest_runs         ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE strategy_configs      ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE manual_onchain_levels ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE hodl_purchases        ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE user_vault_entries    ENABLE ROW LEVEL SECURITY;
+
+  CREATE POLICY tenant_isolation ON trades                FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON positions             FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON equity_snapshots      FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON funding_payments      FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON backtest_runs         FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON strategy_configs      FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON manual_onchain_levels FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON hodl_purchases        FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON user_vault_entries    FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
 `;
 
 export async function setupPg(): Promise<PgFixture> {
@@ -171,9 +213,13 @@ export async function setupPg(): Promise<PgFixture> {
 }
 
 /**
- * Insert two test tenants, returning their UUIDs. `setupPg` uses the
- * operator to seed the tenants table because tenants is a
- * dashboard-managed table that no tenant role should ever touch.
+ * Insert N test tenants, returning their UUIDs. UUIDs are generated
+ * application-side via `crypto.randomUUID()` to match production —
+ * alembic 0009 deliberately has no `gen_random_uuid()` server
+ * default to avoid the pgcrypto extension dependency (PR #36 review).
+ *
+ * Uses the operator client because `tenants` is a dashboard-managed
+ * table that no tenant role should ever touch.
  */
 export async function seedTenants(
   fixture: PgFixture,
@@ -186,13 +232,13 @@ export async function seedTenants(
   const sql = fixture.operatorClient();
   const ids: string[] = [];
   for (let i = 0; i < count; i++) {
+    const id = randomUUID();
     const sub = `test-sub-${i}-${Date.now()}`;
-    const rows = await sql<{ id: string }[]>`
-      INSERT INTO tenants (authentik_sub, email)
-      VALUES (${sub}, ${sub + "@example.com"})
-      RETURNING id::text AS id
+    await sql`
+      INSERT INTO tenants (id, authentik_sub, email)
+      VALUES (${id}::uuid, ${sub}, ${sub + "@example.com"})
     `;
-    ids.push(rows[0].id);
+    ids.push(id);
   }
   await sql.end();
   return ids;

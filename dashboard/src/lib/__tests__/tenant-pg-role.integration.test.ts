@@ -2,9 +2,10 @@
  * RLS + tenant role integration tests against a real Postgres
  * spawned via testcontainers (multi-tenancy Phase 5c).
  *
- * Skipped automatically when Docker isn't available — `npm test`
- * still works on a dev machine without Docker; CI / dedicated
- * integration runs catch the RLS-correctness regressions.
+ * Excluded from default `npm test` (see vitest.config.ts) so
+ * Docker-less dev machines can still run the unit suite. Run
+ * explicitly via `npm run test:integration` — fails fast (clear
+ * testcontainers error) when Docker isn't reachable.
  *
  * What this proves end-to-end:
  *   - provisionRole creates a real PG role with the right grants
