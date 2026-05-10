@@ -56,11 +56,22 @@ class Repository:
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
         self._mode = settings.exchange_mode
         self._is_paper = settings.is_paper
-        # Multi-tenancy Phase 3b: when set, every INSERT this Repository
-        # writes carries this tenant_id, and SELECT/UPDATE/DELETE
-        # filters are scoped to it. When None, falls back to today's
-        # tenant-agnostic behavior — that's the operator's current
-        # 3-mode deploy until Phase 6 cutover.
+        # Multi-tenancy Phase 3b: when set, every hot-path INSERT this
+        # Repository writes carries this tenant_id (Trade, PositionRecord,
+        # EquitySnapshot, FundingPayment). When None, falls back to
+        # today's tenant-agnostic behavior — operator's pre-cutover
+        # 3-mode deploy.
+        #
+        # NOTE: SELECT/UPDATE/DELETE are NOT yet scoped to tenant_id;
+        # queries filter on `mode` only. With multiple tenants in the
+        # same DB this could leak/mutate cross-tenant rows. Real
+        # isolation lands in Phase 5 via distinct PG roles + RLS —
+        # the application-layer approach is too easy to forget on a
+        # new query path. Phase 3b is sufficient ONLY when one
+        # tenant_id is in play per process (the operator's current
+        # deploy + dashboard-spawned single-tenant bots). Multi-tenant
+        # beta (Phase 8) requires Phase 5 first.
+        #
         # Stored as a uuid.UUID so SQLAlchemy's Uuid column type can
         # serialize cleanly (a bare string trips its `value.hex` path).
         raw_tenant = (

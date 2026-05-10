@@ -13,12 +13,25 @@ class Settings(BaseSettings):
 
     # Multi-tenancy (audit Phase 3b). When set (UUID string from env
     # `TENANT_ID`, injected by the dashboard's bot-orchestrator), the
-    # repository tags every INSERT with this tenant_id and scopes
-    # SELECTs/UPDATEs/DELETEs to it. When NULL (operator's current
-    # 3-mode deploy until Phase 6 cutover), repository falls back to
-    # today's tenant-agnostic behavior. `BOT_ID` is the corresponding
-    # `tenant_bots.id` UUID — used for Redis key scoping when two
-    # bots from the same tenant share a coin (multi-bot tenants).
+    # repository tags every hot-path INSERT with this tenant_id (Trade,
+    # PositionRecord, EquitySnapshot, FundingPayment).
+    #
+    # IMPORTANT: SELECT/UPDATE/DELETE are NOT yet tenant-scoped at the
+    # application layer. With multiple tenants in the same DB, a bot
+    # could read/mutate another tenant's rows because today's queries
+    # filter by `mode` only. Real isolation lands in Phase 5 via
+    # distinct PG roles per tenant + row-level security policies — the
+    # plan's chosen approach because application-layer scoping is
+    # easy to forget on a new query path.
+    #
+    # Until Phase 5: this Phase 3b setting is sufficient for the
+    # operator's pre-cutover 3-mode deploy (only one tenant_id ever
+    # in play at any one time per bot process). Multi-tenant
+    # closed-beta (Phase 8) MUST wait for Phase 5.
+    #
+    # `BOT_ID` is the corresponding `tenant_bots.id` UUID — used for
+    # Redis key scoping when two bots from the same tenant share a
+    # coin (multi-bot tenants).
     tenant_id: str | None = None
     bot_id: str | None = None
 

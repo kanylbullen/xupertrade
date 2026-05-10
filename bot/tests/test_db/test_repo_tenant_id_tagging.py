@@ -86,6 +86,42 @@ async def test_atomic_open_tags_both_rows(tenanted_repo):
 
 
 @pytest.mark.asyncio
+async def test_atomic_close_tags_trade_and_keeps_position_tenant(tenanted_repo):
+    """Close path: the new Trade row carries this tenant's id, and the
+    matching PositionRecord (which was tagged on the open path) is
+    closed in place — its tenant_id stays intact through the UPDATE.
+    Pinned per PR #44 review (the open-path tests don't cover this
+    code path)."""
+    repo = tenanted_repo
+
+    # Open first, then close.
+    open_trade, open_pos = await repo.record_trade_and_open_position(
+        order_id="open-1", strategy_name="bb_short", symbol="SOL",
+        trade_side="buy", position_side="long",
+        size=1.0, price=100.0,
+    )
+    assert open_pos.tenant_id == repo._tenant_id
+
+    close_trade = await repo.record_trade_and_close_position(
+        order_id="close-1", strategy_name="bb_short", symbol="SOL",
+        trade_side="sell", size=1.0, price=110.0,
+        fee=0.0, pnl=10.0, reason="test close",
+    )
+    assert close_trade.tenant_id == repo._tenant_id
+
+    # Verify the position row is closed AND still has the original
+    # tenant_id (not nulled by the close UPDATE).
+    async with repo._session_factory() as session:
+        rows = (await session.scalars(
+            select(models.PositionRecord)
+        )).all()
+    assert len(rows) == 1
+    assert rows[0].is_open is False
+    assert rows[0].tenant_id == repo._tenant_id
+    assert rows[0].pnl == 10.0
+
+
+@pytest.mark.asyncio
 async def test_snapshot_equity_tags_tenant_id(tenanted_repo):
     repo = tenanted_repo
     await repo.snapshot_equity(total=10000.0, available=5000.0, unrealized_pnl=0.0)
