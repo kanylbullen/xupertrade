@@ -170,8 +170,9 @@ boundary in production:
   passphrase salt/verifier, or the tenant's PG role password.
 - **Privilege escalation: tenant → operator** — tenant gains
   ability to enumerate other tenants, stop another tenant's bot,
-  call admin endpoints (`/api/admin/*`), or otherwise act on
-  another tenant's behalf.
+  call any admin-scoped endpoint (currently only `postgres`
+  superuser SQL access exists; admin HTTP routes are PLANNED in
+  a later phase), or otherwise act on another tenant's behalf.
 - **Secret-at-rest leakage** — `tenant_secrets` rows readable
   without the tenant's passphrase; the Argon2id salt or verifier
   ever logged in plaintext.

@@ -9,6 +9,13 @@ Authentik account to the `hypertrade-users` group.
 This document covers the operator-side workflow (adding a new user)
 and the user-side workflow (first sign-in through bot-running).
 
+> **Status note (2026-05-10):** This doc was written ahead of
+> Phase 6 + Phase 8. Feature status is marked inline:
+> - **AVAILABLE NOW** = implemented + on `master`
+> - **PLANNED** = part of a later phase, not yet implemented
+> Where the operator workflow currently relies on raw DB / SSH
+> rather than a UI/API, that's called out explicitly.
+
 ---
 
 ## Why invite-only
@@ -17,8 +24,10 @@ The decision was made during multi-tenancy planning
 ([`docs/plans/multi-tenancy.md`](plans/multi-tenancy.md) §1
 decision 5). Reasoning:
 
-- **Resource cap** (`MAX_TENANTS=10` default) — per-user containers
-  add up; operator wants to know who they're sharing the host with
+- **Resource sanity** — per-user containers add up; operator wants
+  to know who they're sharing the host with. (A `MAX_TENANTS`
+  enforcement env-var is **PLANNED** but not yet wired; for now
+  the operator self-polices via Authentik group membership.)
 - **No abuse / spam infrastructure needed** — invite-only sidesteps
   email-verification, captcha, brute-force protection, content
   moderation, etc.
@@ -60,8 +69,9 @@ dashboard.
 2. Add their account to the `hypertrade-users` group:
    - Authentik admin → **Directory → Users → [their account]
      → Groups → Add → hypertrade-users**
-3. Send them the dashboard URL + a copy of [`USER_GUIDE.md`](#)
-   (TODO — to be created during Phase 8 closed-beta).
+3. Send them the dashboard URL + the user-workflow steps from this
+   doc (USER_GUIDE.md is **PLANNED** — first beta user audience
+   will tell us what they need before we write a dedicated guide).
 
 That's it on the operator side. The user can now sign in and
 the dashboard will auto-create their `tenants` row on first sign-
@@ -69,28 +79,66 @@ in.
 
 ### Removing a tenant
 
+**AVAILABLE NOW** (manual SSH/SQL path):
+
 1. **Stop their bot first** to avoid orphan containers:
-   - Dashboard → admin view → Tenants → Stop bot
-   - Or via API: `POST /api/admin/tenants/<id>/stop-all-bots`
-2. Optional: remove from the `hypertrade-users` group (revokes
-   future sign-ins; keeps DB rows)
-3. To actually delete their data:
-   - Dashboard → admin view → Tenants → Delete (cascades to
-     their bots, secrets, audit log, and all per-tenant data
-     rows via the FK CASCADE chains established in alembic 0009)
-   - This is irreversible. Confirm carefully.
+   ```bash
+   # Find the container
+   ssh root@$DEPLOY_HOST 'docker ps --filter label=hypertrade.tenant_id=<uuid>'
+   # Stop + remove
+   ssh root@$DEPLOY_HOST 'docker rm -f hypertrade-bot-<short_id>-<mode>'
+   ```
+2. Optional: remove their Authentik account from the
+   `hypertrade-users` group — revokes future sign-ins; their DB
+   rows stay intact.
+3. To delete their data entirely:
+   ```sql
+   -- Connect to postgres as superuser
+   DELETE FROM tenants WHERE id = '<uuid>';
+   -- Cascades to tenant_bots, tenant_secrets, tenant_audit_log
+   -- and all per-tenant data rows via FK CASCADE (alembic 0009).
+   -- Also drop the per-tenant PG role (Phase 5b created it):
+   DROP ROLE IF EXISTS tenant_<32hex>;
+   ```
+   Irreversible. Confirm against `git log` to be sure you're
+   removing the right tenant.
+
+**PLANNED** (Phase 6+):
+
+- `GET/POST/DELETE /api/admin/tenants[/<id>]` — operator-scoped HTTP
+  endpoints for the above. No admin dashboard UI in v1; operators
+  use curl + jq.
+- A `delete_tenant(tenant_id)` helper that wraps the SQL cascade
+  + Postgres-role DROP into one atomic operation.
 
 ### Operator visibility
 
-The operator role can:
+**AVAILABLE NOW** (raw access):
 
-- List all tenants + their bot status
-- Stop any tenant's bot (e.g. spam-trading mitigation)
-- Disable a tenant (sets `tenants.is_active = false`, blocks
-  future sign-in even if still in the Authentik group)
-- See aggregate metrics (total tenants, total bots, total trades)
+- Operator's bot containers connect as the `postgres` superuser
+  and bypass RLS naturally — so SELECT-ing across the whole
+  database from any operator-tier bot's DB session shows all
+  tenants' rows. Manual SQL queries via `docker compose exec -T
+  postgres psql -U postgres -d hypertrade ...` is the current
+  "admin UI."
+- `docker ps --filter label=hypertrade.tenant_id=<uuid>` lists
+  running containers per tenant (labels set by the orchestrator
+  in Phase 3a).
 
-The operator role **CANNOT**:
+**PLANNED** (admin-tier dashboard endpoints, Phase 6+):
+
+- List all tenants + bot status via `/api/admin/tenants`
+- Stop any tenant's bot via `/api/admin/tenants/<id>/bots/<bot_id>/stop`
+- Disable a tenant via `/api/admin/tenants/<id>/disable`
+  (this should set `tenants.is_active = false` AND have the
+  tenant resolver enforce it — currently `tenants.is_active`
+  exists in the schema but **NOT enforced** by
+  `lib/tenant.ts:getCurrentTenant`. Bug or feature gap; tracked
+  for Phase 6.)
+- Aggregate metrics page
+
+The operator role currently **CANNOT** (by design, multi-tenancy
+trust model B):
 
 - Read any tenant's secrets at rest (encrypted with the tenant's
   passphrase-derived key K, which is never persisted)
@@ -208,10 +256,21 @@ your bot replies only to your configured `TELEGRAM_CHAT_ID`.
 
 **Q: A tenant is spam-trading. How do I stop them?**
 
-A: Either stop their bot (preserves their data) or disable them
-(`is_active=false`, blocks future sign-in too). Both are
-admin-only actions. The bot's existing trade-rate alarm + Phase
-8 beta will surface this loud and early.
+A: **Today (manual)**: SSH in and `docker rm -f
+hypertrade-bot-<short_id>-<mode>`. Their bot is dead; their data
+stays. They can recreate via the dashboard if they unlock again,
+so for repeat offenders also remove their account from the
+`hypertrade-users` Authentik group.
+
+**Planned (Phase 6+)**: admin endpoint
+`POST /api/admin/tenants/<id>/disable` will set
+`tenants.is_active = false`, and the tenant resolver will be
+updated to deny new sign-ins for inactive tenants. Today the
+column exists but isn't enforced — file an issue if this bites
+before Phase 6 lands.
+
+The bot's trade-rate alarm + parity check (audit M2 + M3) will
+surface a misbehaving bot loudly via Telegram regardless.
 
 **Q: A tenant lost their passphrase. Can I recover their data?**
 
@@ -224,18 +283,30 @@ point of B's at-rest protection.
 
 **Q: A tenant wants to delete their account (GDPR).**
 
-A: Admin endpoint cascades the `tenants` row → tenant_bots,
-tenant_secrets, tenant_audit_log, and all per-tenant data rows
-via FK CASCADE chains established in alembic 0009. After
-deletion, no tenant data remains; aggregate-only data is
-preserved (e.g. operator-level metrics).
+A: **Today (manual)**: Operator runs the SQL cascade described
+in "Removing a tenant" above. `DELETE FROM tenants WHERE id =
+'<uuid>'` cascades to tenant_bots, tenant_secrets,
+tenant_audit_log, and all per-tenant data rows via the FK CASCADE
+chains established in alembic 0009. Operator also drops the
+per-tenant Postgres role manually. **Planned (Phase 6+)**:
+admin HTTP endpoint that wraps both into one call.
+
+After deletion, no tenant data remains in the DB; aggregate-only
+operator metrics are preserved.
 
 **Q: How many tenants can my host handle?**
 
-A: Soft cap via `MAX_TENANTS` env var (default 10). Per-bot
-defaults: 1 CPU, 512MB RAM. Bumpable per-tenant by operator if
-needed. With multi_bot_enabled tenants the count is per-bot, so
-3 multi-bot tenants ≈ 9 containers worth of resources.
+A: No hard cap is enforced today. Per-bot defaults
+(`bot-orchestrator.ts`): **1 CPU, 512 MB RAM**, hardcoded — not
+yet env-overridable per tenant. Roughly: 10 single-bot tenants
+≈ 10 containers ≈ 5 GB RAM + 10 CPU shares plus the operator's
+own paper/testnet/mainnet bots.
+
+**Planned (Phase 6+)**: `MAX_TENANTS` env var enforced at bot-
+create time + per-tenant resource overrides via admin endpoint.
+Until then, the operator polices headcount via the
+`hypertrade-users` Authentik group and watches host metrics
+(`docker stats`).
 
 **Q: Can I invite from a separate Authentik instance?**
 
@@ -251,12 +322,21 @@ Before inviting your first non-operator user:
 
 - [ ] Phase 6 cutover complete (operator now uses tenant 1 with
       `multi_bot_enabled=true`)
-- [ ] `alembic upgrade head` applied to live Postgres
-- [ ] `MAX_TENANTS` set explicitly in deploy env
-- [ ] `hypertrade-users` Authentik group exists + has policy
+- [ ] `alembic upgrade head` applied to live Postgres so 0010 RLS
+      is in effect (Phase 5a infrastructure)
+- [ ] `hypertrade-users` Authentik group exists + has a Group
+      Membership policy on the dashboard's OIDC provider
 - [ ] Dashboard reachable over HTTPS (Caddy + valid cert)
-- [ ] Run `npm run test:integration` against the prod-Postgres
-      mirror to confirm RLS policies are live and working
-- [ ] Tested invite + first-sign-in + create-bot end-to-end
-      with a throwaway test account in the `hypertrade-users`
-      group
+- [ ] `npm run test:integration` green against an ephemeral
+      Postgres (testcontainers) — proves the RLS policies still
+      enforce isolation
+- [ ] Test the invite flow end-to-end with a throwaway Authentik
+      account: sign in → set passphrase → add HL testnet key →
+      unlock → create paper bot → bot ticks without error
+- [ ] Operator headcount sanity: < 5 tenants planned for first
+      beta wave (no `MAX_TENANTS` enforcement yet — see FAQ
+      above)
+- [ ] Decide ahead of time how to revoke if needed: SSH access
+      working, Authentik group remove documented, manual SQL
+      DELETE-from-tenants understood (operator dry-runs the SQL
+      against testnet first)
