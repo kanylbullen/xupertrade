@@ -39,3 +39,7 @@ node_modules/
 
 # Docker
 pgdata/
+
+# Local agent / secrets-manager session caches — NEVER commit
+.claude/
+.phase.json
