@@ -7,8 +7,8 @@ Redis keys. The mainnet bot polls `hypertrade:mainnet:control:*` and
 never saw them.
 
 Post-fix: TelegramNotifier accepts a `mainnet_control` handle pointing at
-mainnet's namespace, and exposes `/pause-mainnet`, `/resume-mainnet`,
-`/flat-mainnet`, `/status-mainnet` that route through it.
+mainnet's namespace, and exposes `/pause_mainnet`, `/resume_mainnet`,
+`/flat_mainnet`, `/status_mainnet` that route through it.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _notifier(mainnet_control=None) -> TelegramNotifier:
 
 @pytest.mark.asyncio
 async def test_pause_mainnet_writes_to_mainnet_control():
-    """/pause-mainnet must call set_paused(True) on the MAINNET BotControl,
+    """/pause_mainnet must call set_paused(True) on the MAINNET BotControl,
     not on the local one."""
     mainnet = MagicMock()
     mainnet.set_paused = AsyncMock()
@@ -61,7 +61,7 @@ async def test_resume_mainnet_writes_to_mainnet_control():
 
 @pytest.mark.asyncio
 async def test_flat_mainnet_requires_confirm():
-    """A bare /flat-mainnet must NOT trigger flat-all — operator must
+    """A bare /flat_mainnet must NOT trigger flat-all — operator must
     repeat with `confirm` to avoid fat-fingering an emergency-close."""
     mainnet = MagicMock()
     mainnet.request_flat_all = AsyncMock()
@@ -73,7 +73,7 @@ async def test_flat_mainnet_requires_confirm():
 
 @pytest.mark.asyncio
 async def test_flat_mainnet_with_confirm_writes_to_mainnet_control():
-    """`/flat-mainnet confirm` writes a token to mainnet's
+    """`/flat_mainnet confirm` writes a token to mainnet's
     flat_request_id — the mainnet bot's runner picks it up and unwinds."""
     mainnet = MagicMock()
     mainnet.request_flat_all = AsyncMock()
@@ -122,14 +122,14 @@ def test_mainnet_commands_not_registered_without_wiring():
     must NOT appear in the Telegram menu. Otherwise the operator sees
     commands that always reply 'not wired'."""
     notif = TelegramNotifier(token="t", chat_id="1", mainnet_control=None)
-    for cmd in ("/status-mainnet", "/pause-mainnet", "/resume-mainnet", "/flat-mainnet"):
+    for cmd in ("/status_mainnet", "/pause_mainnet", "/resume_mainnet", "/flat_mainnet"):
         assert cmd not in notif._commands, f"{cmd} must not be registered"
 
 
 def test_mainnet_commands_registered_with_wiring():
     """When wired, the four /-mainnet commands appear in `_commands`."""
     notif = TelegramNotifier(token="t", chat_id="1", mainnet_control=MagicMock())
-    for cmd in ("/status-mainnet", "/pause-mainnet", "/resume-mainnet", "/flat-mainnet"):
+    for cmd in ("/status_mainnet", "/pause_mainnet", "/resume_mainnet", "/flat_mainnet"):
         assert cmd in notif._commands, f"{cmd} must be registered"
 
 
