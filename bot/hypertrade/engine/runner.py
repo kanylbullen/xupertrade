@@ -815,7 +815,74 @@ class EngineRunner:
         if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
             await self._ensure_leverage_pushed(signal.symbol)
 
-        size = signal.size or self._calculate_size(current_price, leverage)
+        # `is not None` rather than truthy: a strategy emitting size=0 is
+        # a bug we should surface, not silently fall back to the default
+        # calc. Downstream gates (rounded-to-zero in HL place_order) will
+        # reject it cleanly.
+        size = (
+            signal.size if signal.size is not None
+            else self._calculate_size(current_price, leverage)
+        )
+
+        # Audit H8 (2026-05-10): hard ceiling on `signal.size` overrides.
+        # Strategies that emit `Signal(size=400)` (vvv_hedge) bypass
+        # `_calculate_size` entirely → MAX_POSITION_SIZE_USD doesn't bind.
+        # An accidental param bump (holding_vvv 400 → 4000) silently
+        # produces a 10× position with the same hard SL.
+        #
+        # We cap in MARGIN terms (PR #32 review fix). MAX_POSITION_SIZE_USD
+        # is the margin cap on regular signals; `_calculate_size` scales
+        # notional by leverage but margin stays at MAX_POSITION_SIZE_USD.
+        # To keep units consistent, the H8 ceiling on a sized signal is
+        # `multiplier × MAX_POSITION_SIZE_USD` of MARGIN — i.e. a sized
+        # open at 10× leverage gets 10× the notional, same as regular
+        # signals do. Use `is not None` (not truthy) so a `Signal(size=0)`
+        # — which would be a strategy bug, not a legitimate "use default"
+        # — flows through here for the cap check rather than silently
+        # falling back to `_calculate_size`.
+        if (
+            signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
+            and signal.size is not None
+        ):
+            lev = max(int(leverage or 1), 1)
+            max_margin = (
+                settings.signal_size_max_multiplier
+                * settings.max_position_size_usd
+            )
+            requested_notional = float(size) * float(current_price)
+            requested_margin = requested_notional / lev
+            if requested_margin > max_margin:
+                logger.warning(
+                    "[%s] Skipping %s %s — Signal(size=%s) margin "
+                    "$%.0f (notional $%.0f / %dx) exceeds the %.0fx safety "
+                    "ceiling $%.0f (SIGNAL_SIZE_MAX_MULTIPLIER × "
+                    "MAX_POSITION_SIZE_USD)",
+                    signal.strategy_name,
+                    signal.action.value,
+                    signal.symbol,
+                    signal.size,
+                    requested_margin,
+                    requested_notional,
+                    lev,
+                    settings.signal_size_max_multiplier,
+                    max_margin,
+                )
+                if self.event_bus:
+                    try:
+                        await self.event_bus.publish(
+                            ErrorOccurred(
+                                strategy=signal.strategy_name,
+                                message=(
+                                    f"Refused {signal.action.value} {signal.symbol}: "
+                                    f"signal.size margin ${requested_margin:,.0f} "
+                                    f"exceeds {settings.signal_size_max_multiplier}× cap "
+                                    f"${max_margin:,.0f}"
+                                ),
+                            )
+                        )
+                    except Exception:
+                        logger.exception("H8 cap: event publish failed")
+                return False
 
         if signal.action == SignalAction.OPEN_LONG:
             order = await self.exchange.place_order(
@@ -997,13 +1064,21 @@ class EngineRunner:
         not every tick.
 
         Triggers an alert (logged + Telegram via ErrorOccurred) when
-        |db_net_size - exchange_net_size| > tolerance. Per-coin tolerance
-        is derived dynamically from `exchange.get_size_precision(symbol)`
-        — set to 10× HL's szDecimals minimum step (audit M4):
-          BTC szDecimals=5 → tolerance 1e-4
-          ETH szDecimals=4 → tolerance 1e-3
-          SOL szDecimals=2 → tolerance 1e-1
-        Default fallback (unknown coin) is szDecimals=4 → 1e-3.
+        |db_net_size - exchange_net_size| > tolerance. Tolerance is the
+        MIN of two per-coin bounds (audit M4 + tightened in H4):
+
+          step_bound  = 10 × szDecimals minimum step (rounding floor):
+              BTC szDecimals=5 → 1e-4
+              ETH szDecimals=4 → 1e-3
+              SOL szDecimals=2 → 1e-1
+          ratio_bound = 0.5% × max(|db_net|, |ex_net|) (proportional):
+              catches partial-fill drift on small positions where
+              step_bound alone would be too loose (0.1 SOL = $15 of
+              drift on a $200 position = 7.5% silent error).
+
+        When both sides are zero (legitimate "both flat"), only the
+        step_bound applies — ratio_bound = 0 would tolerate nothing.
+        Default fallback (unknown coin) is szDecimals=4 → step 1e-3.
 
         Action: alert (Telegram via ErrorOccurred); ALSO returns False
         so the caller can refuse to proceed (e.g. flip-detect must not
@@ -1039,11 +1114,25 @@ class EngineRunner:
                 break
 
         diff = abs(db_net - ex_net)
-        # Tolerance = 10× the exchange's minimum step. `Exchange` base
-        # defines `get_size_precision` with default 4dp, so the call
-        # is safe for any concrete exchange. (Audit M4.)
+        # Tolerance combines two bounds (audit H4, 2026-05-10):
+        #   step_bound  = 10× exchange minimum step (catches HL rounding)
+        #   ratio_bound = 0.5% of expected size (catches partial-fill drift
+        #                 on small positions, where the szDecimals bound
+        #                 alone is way too loose: SOL szDecimals=2 →
+        #                 0.1 SOL ≈ $15 of drift slips through; on a $200
+        #                 position that's a 7.5% silent error)
+        # We take the MIN so the looser bound never wins. The expected
+        # size is `max(|db_net|, |ex_net|)` — using both means a partial
+        # close that left exchange at 0 still gets a meaningful bound
+        # against the DB's recorded size.
         sz_decimals = self.exchange.get_size_precision(symbol)
-        tolerance = 10 * (10 ** -sz_decimals)
+        step_bound = 10 * (10 ** -sz_decimals)
+        expected_size = max(abs(db_net), abs(ex_net))
+        ratio_bound = 0.005 * expected_size  # 0.5%
+        # If both sides are zero, only step_bound applies.
+        tolerance = (
+            min(step_bound, ratio_bound) if expected_size > 0 else step_bound
+        )
         if diff <= tolerance:
             return True
 

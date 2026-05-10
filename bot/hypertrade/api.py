@@ -390,6 +390,50 @@ def _control_routes(
         await control.request_flat_all(token)
         return _cors({"flat_request_id": token})
 
+    async def kill_switch_set(request: web.Request) -> web.Response:
+        """POST /api/control/kill-switch — audit H7. Body must be exactly
+        one of:
+          {"active": true}   — activate the kill-switch (block opens)
+          {"active": false}  — deactivate
+          {"clear": true}    — drop the override; env default takes back over
+        Strict JSON-bool validation since this endpoint disables trading
+        — string "false" or "0" must NOT be silently coerced to True
+        (PR #32 review fix). Always API_KEY-gated.
+        """
+        if (err := _require_auth(request)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return _cors({"error": "body must be valid JSON"}, status=400)
+        if not isinstance(body, dict):
+            return _cors({"error": "body must be a JSON object"}, status=400)
+        if body.get("clear") is True:
+            await control.clear_kill_switch_override()
+            redis_state = await control.is_kill_switch_active()
+            return _cors({"override_cleared": True, "redis_state": redis_state})
+        active = body.get("active")
+        if not isinstance(active, bool):
+            return _cors(
+                {"error": "field 'active' must be a JSON boolean (true/false)"},
+                status=400,
+            )
+        await control.set_kill_switch(active)
+        return _cors({"kill_switch": active})
+
+    async def kill_switch_get(request: web.Request) -> web.Response:
+        """GET /api/control/kill-switch — returns the effective state.
+        Public (no API_KEY) — read-only and useful for the dashboard
+        status badge."""
+        from hypertrade.config import settings as _s
+        redis_state = await control.is_kill_switch_active()
+        effective = redis_state if redis_state is not None else _s.kill_switch
+        return _cors({
+            "effective": effective,
+            "env_default": _s.kill_switch,
+            "redis_override": redis_state,
+        })
+
     async def toggle_strategy(request: web.Request) -> web.Response:
         if (err := _require_auth(request)) is not None:
             return err
@@ -768,6 +812,8 @@ def _control_routes(
     app.router.add_post("/api/control/pause", pause)
     app.router.add_post("/api/control/resume", resume)
     app.router.add_post("/api/control/flat-all", flat_all)
+    app.router.add_get("/api/control/kill-switch", kill_switch_get)
+    app.router.add_post("/api/control/kill-switch", kill_switch_set)
     app.router.add_post("/api/control/strategy/{name}/toggle", toggle_strategy)
     app.router.add_post("/api/control/strategy/{name}/leverage", set_leverage)
     app.router.add_post("/api/control/strategy/{name}/leverage/reset", reset_leverage)

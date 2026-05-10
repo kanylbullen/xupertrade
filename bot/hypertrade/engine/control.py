@@ -35,6 +35,7 @@ class BotControl:
         self._key_leverage = _key(self._mode, "leverage")
         self._key_allow_multi = _key(self._mode, "allow_multi_coin")
         self._key_heartbeat = _key(self._mode, "heartbeat")
+        self._key_kill_switch = _key(self._mode, "kill_switch")
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -191,6 +192,38 @@ class BotControl:
             return
         await self._redis.set(self._key_allow_multi, "1" if allow else "0")
         logger.info("allow_multi_coin set to %s", allow)
+
+    # --- Runtime kill-switch (audit H7)
+    # Pre-fix `settings.kill_switch` was env-only — flipping it required
+    # `docker compose restart`, during which the running tick could still
+    # place orders. The Redis-backed value is checked on every tick AND
+    # is the SOURCE OF TRUTH when set; the env value remains the safe
+    # default at startup so an operator-set env=true still wins.
+    # Returns None when the Redis key is unset (= "use env default").
+
+    async def is_kill_switch_active(self) -> bool | None:
+        """Returns True/False when explicitly set in Redis, None when
+        unset (caller should fall back to settings.kill_switch)."""
+        if self._redis is None:
+            return None
+        val = await self._redis.get(self._key_kill_switch)
+        if val is None:
+            return None
+        return val == "1"
+
+    async def set_kill_switch(self, active: bool) -> None:
+        if self._redis is None:
+            return
+        await self._redis.set(self._key_kill_switch, "1" if active else "0")
+        logger.warning("Kill-switch %s via Redis", "ACTIVATED" if active else "deactivated")
+
+    async def clear_kill_switch_override(self) -> None:
+        """Remove the Redis override so `settings.kill_switch` (env) wins
+        again. Useful when the operator wants to revert to the env
+        default after a temporary runtime activation."""
+        if self._redis is None:
+            return
+        await self._redis.delete(self._key_kill_switch)
 
     async def beat_heartbeat(self) -> None:
         """Write current timestamp + TTL of 5 minutes. A watchdog reads this
