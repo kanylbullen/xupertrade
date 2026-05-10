@@ -3,12 +3,16 @@
  *
  * Multi-tenancy Phase 3a.
  *
- *   GET   → list this tenant's bots (DB rows, with current docker
- *           status if a container_id is set — best-effort)
+ *   GET   → list this tenant's bot DB rows (no live docker status
+ *           in v1 — use GET /api/tenant/me/bots/[id] for that)
  *   POST  → create a new bot for this tenant + start its container
  *           body: { mode: 'paper' | 'testnet' | 'mainnet' }
  *           requires unlock (we decrypt the tenant's secrets and
  *           inject them as env vars)
+ *
+ * All responses use camelCase (matches Drizzle's row shape and
+ * existing dashboard endpoints). Snake_case in API contracts is
+ * intentional only for env-var-shaped fields (e.g. secret keys).
  */
 
 import { randomUUID } from "node:crypto";
@@ -132,21 +136,25 @@ export async function POST(req: Request): Promise<Response> {
     try {
       decryptedSecrets[row.key] = decryptSecret(k, row.ciphertext, row.nonce);
     } catch {
-      // GCM auth tag mismatch — wrong K (passphrase changed?) or
-      // tampered ciphertext. Refuse to start with partial secrets.
+      // GCM auth tag mismatch — wrong K (passphrase changed under us?)
+      // or tampered ciphertext. Treat as 401: the cached K is no longer
+      // valid for this tenant, the user must re-unlock with the
+      // current passphrase. This is client-recoverable, not a server
+      // error.
       return Response.json(
         {
-          error: `failed to decrypt secret '${row.key}' — passphrase may have changed; re-unlock`,
+          error: `failed to decrypt secret '${row.key}' — re-unlock with current passphrase`,
         },
-        { status: 500 },
+        { status: 401 },
       );
     }
   }
 
   // Reserve the DB row first so a concurrent POST can't claim the
   // same (tenant, mode) slot. UNIQUE(tenant_id, mode) enforces it
-  // at the DB layer — if we lose the race the INSERT throws and we
-  // map to 409.
+  // at the DB layer — if we lose the race we map ONLY the postgres
+  // unique-violation (23505) to 409. Other errors (connectivity,
+  // schema drift) propagate as 500 so we don't mis-attribute them.
   const botId = randomUUID();
   const spec = buildSpec({
     botId,
@@ -161,38 +169,24 @@ export async function POST(req: Request): Promise<Response> {
       mode,
       containerName: spec.name,
     });
-  } catch {
-    return Response.json(
-      { error: `bot for mode=${mode} already exists for this tenant` },
-      { status: 409 },
-    );
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      return Response.json(
+        { error: `bot for mode=${mode} already exists for this tenant` },
+        { status: 409 },
+      );
+    }
+    throw err;
   }
 
   // Now start the container.
+  let started: Awaited<ReturnType<typeof startBot>>;
   try {
-    const info = await startBot({
+    started = await startBot({
       botId,
       tenantId: tenant.id,
       mode: mode as BotMode,
       decryptedSecrets,
-    });
-    await db
-      .update(tenantBots)
-      .set({
-        containerId: info.id,
-        isRunning: true,
-        lastStartedAt: sql`now()`,
-      })
-      .where(eq(tenantBots.id, botId));
-    return Response.json({
-      bot: {
-        id: botId,
-        tenant_id: tenant.id,
-        mode,
-        container_id: info.id,
-        container_name: info.name,
-        is_running: true,
-      },
     });
   } catch (err) {
     // Container failed to start — roll back the DB row so the next
@@ -208,4 +202,62 @@ export async function POST(req: Request): Promise<Response> {
       { status: 500 },
     );
   }
+
+  // Container is up; record container id + running state. If THIS
+  // step fails (transient DB error after the container started), we
+  // must compensate by stopping/removing the container — otherwise
+  // we leave an orphaned container with no DB row tracking it.
+  try {
+    const updated = await db
+      .update(tenantBots)
+      .set({
+        containerId: started.id,
+        isRunning: true,
+        lastStartedAt: sql`now()`,
+      })
+      .where(
+        and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+      )
+      .returning();
+    return Response.json({ bot: updated[0] });
+  } catch (err) {
+    // Compensating action: kill the container we just started so it
+    // doesn't run untracked. Best-effort — log and continue if even
+    // this fails (operator can clean up via `docker rm` later).
+    try {
+      const { stopBot } = await import("@/lib/bot-orchestrator");
+      await stopBot(started.id);
+    } catch (stopErr) {
+      console.error(
+        "[bots] compensating stop failed for orphaned container",
+        started.id,
+        stopErr,
+      );
+    }
+    // Best-effort row cleanup as well.
+    await db
+      .delete(tenantBots)
+      .where(
+        and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+      )
+      .catch(() => undefined);
+    const message = err instanceof Error ? err.message : "unknown DB error";
+    return Response.json(
+      { error: `started container but DB update failed (rolled back): ${message}` },
+      { status: 500 },
+    );
+  }
+}
+
+/**
+ * Postgres unique-constraint violation. postgres-js wraps errors
+ * with a `code` field; 23505 is the SQLSTATE for unique_violation.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: string }).code === "23505"
+  );
 }

@@ -99,7 +99,12 @@ export async function stopAndRemove(containerId: string): Promise<void> {
   }
 }
 
-/** Inspect a container by id. Returns null if it doesn't exist. */
+/**
+ * Inspect a container by id. Throws on docker errors; the caller is
+ * responsible for translating 404 (container doesn't exist) into
+ * whatever response shape it wants. The orchestrator's `statusBot`
+ * does this — see bot-orchestrator.ts.
+ */
 export async function inspectContainer(containerId: string): Promise<ContainerInfo> {
   const client = getClient();
   const container = client.getContainer(containerId);

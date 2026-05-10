@@ -57,6 +57,10 @@ export async function GET(req: Request, ctx: Params): Promise<Response> {
     }
     if (live === null && bot.isRunning) {
       // Container is gone but DB still says running — reconcile.
+      // Defense-in-depth: scope the UPDATE by tenant_id too, even
+      // though `loadOwnedBot` already verified ownership. If a
+      // future bug bypasses or rewrites ownership checks, this WHERE
+      // still prevents a cross-tenant write.
       await db
         .update(tenantBots)
         .set({
@@ -64,7 +68,9 @@ export async function GET(req: Request, ctx: Params): Promise<Response> {
           containerId: null,
           lastStoppedAt: sql`now()`,
         })
-        .where(eq(tenantBots.id, botId));
+        .where(
+          and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+        );
     }
   }
 
@@ -98,6 +104,14 @@ export async function DELETE(req: Request, ctx: Params): Promise<Response> {
     }
   }
 
-  await db.delete(tenantBots).where(eq(tenantBots.id, botId));
+  // Defense-in-depth: scope the DELETE by tenant_id even though
+  // `loadOwnedBot` already verified ownership above. If a future bug
+  // bypasses or rewrites the ownership check, this WHERE still
+  // prevents cross-tenant deletion.
+  await db
+    .delete(tenantBots)
+    .where(
+      and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+    );
   return Response.json({ id: botId, deleted: true });
 }

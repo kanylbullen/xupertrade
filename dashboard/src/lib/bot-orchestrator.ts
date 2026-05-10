@@ -51,12 +51,16 @@ const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024;     // 512 MiB
 const DEFAULT_NANO_CPUS = 1_000_000_000;            // 1 CPU
 
 /**
- * Container name for a (tenant, mode) pair. Short-id keeps the name
- * within Docker's 63-char limit and human-readable in `docker ps`.
- *   hypertrade-bot-3a2f1e4c-mainnet
+ * Container name for a (tenant, mode) pair. We use 16 hex chars
+ * (64 bits) of the tenant UUID to make accidental cross-tenant
+ * collisions effectively impossible — 8 chars (32 bits) is too
+ * short, full 32 chars is overkill. Total name length:
+ *   "hypertrade-bot-" (15) + 16 + "-" (1) + "mainnet" (7) = 39
+ * comfortably under Docker's 63-char limit.
+ *   hypertrade-bot-3a2f1e4caaaa1111-mainnet
  */
 export function containerName(tenantId: string, mode: BotMode): string {
-  const short = tenantId.replace(/-/g, "").slice(0, 8);
+  const short = tenantId.replace(/-/g, "").slice(0, 16);
   return `hypertrade-bot-${short}-${mode}`;
 }
 

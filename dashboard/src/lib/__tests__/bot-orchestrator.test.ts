@@ -47,17 +47,17 @@ describe("isValidMode", () => {
 });
 
 describe("containerName", () => {
-  it("uses first 8 hex chars of tenant id + mode suffix", () => {
+  it("uses first 16 hex chars of tenant id + mode suffix", () => {
+    // 16 hex chars = 64 bits of entropy → cross-tenant collision
+    // effectively impossible (PR #43 review fix; 8 chars too short).
     expect(containerName(TENANT_ID, "mainnet")).toBe(
-      "hypertrade-bot-3a2f1e4c-mainnet",
+      "hypertrade-bot-3a2f1e4caaaabbbb-mainnet",
     );
   });
 
   it("strips dashes from the tenant uuid", () => {
-    // UUIDs always have dashes; the first 8 chars are taken from the
-    // dash-stripped form so the name stays clean.
     const name = containerName("00000000-1111-2222-3333-444444444444", "paper");
-    expect(name).toBe("hypertrade-bot-00000000-paper");
+    expect(name).toBe("hypertrade-bot-0000000011112222-paper");
   });
 
   it("name fits Docker's 63-char limit", () => {
@@ -153,7 +153,7 @@ describe("startBot delegation", () => {
     expect(mockedCreate).toHaveBeenCalledOnce();
     expect(info.id).toBe("abc123");
     const passedSpec = mockedCreate.mock.calls[0][0];
-    expect(passedSpec.name).toBe("hypertrade-bot-3a2f1e4c-paper");
+    expect(passedSpec.name).toBe("hypertrade-bot-3a2f1e4caaaabbbb-paper");
   });
 });
 
