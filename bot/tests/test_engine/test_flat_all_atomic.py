@@ -26,8 +26,19 @@ from hypertrade.exchange.base import Order, OrderStatus, OrderType, Position
 
 
 def _runner_with(exchange_pos, db_pos):
+    """`db_pos` is either a single MagicMock (back-compat) or a list of
+    them (multi-strategy case). None = no DB rows for the symbol."""
+    if db_pos is None:
+        db_recs = []
+    elif isinstance(db_pos, list):
+        db_recs = db_pos
+    else:
+        db_recs = [db_pos]
     repo = MagicMock()
-    repo.get_open_position_any = AsyncMock(return_value=db_pos)
+    repo.get_open_position_any = AsyncMock(
+        return_value=db_recs[0] if db_recs else None
+    )
+    repo.get_open_positions_for_symbol = AsyncMock(return_value=db_recs)
     repo.record_trade_and_close_position = AsyncMock()
     repo.record_trade = AsyncMock()
     repo.close_position = AsyncMock()
@@ -63,6 +74,8 @@ async def test_flat_all_uses_db_entry_price(monkeypatch):
     exchange_pos = Position(symbol="BTC", side="long", size=1.0, entry_price=95.0)
     db_pos = MagicMock()
     db_pos.symbol = "BTC"
+    db_pos.side = "long"
+    db_pos.size = 1.0
     db_pos.entry_price = 100.0
     db_pos.strategy_name = "strat_x"
 
@@ -85,6 +98,8 @@ async def test_flat_all_atomic_call(monkeypatch):
     exchange_pos = Position(symbol="ETH", side="long", size=2.0, entry_price=2000.0)
     db_pos = MagicMock()
     db_pos.symbol = "ETH"
+    db_pos.side = "long"
+    db_pos.size = 2.0
     db_pos.entry_price = 2000.0
     db_pos.strategy_name = "ethstrat"
 
@@ -114,6 +129,8 @@ async def test_flat_all_short_pnl_calc(monkeypatch):
     exchange_pos = Position(symbol="SOL", side="short", size=1.0, entry_price=105.0)
     db_pos = MagicMock()
     db_pos.symbol = "SOL"
+    db_pos.side = "short"
+    db_pos.size = 1.0
     db_pos.entry_price = 100.0
     db_pos.strategy_name = "solstrat"
 
@@ -129,6 +146,55 @@ async def test_flat_all_short_pnl_calc(monkeypatch):
     repo.record_trade_and_close_position.assert_awaited_once()
     call = repo.record_trade_and_close_position.await_args
     assert call.kwargs["pnl"] == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_flat_all_multi_strategy_closes_every_db_row(monkeypatch):
+    """PR #31 review fix: when allow_multi_coin=True two strategies can
+    have open DB rows on the same coin. The exchange shows ONE netted
+    position. Pre-fix: only one DB row was closed; the others got
+    orphan-closed at PnL=0 by reconcile, double-counting the trade.
+    Post-fix: every open row is closed, with per-strategy PnL using
+    each row's own entry_price."""
+    from hypertrade.config import settings
+    monkeypatch.setattr(settings, "taker_fee_rate", 0.0)
+
+    # Exchange shows 1 BTC long net (e.g. 0.5 + 0.5 from two strategies)
+    exchange_pos = Position(symbol="BTC", side="long", size=1.0, entry_price=98.0)
+
+    rec_a = MagicMock()
+    rec_a.symbol = "BTC"
+    rec_a.side = "long"
+    rec_a.size = 0.5
+    rec_a.entry_price = 100.0
+    rec_a.strategy_name = "strat_a"
+    rec_b = MagicMock()
+    rec_b.symbol = "BTC"
+    rec_b.side = "long"
+    rec_b.size = 0.5
+    rec_b.entry_price = 96.0
+    rec_b.strategy_name = "strat_b"
+
+    runner, repo = _runner_with(exchange_pos, db_pos=[rec_a, rec_b])
+    runner.exchange.place_order = AsyncMock(return_value=Order(
+        id="oid", symbol="BTC", side="sell", size=1.0,
+        order_type=OrderType.MARKET, filled_price=110.0,
+        status=OrderStatus.FILLED,
+    ))
+
+    await runner._flat_all_positions()
+
+    # Two atomic close calls — one per strategy
+    assert repo.record_trade_and_close_position.await_count == 2
+    calls = repo.record_trade_and_close_position.await_args_list
+    by_strat = {c.kwargs["strategy_name"]: c.kwargs for c in calls}
+    # strat_a: PnL = (110 - 100) * 0.5 = +5
+    assert by_strat["strat_a"]["pnl"] == pytest.approx(5.0)
+    # strat_b: PnL = (110 - 96) * 0.5 = +7
+    assert by_strat["strat_b"]["pnl"] == pytest.approx(7.0)
+    # Sizes also split, not full exchange size
+    assert by_strat["strat_a"]["size"] == pytest.approx(0.5)
+    assert by_strat["strat_b"]["size"] == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio

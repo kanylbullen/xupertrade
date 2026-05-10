@@ -483,25 +483,18 @@ class EngineRunner:
         for pos in positions:
             try:
                 close_side = "sell" if pos.side == "long" else "buy"
-                # Audit H6 (2026-05-10): the EXCHANGE entry_price is a
-                # volume-weighted average across all add-to-position legs,
-                # which won't match either strategy's view if the position
-                # was DB-orphaned earlier or if multiple strategies opened
-                # on the same coin. Look up the open DB position FIRST
-                # and use its `entry_price` for realized-PnL accounting so
-                # the per-trade PnL recorded to DB matches the strategy's
-                # actual entry, not the exchange's cross-strategy average.
-                open_rec = (
-                    await self.repo.get_open_position_any(pos.symbol)
-                    if self.repo else None
-                )
-                pnl_entry_price = (
-                    float(open_rec.entry_price) if open_rec is not None
-                    else float(pos.entry_price)
-                )
-                strategy_name = (
-                    open_rec.strategy_name if open_rec is not None
-                    else "manual_flat"
+                # Audit H5+H6 + PR #31 review: get EVERY open DB row for
+                # this coin (not just one — `allow_multi_coin=True` lets
+                # multiple strategies hold rows on the same coin). The
+                # exchange shows one netted position; we split the close
+                # fee/PnL across all open rows by size weight so each
+                # strategy's PnL is recorded with its own entry_price.
+                # Fixed in PR #31 review: previously closed only one row,
+                # leaving siblings to be orphan-closed at PnL=0 by
+                # reconcile.
+                db_recs = (
+                    await self.repo.get_open_positions_for_symbol(pos.symbol)
+                    if self.repo else []
                 )
 
                 order = await self.exchange.place_order(
@@ -516,39 +509,20 @@ class EngineRunner:
                     continue
 
                 filled_price = order.filled_price or 0
-                fee = filled_price * pos.size * settings.taker_fee_rate
-                if pos.side == "long":
-                    realized_pnl = (filled_price - pnl_entry_price) * pos.size - fee
-                else:
-                    realized_pnl = (pnl_entry_price - filled_price) * pos.size - fee
-
-                if self.repo:
-                    # Audit H5 (2026-05-10): atomic trade+close. The
-                    # previous two-call sequence (record_trade, then
-                    # close_position) could leave a Trade row recorded
-                    # with no `is_open=false` update if a SIGTERM/crash
-                    # landed between them. Reconcile would then see
-                    # DB-open + exchange-flat → orphan-close with PnL=0,
-                    # double-counting the closed trade.
-                    if open_rec is not None:
-                        await self.repo.record_trade_and_close_position(
-                            order_id=order.id,
-                            strategy_name=open_rec.strategy_name,
-                            symbol=pos.symbol,
-                            trade_side=order.side,
-                            size=pos.size,
-                            price=filled_price,
-                            fee=fee,
-                            pnl=realized_pnl,
-                            reason="Flat-all from dashboard",
-                        )
+                if not db_recs:
+                    # No DB-side open record (rare exchange-side orphan).
+                    # Best-effort: record one trade for history with the
+                    # exchange's full size, using its VWAP entry as the
+                    # only entry signal we have.
+                    fee = filled_price * pos.size * settings.taker_fee_rate
+                    if pos.side == "long":
+                        realized_pnl = (filled_price - pos.entry_price) * pos.size - fee
                     else:
-                        # No DB-side open record (rare: exchange-side
-                        # orphan). Just record the trade so the close
-                        # shows up in history; nothing to UPDATE.
+                        realized_pnl = (pos.entry_price - filled_price) * pos.size - fee
+                    if self.repo:
                         await self.repo.record_trade(
                             order_id=order.id,
-                            strategy_name=strategy_name,
+                            strategy_name="manual_flat",
                             symbol=pos.symbol,
                             side=order.side,
                             size=pos.size,
@@ -557,15 +531,45 @@ class EngineRunner:
                             pnl=realized_pnl,
                             reason="Flat-all from dashboard (no open DB rec)",
                         )
-                await self.portfolio.record_pnl(realized_pnl)
-                logger.warning(
-                    "Closed %s %s @ %.2f (entry %.2f, PnL %.2f)",
-                    pos.side,
-                    pos.symbol,
-                    filled_price,
-                    pnl_entry_price,
-                    realized_pnl,
-                )
+                    await self.portfolio.record_pnl(realized_pnl)
+                    logger.warning(
+                        "Closed %s %s @ %.2f (no DB rec; PnL %.2f)",
+                        pos.side, pos.symbol, filled_price, realized_pnl,
+                    )
+                    continue
+
+                # Split close fee + PnL across each open DB row by its
+                # share of total open size. Per-row PnL uses that row's
+                # own entry_price (audit H6) — exchange VWAP would be
+                # wrong when two strategies opened at different prices.
+                total_db_size = sum(float(r.size) for r in db_recs) or 1.0
+                for rec in db_recs:
+                    share = float(rec.size) / total_db_size
+                    rec_size = float(rec.size)
+                    rec_fee = filled_price * rec_size * settings.taker_fee_rate
+                    rec_entry = float(rec.entry_price)
+                    if rec.side == "long":
+                        rec_pnl = (filled_price - rec_entry) * rec_size - rec_fee
+                    else:
+                        rec_pnl = (rec_entry - filled_price) * rec_size - rec_fee
+                    # Audit H5: single atomic trade+close per row.
+                    await self.repo.record_trade_and_close_position(
+                        order_id=order.id,
+                        strategy_name=rec.strategy_name,
+                        symbol=pos.symbol,
+                        trade_side=order.side,
+                        size=rec_size,
+                        price=filled_price,
+                        fee=rec_fee,
+                        pnl=rec_pnl,
+                        reason="Flat-all from dashboard",
+                    )
+                    await self.portfolio.record_pnl(rec_pnl)
+                    logger.warning(
+                        "Closed [%s] %s %s @ %.2f (entry %.2f, size %.6f, share %.0f%%, PnL %.2f)",
+                        rec.strategy_name, rec.side, pos.symbol,
+                        filled_price, rec_entry, rec_size, share * 100, rec_pnl,
+                    )
             except Exception:
                 logger.exception("Failed to close position %s", pos.symbol)
                 failed += 1
