@@ -716,6 +716,75 @@ def _control_routes(
             ],
         }})
 
+    async def portfolio_coins(request: web.Request) -> web.Response:
+        """Return the user's portfolio (holdings + P&L) from every
+        configured provider, side-by-side.
+
+        Each provider gets its own entry in the `providers` list; the
+        dashboard renders one card per. Auth-gated when API_KEY is set
+        (responses include personal balance data). Each provider's
+        snapshot is cached separately in Redis 5 min; `?fresh=1` busts
+        the cache.
+        """
+        if (err := _require_auth(request)) is not None:
+            return err
+
+        from dataclasses import asdict as _asdict
+        from hypertrade.portfolio.providers import get_providers
+
+        providers = get_providers()
+        if not providers:
+            return _cors({
+                "configured": False,
+                "providers": [],
+            })
+
+        force_refresh = request.query.get("fresh") == "1"
+
+        async def _resolve(p):
+            cache_key = f"portfolio:{settings.exchange_mode}:{p.name}:coins"
+            if not force_refresh:
+                cached = await control.cache_get(cache_key)
+                if cached:
+                    try:
+                        payload = json.loads(cached)
+                        payload["cached"] = True
+                        return payload
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            snap = await p.fetch_snapshot()
+            payload = {
+                "name": p.name,
+                "ok": snap.ok,
+                "error": snap.error,
+                "coins": [_asdict(c) for c in snap.coins],
+                "total_value_usd": snap.total_value_usd,
+                "total_pnl_24h_usd": snap.total_pnl_24h_usd,
+                "total_pnl_all_time_usd": snap.total_pnl_all_time_usd,
+                "fetched_at": snap.fetched_at,
+                "cached": False,
+            }
+            # Cache any successful response (including empty-but-ok).
+            # Only error responses skip the cache so a transient outage
+            # doesn't pin a 5-min stale state.
+            if snap.ok:
+                await control.cache_set(
+                    cache_key, json.dumps(payload), ttl_seconds=300,
+                )
+            return payload
+
+        # Fan out in parallel — providers don't share dependencies and
+        # each can take a few seconds. Sum dashboard latency = max(p.fetch),
+        # not sum.
+        import asyncio as _asyncio
+        results = await _asyncio.gather(*(_resolve(p) for p in providers))
+
+        return _cors({
+            "configured": True,
+            "providers": list(results),
+        })
+
     async def vault_snapshots(request: web.Request) -> web.Response:
         if (err := _require_auth(request)) is not None:
             return err
@@ -753,6 +822,8 @@ def _control_routes(
     app.router.add_get("/api/vaults/{address}", vault_detail)
     app.router.add_get("/api/vaults/{address}/snapshots", vault_snapshots)
     app.router.add_route("OPTIONS", "/api/vaults/{tail:.*}", options_handler)
+    app.router.add_get("/api/portfolio/coins", portfolio_coins)
+    app.router.add_route("OPTIONS", "/api/portfolio/{tail:.*}", options_handler)
     app.router.add_get("/api/tls/config", tls_get_config)
     app.router.add_post("/api/tls/configure", tls_configure)
     app.router.add_route("OPTIONS", "/api/tls/{tail:.*}", options_handler)

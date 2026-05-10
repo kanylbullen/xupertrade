@@ -87,6 +87,15 @@ services:
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
       TELEGRAM_EVENTS: "${TELEGRAM_EVENTS:-trade.executed,position.closed,error,vault.qualified,vault.disqualified}"
       VAULT_TRACKING_ADDRESS: "${VAULT_TRACKING_ADDRESS:-}"
+      PORTFOLIO_PROVIDERS: "${PORTFOLIO_PROVIDERS:-}"
+      COINSTATS_API_KEY: "${COINSTATS_API_KEY:-}"
+      COINSTATS_SHARE_TOKEN: "${COINSTATS_SHARE_TOKEN:-}"
+      COINSTATS_PASSCODE: "${COINSTATS_PASSCODE:-}"
+      ROTKI_URL: "${ROTKI_URL:-}"
+      ROTKI_USERNAME: "${ROTKI_USERNAME:-}"
+      ROTKI_PASSWORD: "${ROTKI_PASSWORD:-}"
+      GHOSTFOLIO_URL: "${GHOSTFOLIO_URL:-}"
+      GHOSTFOLIO_TOKEN: "${GHOSTFOLIO_TOKEN:-}"
 
   bot-mainnet:
     <<: *bot-base
