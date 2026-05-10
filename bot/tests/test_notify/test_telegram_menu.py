@@ -93,6 +93,72 @@ async def test_publish_menu_swallows_network_error():
 
 
 @pytest.mark.asyncio
+async def test_publish_menu_skips_invalid_command_names(caplog):
+    """Telegram's BotCommand.command spec is `[a-z0-9_]{1,32}`. A single
+    invalid name (e.g. a hyphen) makes the WHOLE setMyCommands call fail
+    with HTTP 400. The publish path filters client-side so a stray
+    invalid name only loses that one command, not the entire menu.
+    Regression test from PR #29 deploy: `/status-mainnet` (hyphen) broke
+    the menu publish until renamed to `/status_mainnet`."""
+    captured: dict = {}
+    class _FakeResp:
+        status = 200
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        async def json(self): return {"ok": True}
+
+    def _fake_post(url, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return _FakeResp()
+
+    session = MagicMock()
+    session.post = _fake_post
+
+    notif = _notifier_with_session(session)
+    notif._commands = {
+        "/ok_one": (MagicMock(), "Valid one"),
+        "/bad-hyphen": (MagicMock(), "Invalid: contains hyphen"),
+        "/UPPER": (MagicMock(), "Invalid: uppercase"),
+        "/ok_two": (MagicMock(), "Valid two"),
+    }
+    with caplog.at_level(logging.WARNING, logger="hypertrade.notify.telegram"):
+        await notif._publish_command_menu()
+
+    cmd_names = {c["command"] for c in captured["json"]["commands"]}
+    assert cmd_names == {"ok_one", "ok_two"}, (
+        f"only valid commands should be published; got: {cmd_names}"
+    )
+    skipped = [r.message for r in caplog.records if "Skipping invalid" in r.message]
+    assert len(skipped) == 2, f"expected 2 skip warnings; got: {skipped}"
+
+
+@pytest.mark.asyncio
+async def test_publish_menu_skips_call_when_all_commands_invalid(caplog):
+    """Telegram treats setMyCommands with an empty array as 'delete all
+    commands'. If a bug filters every command out, we must NOT make the
+    call — otherwise a transient typo would silently wipe the working
+    menu. Short-circuit + warning instead."""
+    posted = {"called": False}
+
+    def _fake_post(url, **kwargs):
+        posted["called"] = True
+        raise AssertionError("setMyCommands must not be called when commands is empty")
+
+    session = MagicMock()
+    session.post = _fake_post
+
+    notif = _notifier_with_session(session)
+    notif._commands = {
+        "/UPPER": (MagicMock(), "Invalid: uppercase"),
+        "/has-hyphen": (MagicMock(), "Invalid: hyphen"),
+    }
+    with caplog.at_level(logging.WARNING, logger="hypertrade.notify.telegram"):
+        await notif._publish_command_menu()
+    assert posted["called"] is False
+    assert any("0 valid commands" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_publish_menu_logs_warning_on_non_200(caplog):
     """Non-200 responses log a warning AND don't raise. Verifies both
     via caplog assertion (PR #25 review fix — was only checking

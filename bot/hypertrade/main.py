@@ -123,7 +123,7 @@ async def main() -> None:
     # (only if enabled on this bot instance — typically only one mode's bot
     # has TELEGRAM_ENABLED=true to avoid 3 simultaneous Telegram pollers)
     # Audit C4: separate BotControl handle pointing at MAINNET's
-    # Redis-namespaced keys so /pause-mainnet, /flat-mainnet etc. reach
+    # Redis-namespaced keys so /pause_mainnet, /flat_mainnet etc. reach
     # the mainnet bot regardless of where Telegram lives. On a mainnet
     # bot, this is the same handle as `control` (so the commands work
     # there too). On testnet/paper, a fresh handle is created best-effort

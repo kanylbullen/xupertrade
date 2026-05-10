@@ -164,19 +164,19 @@ class TelegramNotifier:
         # that always reply "not wired" and confuse the operator.
         if self._mainnet_control is not None:
             self._commands.update({
-                "/status-mainnet": (
+                "/status_mainnet": (
                     self._cmd_status_mainnet,
                     "Mainnet bot state (paused, disabled strategies, heartbeat)",
                 ),
-                "/pause-mainnet": (
+                "/pause_mainnet": (
                     self._cmd_pause_mainnet,
                     "Pause the MAINNET bot (no new signals execute)",
                 ),
-                "/resume-mainnet": (
+                "/resume_mainnet": (
                     self._cmd_resume_mainnet,
                     "Resume the MAINNET bot",
                 ),
-                "/flat-mainnet": (
+                "/flat_mainnet": (
                     self._cmd_flat_mainnet,
                     "Close ALL MAINNET positions (with confirmation)",
                 ),
@@ -229,17 +229,46 @@ class TelegramNotifier:
 
         Dedupes on description so /start and /help (same handler, same
         description) don't appear twice in the menu.
+
+        Telegram's BotCommand.command spec requires
+        ``[a-z0-9_]{1,32}``. A single invalid name (e.g. a hyphen) makes
+        Telegram reject the whole batch with HTTP 400 and the menu stays
+        empty — which is what bit us on PR #29 deploy. We filter
+        client-side and log skipped names so a typo can't silently break
+        the whole menu.
         """
+        import re
+        valid_cmd = re.compile(r"^[a-z0-9_]{1,32}$")
+
         seen_descs: set[str] = set()
         commands = []
         for cmd, (_, desc) in self._commands.items():
             if desc in seen_descs:
                 continue
+            name = cmd.lstrip("/")  # API expects no leading slash
+            if not valid_cmd.match(name):
+                logger.warning(
+                    "Skipping invalid Telegram command name %r — "
+                    "must match [a-z0-9_]{1,32}",
+                    cmd,
+                )
+                continue
             seen_descs.add(desc)
             commands.append({
-                "command": cmd.lstrip("/"),  # API expects no leading slash
+                "command": name,
                 "description": desc[:256],   # 256 char hard limit
             })
+        # Short-circuit on empty list: Telegram treats setMyCommands with
+        # an empty array as "delete all commands", which would silently
+        # wipe a previously-working menu if some bug filtered everything
+        # out. Better to leave the existing menu in place and surface the
+        # bug in the logs.
+        if not commands:
+            logger.warning(
+                "_publish_command_menu: 0 valid commands after filtering — "
+                "skipping setMyCommands call to avoid wiping the existing menu"
+            )
+            return
         try:
             url = f"https://api.telegram.org/bot{self._token}/setMyCommands"
             async with self._session.post(
@@ -702,7 +731,7 @@ class TelegramNotifier:
             return (
                 f"{MODE_BADGE['mainnet']} ⚠️ This will close ALL open MAINNET "
                 f"positions on the live exchange.\n"
-                f"Reply with <code>/flat-mainnet confirm</code> to proceed."
+                f"Reply with <code>/flat_mainnet confirm</code> to proceed."
             )
         import uuid
 
