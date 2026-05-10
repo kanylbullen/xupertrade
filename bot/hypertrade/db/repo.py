@@ -71,7 +71,7 @@ class Repository:
                 lambda c: Base.metadata.create_all(c, tables=legacy_tables)
             )
         logger.info(
-            "Database tables ready (created %d legacy tables; %d alembic-owned skipped)",
+            "Database tables ready (ensured %d legacy tables exist; %d alembic-owned skipped)",
             len(legacy_tables),
             len(_ALEMBIC_OWNED_TABLES),
         )

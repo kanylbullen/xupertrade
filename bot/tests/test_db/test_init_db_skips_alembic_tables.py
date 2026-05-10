@@ -16,52 +16,51 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import inspect
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from hypertrade.db.repo import _ALEMBIC_OWNED_TABLES, Repository
 
 
-@pytest.mark.asyncio
-async def test_init_db_skips_multi_tenancy_tables(monkeypatch):
-    """init_db must NOT create tenants, tenant_bots, tenant_secrets,
-    tenant_audit_log. Those are alembic's jurisdiction."""
+@pytest.fixture
+async def init_db_repo():
+    """Fresh in-memory SQLite repo with init_db already run. Disposes
+    the engine in teardown so a failing assertion can't leak connections
+    (PR #37 review)."""
     repo = Repository("sqlite+aiosqlite:///:memory:")
     await repo.init_db()
+    try:
+        yield repo
+    finally:
+        await repo._engine.dispose()
 
-    def _get_table_names(sync_conn):
-        return inspect(sync_conn).get_table_names()
 
-    async with repo._engine.begin() as conn:
-        tables = await conn.run_sync(_get_table_names)
+def _table_names_sync(sync_conn) -> list[str]:
+    return inspect(sync_conn).get_table_names()
 
+
+@pytest.mark.asyncio
+async def test_init_db_skips_multi_tenancy_tables(init_db_repo):
+    """init_db must NOT create tenants, tenant_bots, tenant_secrets,
+    tenant_audit_log. Those are alembic's jurisdiction."""
+    async with init_db_repo._engine.begin() as conn:
+        tables = await conn.run_sync(_table_names_sync)
     for skipped in _ALEMBIC_OWNED_TABLES:
         assert skipped not in tables, (
             f"{skipped} must be created by alembic, not init_db"
         )
-    await repo._engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_init_db_creates_legacy_tables(monkeypatch):
+async def test_init_db_creates_legacy_tables(init_db_repo):
     """The legacy bot tables (trades, positions, etc.) must still be
     created by init_db — that's the whole point of the function for
     fresh-deploy bootstrap before alembic is integrated."""
-    repo = Repository("sqlite+aiosqlite:///:memory:")
-    await repo.init_db()
-
-    def _get_table_names(sync_conn):
-        return inspect(sync_conn).get_table_names()
-
-    async with repo._engine.begin() as conn:
-        tables = await conn.run_sync(_get_table_names)
-
-    # Sample a few of the legacy tables — all must be present
+    async with init_db_repo._engine.begin() as conn:
+        tables = await conn.run_sync(_table_names_sync)
     for required in (
         "trades", "positions", "equity_snapshots",
         "funding_payments", "backtest_runs",
     ):
         assert required in tables, f"{required} must be created by init_db"
-    await repo._engine.dispose()
 
 
 @pytest.mark.asyncio
