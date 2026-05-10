@@ -28,11 +28,13 @@ import { db } from "./db";
  * Postgres role names are case-folded by default but UUIDs are
  * already lowercase hex; explicit `.toLowerCase()` for safety.
  */
+const HEX32 = /^[a-f0-9]{32}$/;
+
 export function roleNameForTenant(tenantId: string): string {
   const hex = tenantId.replace(/-/g, "").toLowerCase();
-  if (hex.length !== 32) {
+  if (!HEX32.test(hex)) {
     throw new RangeError(
-      `tenantId must be a 32-hex UUID (got ${hex.length} chars)`,
+      `tenantId must be a 32-hex UUID (got ${JSON.stringify(hex)})`,
     );
   }
   return `tenant_${hex}`;
@@ -66,6 +68,20 @@ const TENANT_DATA_TABLES = [
 ];
 
 /**
+ * Subset of TENANT_DATA_TABLES that have a `serial id` column and
+ * therefore an auto-generated `<table>_id_seq` sequence. Used to
+ * scope sequence grants instead of granting on every sequence in
+ * the public schema (which would include tenant_audit_log_id_seq
+ * and other dashboard-only sequences).
+ *
+ * `user_vault_entries` is excluded — it has a composite PK on
+ * (user_address, vault_address), no serial id, no sequence.
+ */
+const TENANT_DATA_TABLES_WITH_ID_SEQ = TENANT_DATA_TABLES.filter(
+  (t) => t !== "user_vault_entries",
+);
+
+/**
  * Idempotent: creates the role if missing, otherwise rotates its
  * password. Grants schema USAGE + DML on the data tables + USAGE on
  * sequences (for autoincrement IDs). Safe to call on every bot-create.
@@ -93,15 +109,18 @@ export async function provisionRole(
   const pwLiteral = password.replace(/'/g, "''");
   const tablesList = TENANT_DATA_TABLES.join(", ");
 
-  // CREATE-OR-ALTER pattern: try CREATE; on duplicate, ALTER WITH
-  // PASSWORD. Postgres has no IF NOT EXISTS for CREATE ROLE.
+  // CREATE-OR-ALTER pattern (race-safe). The naive `IF NOT EXISTS`
+  // check has a TOCTOU race: two concurrent provisionRole() calls
+  // can both pass the check, then collide on CREATE ROLE.
+  // EXCEPTION-based pattern lets one win the CREATE and the other
+  // catch `duplicate_object` then fall through to ALTER ROLE.
   await db.execute(sql.raw(`
     DO $$ BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN
+      BEGIN
         CREATE ROLE ${roleName} LOGIN PASSWORD '${pwLiteral}';
-      ELSE
+      EXCEPTION WHEN duplicate_object THEN
         ALTER ROLE ${roleName} WITH PASSWORD '${pwLiteral}';
-      END IF;
+      END;
     END $$;
   `));
   // Grants are idempotent — re-running them is safe.
@@ -109,9 +128,16 @@ export async function provisionRole(
   await db.execute(sql.raw(
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ${tablesList} TO ${roleName};`,
   ));
-  await db.execute(sql.raw(
-    `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${roleName};`,
-  ));
+  // Sequence grants must be per-table — `ALL SEQUENCES IN SCHEMA
+  // public` would also grant the dashboard-only tables' sequences
+  // (tenant_audit_log etc), which we DON'T want tenants to touch.
+  // Postgres names auto-generated sequences `<table>_<col>_seq`;
+  // each per-tenant table has exactly one for its `id` column.
+  for (const table of TENANT_DATA_TABLES_WITH_ID_SEQ) {
+    await db.execute(sql.raw(
+      `GRANT USAGE, SELECT ON SEQUENCE ${table}_id_seq TO ${roleName};`,
+    ));
+  }
   return roleName;
 }
 
@@ -141,7 +167,19 @@ export async function dropRole(tenantId: string): Promise<void> {
  * Build the DATABASE_URL the tenant bot uses. Always points at the
  * same Postgres host as the dashboard (internal docker network),
  * just with the tenant's role + freshly-generated password.
+ *
+ * Scheme is forced to `postgresql+asyncpg` (the bot uses
+ * SQLAlchemy async via asyncpg). The dashboard's own DATABASE_URL
+ * uses the libpq-compatible `postgresql` scheme for postgres-js;
+ * if we forwarded that scheme verbatim, the bot would crash on
+ * startup with "no such driver: postgresql" (PR #46 review fix).
+ *
+ * Query params (e.g. `?sslmode=require`) on the dashboard URL are
+ * preserved so a future TLS-enabled deploy doesn't have to rebuild
+ * this URL by hand.
  */
+const ASYNCPG_SCHEME = "postgresql+asyncpg";
+
 export function tenantDatabaseUrl(
   tenantId: string,
   password: string,
@@ -153,9 +191,6 @@ export function tenantDatabaseUrl(
     process.env.DATABASE_URL ??
     "postgresql://postgres:postgres@postgres:5432/hypertrade";
   const parsed = new URL(baseUrl);
-  // postgres+asyncpg style URLs (used by the Python bot via SQLAlchemy)
-  // need their scheme adjusted; keep the postgresql scheme for libpq-
-  // compatible drivers and let the bot's pydantic-settings normalise.
-  const scheme = parsed.protocol.replace(/:$/, "");
-  return `${scheme}://${role}:${encodeURIComponent(password)}@${parsed.host}${parsed.pathname}`;
+  const search = parsed.search ?? "";
+  return `${ASYNCPG_SCHEME}://${role}:${encodeURIComponent(password)}@${parsed.host}${parsed.pathname}${search}`;
 }

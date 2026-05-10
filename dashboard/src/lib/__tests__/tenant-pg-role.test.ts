@@ -42,6 +42,14 @@ describe("roleNameForTenant", () => {
       roleNameForTenant(TENANT + "extra"),
     ).toThrow(/32-hex UUID/);
   });
+
+  it("throws on right-length but non-hex chars (PR #46 review)", () => {
+    // Length 32 after dash-strip but contains 'g' (not a hex char).
+    // Pre-fix this would have produced a Postgres-invalid identifier
+    // and only blown up at provisionRole's regex re-check.
+    const garbage = "ggggg444-aaaa-bbbb-cccc-dddd11112222";
+    expect(() => roleNameForTenant(garbage)).toThrow(/32-hex UUID/);
+  });
 });
 
 describe("generateRolePassword", () => {
@@ -70,6 +78,21 @@ describe("tenantDatabaseUrl", () => {
     expect(url).toContain("abc%2F%2B%3Dxyz");
   });
 
+  it("forces the postgresql+asyncpg scheme regardless of dashboard URL", () => {
+    // The bot uses SQLAlchemy async via asyncpg — the dashboard's
+    // libpq-style `postgresql://` scheme would crash it. PR #46
+    // review fix: scheme is hardcoded.
+    const orig = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://u:p@somewhere:5433/mydb";
+    try {
+      const url = tenantDatabaseUrl(TENANT, "secret");
+      expect(url).toMatch(/^postgresql\+asyncpg:\/\//);
+    } finally {
+      if (orig === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = orig;
+    }
+  });
+
   it("preserves host + database name from the dashboard's DATABASE_URL", () => {
     const orig = process.env.DATABASE_URL;
     process.env.DATABASE_URL = "postgresql://u:p@somewhere:5433/mydb";
@@ -82,12 +105,29 @@ describe("tenantDatabaseUrl", () => {
     }
   });
 
+  it("preserves query string from the base URL (e.g. sslmode)", () => {
+    // PR #46 review fix: `?sslmode=require` etc. on the dashboard
+    // URL shouldn't be silently dropped when the tenant URL is built.
+    const orig = process.env.DATABASE_URL;
+    process.env.DATABASE_URL =
+      "postgresql://u:p@somewhere:5432/mydb?sslmode=require&extra=1";
+    try {
+      const url = tenantDatabaseUrl(TENANT, "secret");
+      expect(url).toContain("?sslmode=require&extra=1");
+    } finally {
+      if (orig === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = orig;
+    }
+  });
+
   it("falls back to the docker-compose default when DATABASE_URL is unset", () => {
     const orig = process.env.DATABASE_URL;
     delete process.env.DATABASE_URL;
     try {
       const url = tenantDatabaseUrl(TENANT, "secret");
       expect(url).toContain("@postgres:5432/hypertrade");
+      // Still asyncpg scheme even on fallback
+      expect(url).toMatch(/^postgresql\+asyncpg:\/\//);
     } finally {
       if (orig !== undefined) process.env.DATABASE_URL = orig;
     }

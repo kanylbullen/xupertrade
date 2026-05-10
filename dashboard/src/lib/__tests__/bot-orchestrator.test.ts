@@ -131,10 +131,10 @@ describe("buildSpec", () => {
   });
 
   it("systemEnv overrides decryptedSecrets on collision (Phase 5b)", () => {
-    // The user can't sneak in their own DATABASE_URL via the secret
-    // CRUD API — orchestrator's systemEnv is appended after the
-    // decrypted secrets so it wins on env-var de-dup at container
-    // start (Docker keeps the last-defined value for a key).
+    // Single env entry per key (no duplicates in the array — POSIX
+    // allows them but getenv() behaviour is impl-defined). systemEnv
+    // wins via Object spread order so a malicious user can't sneak
+    // in their own DATABASE_URL via the secret CRUD API.
     const spec = buildSpec({
       tenantId: TENANT_ID,
       botId: BOT_ID,
@@ -145,10 +145,8 @@ describe("buildSpec", () => {
     const databaseUrlEntries = spec.env.filter((e) =>
       e.startsWith("DATABASE_URL="),
     );
-    // Both are in the list, but the orchestrator-supplied one comes
-    // last so it's the effective value at container runtime.
-    expect(databaseUrlEntries).toHaveLength(2);
-    expect(databaseUrlEntries[databaseUrlEntries.length - 1]).toBe(
+    expect(databaseUrlEntries).toHaveLength(1);
+    expect(databaseUrlEntries[0]).toBe(
       "DATABASE_URL=postgresql://tenant_x@postgres/hypertrade",
     );
   });
