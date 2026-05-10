@@ -15,6 +15,10 @@ from hypertrade.db.models import (
     HodlPurchase,
     ManualOnchainLevel,
     PositionRecord,
+    Tenant,
+    TenantAuditLog,
+    TenantBot,
+    TenantSecret,
     Trade,
     UserVaultEntry,
     Vault,
@@ -23,6 +27,21 @@ from hypertrade.db.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Tables that alembic is the sole authority for — `init_db()` skips
+# them so a fresh-bot start can't race-create them ahead of `alembic
+# upgrade head`. Hit by the multi-tenancy Phase 1 deploy 2026-05-10:
+# bot's `Base.metadata.create_all` raced ahead of alembic on the new
+# tenant tables and left them with no `tenant_id`-columns on existing
+# tables (alembic crashed on "already exists"). Operator must run
+# `alembic upgrade head` once when deploying any new MT phase.
+_ALEMBIC_OWNED_TABLES = frozenset({
+    Tenant.__tablename__,
+    TenantBot.__tablename__,
+    TenantSecret.__tablename__,
+    TenantAuditLog.__tablename__,
+})
 
 
 class Repository:
@@ -34,9 +53,28 @@ class Repository:
         self._is_paper = settings.is_paper
 
     async def init_db(self) -> None:
+        """Create the legacy bot tables (idempotent via SA's checkfirst).
+
+        Multi-tenancy tables (tenants, tenant_bots, tenant_secrets,
+        tenant_audit_log) are EXCLUDED — alembic owns them. If alembic
+        hasn't been run yet on a fresh deploy, those tables won't
+        exist; that's fine because Phase 1-5 of multi-tenancy doesn't
+        write to them. Phase 6 cutover backfills + flips constraints
+        and assumes alembic is current.
+        """
+        legacy_tables = [
+            t for t in Base.metadata.sorted_tables
+            if t.name not in _ALEMBIC_OWNED_TABLES
+        ]
         async with self._engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables ready")
+            await conn.run_sync(
+                lambda c: Base.metadata.create_all(c, tables=legacy_tables)
+            )
+        logger.info(
+            "Database tables ready (ensured %d legacy tables exist; %d alembic-owned skipped)",
+            len(legacy_tables),
+            len(_ALEMBIC_OWNED_TABLES),
+        )
 
     async def record_trade(
         self,
