@@ -109,8 +109,9 @@ services:
       MAINNET_ENABLED_STRATEGIES: "${MAINNET_ENABLED_STRATEGIES:-}"
       # First-week tiny rollout per audit recommendation. Hardcoded
       # rather than env-overridden so the operator can't accidentally
-      # pick up the *bot-env defaults ($1000 / $500) on the first
-      # mainnet deploy. Bump these via PR after first successful trades.
+      # pick up the *bot-env defaults ($200 max position / $100 daily
+      # loss — see x-bot-env above) on the first mainnet deploy. Bump
+      # these via PR after first successful trades.
       MAX_POSITION_SIZE_USD: "20"
       MAX_DAILY_LOSS_USD: "20"
 
