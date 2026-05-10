@@ -70,6 +70,16 @@ class Settings(BaseSettings):
     kill_switch: bool = False
     taker_fee_rate: float = 0.00045
 
+    # Mainnet allowlist (audit C3). Comma-separated list of strategy names
+    # that are allowed to trade on mainnet. EMPTY = no strategies trade —
+    # explicit fail-closed on first mainnet deploy. Operator must add the
+    # one strategy they're piloting (e.g. `bb_short`) to .env and restart
+    # before mainnet trades anything. Ignored on paper/testnet — both run
+    # the full registered set as before. Setting this is a HARD upper bound;
+    # Redis-side `disabled` toggles can subset further but cannot enable
+    # beyond the allowlist.
+    mainnet_enabled_strategies: str = ""
+
     # Trade-rate anomaly alarm. When a strategy starts spam-trading
     # (e.g. due to a stale-bar SL bug like the 2026-05-09 hash_momentum
     # incident), this catches it within ~5 min and auto-pauses the

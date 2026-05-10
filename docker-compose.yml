@@ -101,6 +101,12 @@ services:
       HYPERLIQUID_PRIVATE_KEY: "${HYPERLIQUID_MAINNET_PRIVATE_KEY:-}"
       HYPERLIQUID_ACCOUNT_ADDRESS: "${HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS:-}"
       TELEGRAM_ENABLED: "false"
+      # Audit C3 allowlist. EMPTY = no strategies trade on mainnet (the bot
+      # boots and serves API but won't open any new positions). Set in
+      # .env to a comma-separated list to enable specific strategies, e.g.
+      # `MAINNET_ENABLED_STRATEGIES=bb_short`. There is no default — fail
+      # closed by design.
+      MAINNET_ENABLED_STRATEGIES: "${MAINNET_ENABLED_STRATEGIES:-}"
 
   dashboard:
     build: ./dashboard

@@ -115,6 +115,7 @@ class TelegramNotifier:
         exchange: Exchange | None = None,
         strategies: list[Strategy] | None = None,
         repo=None,  # Repository | None — avoid circular import
+        mainnet_control: BotControl | None = None,
     ) -> None:
         self._token = token if token is not None else settings.telegram_bot_token
         self._chat_id = chat_id if chat_id is not None else settings.telegram_chat_id
@@ -126,6 +127,14 @@ class TelegramNotifier:
         self._strategies = strategies or []
         self._strategy_by_name = {s.name: s for s in self._strategies}
         self._repo = repo
+        # Audit C4: Telegram lives on the testnet bot but its `_control` is
+        # the testnet's BotControl. Mainnet's Redis keys are namespaced
+        # separately (`hypertrade:mainnet:control:*`) — without an explicit
+        # second handle, /pause/etc would write to testnet keys and never
+        # reach mainnet. `mainnet_control` is wired in `main.py` when
+        # telegram_enabled AND a mainnet bot exists in the deployment;
+        # commands suffixed `-mainnet` route here.
+        self._mainnet_control = mainnet_control
 
         self._redis: redis.Redis | None = None
         self._session: aiohttp.ClientSession | None = None
@@ -150,6 +159,28 @@ class TelegramNotifier:
             "/eval": (self._cmd_eval, "Weekly per-strategy evaluation (7d)"),
             "/kelly": (self._cmd_kelly, "Half-Kelly sizing report (30d, advisory only)"),
         }
+        # Mainnet variants (audit C4). Registered only when wiring is
+        # actually in place — otherwise the menu would advertise commands
+        # that always reply "not wired" and confuse the operator.
+        if self._mainnet_control is not None:
+            self._commands.update({
+                "/status-mainnet": (
+                    self._cmd_status_mainnet,
+                    "Mainnet bot state (paused, disabled strategies, heartbeat)",
+                ),
+                "/pause-mainnet": (
+                    self._cmd_pause_mainnet,
+                    "Pause the MAINNET bot (no new signals execute)",
+                ),
+                "/resume-mainnet": (
+                    self._cmd_resume_mainnet,
+                    "Resume the MAINNET bot",
+                ),
+                "/flat-mainnet": (
+                    self._cmd_flat_mainnet,
+                    "Close ALL MAINNET positions (with confirmation)",
+                ),
+            })
 
     @property
     def configured(self) -> bool:
@@ -626,3 +657,58 @@ class TelegramNotifier:
         token = uuid.uuid4().hex
         await self._control.request_flat_all(token)
         return f"{_mode_prefix()} ✅ Flat-all requested (token <code>{token[:8]}…</code>)."
+
+    # --- Mainnet variants (audit C4) ---------------------------------------
+    # Each delegates to the testnet implementation pattern, but writes to
+    # the MAINNET-namespaced Redis keys so the mainnet bot actually sees
+    # the request. Without these, the operator's `/pause` from Telegram
+    # silently writes to testnet's keys; mainnet keeps trading.
+
+    async def _cmd_status_mainnet(self, _args: list[str]) -> str:
+        if not self._mainnet_control:
+            return "Mainnet control not wired (no mainnet bot in this deployment)"
+        paused = await self._mainnet_control.is_paused()
+        disabled = sorted(await self._mainnet_control.get_disabled_strategies())
+        hb = await self._mainnet_control.get_heartbeat()
+        import time as _time
+        if hb is None:
+            hb_msg = "❓ no heartbeat"
+        else:
+            age = int(_time.time() - hb)
+            hb_msg = f"{age}s ago" if age < 180 else f"⚠️ stale ({age}s ago)"
+        return (
+            f"{MODE_BADGE['mainnet']} <b>status</b>\n"
+            f"State: {'⏸ <b>PAUSED</b>' if paused else '▶ running'}\n"
+            f"Heartbeat: {hb_msg}\n"
+            + (f"Disabled: {', '.join(disabled)}" if disabled else "Disabled: none")
+        )
+
+    async def _cmd_pause_mainnet(self, _args: list[str]) -> str:
+        if not self._mainnet_control:
+            return "Mainnet control not wired (no mainnet bot in this deployment)"
+        await self._mainnet_control.set_paused(True)
+        return f"{MODE_BADGE['mainnet']} ⏸ MAINNET paused. No new signals will execute."
+
+    async def _cmd_resume_mainnet(self, _args: list[str]) -> str:
+        if not self._mainnet_control:
+            return "Mainnet control not wired (no mainnet bot in this deployment)"
+        await self._mainnet_control.set_paused(False)
+        return f"{MODE_BADGE['mainnet']} ▶ MAINNET resumed."
+
+    async def _cmd_flat_mainnet(self, args: list[str]) -> str:
+        if not self._mainnet_control:
+            return "Mainnet control not wired (no mainnet bot in this deployment)"
+        if not args or args[0].lower() != "confirm":
+            return (
+                f"{MODE_BADGE['mainnet']} ⚠️ This will close ALL open MAINNET "
+                f"positions on the live exchange.\n"
+                f"Reply with <code>/flat-mainnet confirm</code> to proceed."
+            )
+        import uuid
+
+        token = uuid.uuid4().hex
+        await self._mainnet_control.request_flat_all(token)
+        return (
+            f"{MODE_BADGE['mainnet']} ✅ MAINNET flat-all requested "
+            f"(token <code>{token[:8]}…</code>)."
+        )
