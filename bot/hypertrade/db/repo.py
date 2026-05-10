@@ -1,6 +1,7 @@
 """Database repository for trades and positions."""
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -45,12 +46,40 @@ _ALEMBIC_OWNED_TABLES = frozenset({
 
 
 class Repository:
-    def __init__(self, database_url: str | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
         url = database_url or settings.database_url
         self._engine = create_async_engine(url, echo=False)
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
         self._mode = settings.exchange_mode
         self._is_paper = settings.is_paper
+        # Multi-tenancy Phase 3b: when set, every hot-path INSERT this
+        # Repository writes carries this tenant_id (Trade, PositionRecord,
+        # EquitySnapshot, FundingPayment). When None, falls back to
+        # today's tenant-agnostic behavior — operator's pre-cutover
+        # 3-mode deploy.
+        #
+        # NOTE: SELECT/UPDATE/DELETE are NOT yet scoped to tenant_id;
+        # queries filter on `mode` only. With multiple tenants in the
+        # same DB this could leak/mutate cross-tenant rows. Real
+        # isolation lands in Phase 5 via distinct PG roles + RLS —
+        # the application-layer approach is too easy to forget on a
+        # new query path. Phase 3b is sufficient ONLY when one
+        # tenant_id is in play per process (the operator's current
+        # deploy + dashboard-spawned single-tenant bots). Multi-tenant
+        # beta (Phase 8) requires Phase 5 first.
+        #
+        # Stored as a uuid.UUID so SQLAlchemy's Uuid column type can
+        # serialize cleanly (a bare string trips its `value.hex` path).
+        raw_tenant = (
+            tenant_id if tenant_id is not None else settings.tenant_id
+        )
+        self._tenant_id: uuid.UUID | None = (
+            uuid.UUID(raw_tenant) if raw_tenant else None
+        )
 
     async def init_db(self) -> None:
         """Create the legacy bot tables (idempotent via SA's checkfirst).
@@ -90,6 +119,7 @@ class Repository:
     ) -> Trade:
         async with self._session_factory() as session:
             trade = Trade(
+                tenant_id=self._tenant_id,
                 order_id=order_id,
                 strategy_name=strategy_name,
                 symbol=symbol,
@@ -117,6 +147,7 @@ class Repository:
     ) -> PositionRecord:
         async with self._session_factory() as session:
             pos = PositionRecord(
+                tenant_id=self._tenant_id,
                 strategy_name=strategy_name,
                 symbol=symbol,
                 side=side,
@@ -159,6 +190,7 @@ class Repository:
         async with self._session_factory() as session:
             async with session.begin():
                 trade = Trade(
+                    tenant_id=self._tenant_id,
                     order_id=order_id,
                     strategy_name=strategy_name,
                     symbol=symbol,
@@ -172,6 +204,7 @@ class Repository:
                     mode=self._mode,
                 )
                 pos = PositionRecord(
+                    tenant_id=self._tenant_id,
                     strategy_name=strategy_name,
                     symbol=symbol,
                     side=position_side,
@@ -224,6 +257,7 @@ class Repository:
                 )
                 pos = result.scalar_one_or_none()
                 trade = Trade(
+                    tenant_id=self._tenant_id,
                     order_id=order_id,
                     strategy_name=strategy_name,
                     symbol=symbol,
@@ -286,6 +320,7 @@ class Repository:
     ) -> None:
         async with self._session_factory() as session:
             snap = EquitySnapshot(
+                tenant_id=self._tenant_id,
                 total_equity=total,
                 available_balance=available,
                 unrealized_pnl=unrealized_pnl,
@@ -387,6 +422,7 @@ class Repository:
             if existing.scalar_one_or_none() is not None:
                 return False
             row = FundingPayment(
+                tenant_id=self._tenant_id,
                 timestamp=ts,
                 hash=h,
                 coin=coin,
