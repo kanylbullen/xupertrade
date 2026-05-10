@@ -280,6 +280,26 @@ class Repository:
             )
             return result.scalar_one_or_none()
 
+    async def get_open_positions_for_symbol(
+        self, symbol: str,
+    ) -> list[PositionRecord]:
+        """All open position rows for one coin (any strategy).
+
+        When `allow_multi_coin=True` two strategies can hold open rows
+        on the same coin. The exchange shows one netted position. Flat-all
+        needs to close every DB row, not just one — otherwise the others
+        get reconcile-orphan-closed with PnL=0 (audit PR #31 review).
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PositionRecord).where(
+                    PositionRecord.symbol == symbol,
+                    PositionRecord.mode == self._mode,
+                    PositionRecord.is_open == True,
+                )
+            )
+            return list(result.scalars().all())
+
     async def get_open_position(
         self, strategy_name: str, symbol: str
     ) -> PositionRecord | None:

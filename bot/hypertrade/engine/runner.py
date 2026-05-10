@@ -87,6 +87,15 @@ class EngineRunner:
         self._vault_poller = None  # lazy-init on first use
         self._last_rate_check = 0.0
         self._rate_alarm_paused: set[str] = set()  # strategies auto-paused this run
+        # Audit H1 (2026-05-10): track the leverage we last pushed per
+        # coin so we can re-push BEFORE an OPEN if a runtime override
+        # (Redis HSET, dashboard endpoint) bumped a strategy's `s.leverage`
+        # since startup. Without this, the bot's notional calc uses the
+        # new leverage but HL still has the startup leverage → margin
+        # used = `notional / startup_leverage` instead of
+        # `notional / new_leverage`. On a 10× bump that's 10× the
+        # expected margin → liquidation path.
+        self._pushed_leverage: dict[str, int] = {}
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart, then
@@ -474,6 +483,20 @@ class EngineRunner:
         for pos in positions:
             try:
                 close_side = "sell" if pos.side == "long" else "buy"
+                # Audit H5+H6 + PR #31 review: get EVERY open DB row for
+                # this coin (not just one — `allow_multi_coin=True` lets
+                # multiple strategies hold rows on the same coin). The
+                # exchange shows one netted position; we split the close
+                # fee/PnL across all open rows by size weight so each
+                # strategy's PnL is recorded with its own entry_price.
+                # Fixed in PR #31 review: previously closed only one row,
+                # leaving siblings to be orphan-closed at PnL=0 by
+                # reconcile.
+                db_recs = (
+                    await self.repo.get_open_positions_for_symbol(pos.symbol)
+                    if self.repo else []
+                )
+
                 order = await self.exchange.place_order(
                     pos.symbol, close_side, pos.size, OrderType.MARKET
                 )
@@ -486,41 +509,67 @@ class EngineRunner:
                     continue
 
                 filled_price = order.filled_price or 0
-                fee = filled_price * pos.size * settings.taker_fee_rate
-                if pos.side == "long":
-                    realized_pnl = (filled_price - pos.entry_price) * pos.size - fee
-                else:
-                    realized_pnl = (pos.entry_price - filled_price) * pos.size - fee
+                if not db_recs:
+                    # No DB-side open record (rare exchange-side orphan).
+                    # Best-effort: record one trade for history with the
+                    # exchange's full size, using its VWAP entry as the
+                    # only entry signal we have.
+                    fee = filled_price * pos.size * settings.taker_fee_rate
+                    if pos.side == "long":
+                        realized_pnl = (filled_price - pos.entry_price) * pos.size - fee
+                    else:
+                        realized_pnl = (pos.entry_price - filled_price) * pos.size - fee
+                    if self.repo:
+                        await self.repo.record_trade(
+                            order_id=order.id,
+                            strategy_name="manual_flat",
+                            symbol=pos.symbol,
+                            side=order.side,
+                            size=pos.size,
+                            price=filled_price,
+                            fee=fee,
+                            pnl=realized_pnl,
+                            reason="Flat-all from dashboard (no open DB rec)",
+                        )
+                    await self.portfolio.record_pnl(realized_pnl)
+                    logger.warning(
+                        "Closed %s %s @ %.2f (no DB rec; PnL %.2f)",
+                        pos.side, pos.symbol, filled_price, realized_pnl,
+                    )
+                    continue
 
-                if self.repo:
-                    await self.repo.record_trade(
+                # Split close fee + PnL across each open DB row by its
+                # share of total open size. Per-row PnL uses that row's
+                # own entry_price (audit H6) — exchange VWAP would be
+                # wrong when two strategies opened at different prices.
+                total_db_size = sum(float(r.size) for r in db_recs) or 1.0
+                for rec in db_recs:
+                    share = float(rec.size) / total_db_size
+                    rec_size = float(rec.size)
+                    rec_fee = filled_price * rec_size * settings.taker_fee_rate
+                    rec_entry = float(rec.entry_price)
+                    if rec.side == "long":
+                        rec_pnl = (filled_price - rec_entry) * rec_size - rec_fee
+                    else:
+                        rec_pnl = (rec_entry - filled_price) * rec_size - rec_fee
+                    # Audit H5: single atomic trade+close per row.
+                    await self.repo.record_trade_and_close_position(
                         order_id=order.id,
-                        strategy_name="manual_flat",
+                        strategy_name=rec.strategy_name,
                         symbol=pos.symbol,
-                        side=order.side,
-                        size=pos.size,
+                        trade_side=order.side,
+                        size=rec_size,
                         price=filled_price,
-                        fee=fee,
-                        pnl=realized_pnl,
+                        fee=rec_fee,
+                        pnl=rec_pnl,
                         reason="Flat-all from dashboard",
                     )
-                    # Find the open position record (any strategy) and close it
-                    open_rec = await self.repo.get_open_position_any(pos.symbol)
-                    if open_rec:
-                        await self.repo.close_position(
-                            open_rec.strategy_name,
-                            pos.symbol,
-                            filled_price,
-                            realized_pnl,
-                        )
-                await self.portfolio.record_pnl(realized_pnl)
-                logger.warning(
-                    "Closed %s %s @ %.2f (PnL %.2f)",
-                    pos.side,
-                    pos.symbol,
-                    filled_price,
-                    realized_pnl,
-                )
+                    await self.portfolio.record_pnl(rec_pnl)
+                    logger.warning(
+                        "Closed [%s] %s %s @ %.2f (entry %.2f, size %.6f, share %.0f%%, PnL %.2f)",
+                        rec.strategy_name, rec.side, pos.symbol,
+                        filled_price, rec_entry, rec_size, share * 100, rec_pnl,
+                    )
             except Exception:
                 logger.exception("Failed to close position %s", pos.symbol)
                 failed += 1
@@ -601,7 +650,12 @@ class EngineRunner:
         the close return value — opening a new opposite position when the
         close failed leaves the DB and exchange permanently divergent.
         """
-        if not await self.portfolio.check_risk_limits():
+        # Audit H3: kill-switch + daily-loss cap apply ONLY to OPEN signals.
+        # Blocking CLOSE on kill-switch flip would freeze a position-open
+        # bot (SL/TP exits wouldn't fire); blocking CLOSE on daily-loss cap
+        # would prevent the loss from being realized and capped.
+        is_open = signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
+        if not await self.portfolio.check_risk_limits(is_open=is_open):
             logger.warning(
                 "[%s] Risk limit breached — skipping execution of %s %s",
                 signal.strategy_name,
@@ -615,10 +669,6 @@ class EngineRunner:
                         message=f"Risk limit breached — execution of {signal.action.value} {signal.symbol} blocked",
                     )
                 )
-            return False
-
-        if settings.kill_switch:
-            logger.warning("Kill switch is ON — skipping execution")
             return False
 
         # Idempotency / flip detection: don't open a same-side duplicate;
@@ -754,6 +804,16 @@ class EngineRunner:
                         settings.max_total_exposure_usd,
                     )
                     return False
+
+        # Audit H1: re-push per-coin leverage to HL before any OPEN if a
+        # runtime override has bumped the strategy's `s.leverage` since
+        # we last pushed. Per-coin leverage on HL is a single value, so
+        # the target is `max(s.leverage)` across strategies trading this
+        # coin — matching the startup logic in main.py. No-op when
+        # already in sync. CLOSE signals don't need this (leverage
+        # affects margin, which only applies to opens).
+        if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
+            await self._ensure_leverage_pushed(signal.symbol)
 
         size = signal.size or self._calculate_size(current_price, leverage)
 
@@ -1266,6 +1326,56 @@ class EngineRunner:
             )
             return None
         return ex_pos.size
+
+    async def _ensure_leverage_pushed(self, symbol: str) -> None:
+        """Push per-coin leverage to the exchange if it's drifted from
+        what we last pushed (audit H1).
+
+        The target is the max `s.leverage` across all strategies trading
+        ``symbol`` — matching the startup-time push in `main.py`. Only
+        actually calls the exchange when the target differs from
+        `_pushed_leverage[symbol]`, so the cost is one dict lookup per
+        OPEN tick in the steady state.
+
+        Failures (network blip, exchange rejection) are logged but NOT
+        raised — the open continues with whatever leverage the exchange
+        currently has. The size calc downstream still divides by
+        `signal.leverage`, so the worst case is a margin/notional mismatch
+        for one trade until the next push succeeds, instead of the
+        liquidation path the audit calls out.
+        """
+        target = max(
+            (s.leverage for s in self.strategies if s.symbol == symbol),
+            default=1,
+        )
+        target = max(int(target), 1)
+        previous = self._pushed_leverage.get(symbol)
+        if previous == target:
+            return
+        try:
+            ok = await self.exchange.update_leverage(
+                symbol, target, is_cross=True,
+            )
+        except Exception:
+            logger.exception(
+                "Leverage push failed for %s (target %dx) — "
+                "open will proceed with exchange's current leverage",
+                symbol, target,
+            )
+            return
+        if ok:
+            self._pushed_leverage[symbol] = target
+            logger.info(
+                "Re-pushed %s leverage=%dx (was %s)",
+                symbol, target,
+                f"{previous}x" if previous is not None else "unset",
+            )
+        else:
+            logger.warning(
+                "Leverage push for %s rejected by exchange (target %dx) — "
+                "open will proceed with exchange's current leverage",
+                symbol, target,
+            )
 
     def _calculate_size(self, price: float, leverage: int = 1) -> float:
         """Calculate position size in base units.

@@ -62,16 +62,27 @@ class PortfolioManager:
                 self._daily_pnl = 0.0
             self._loaded = True
 
-    async def check_risk_limits(self) -> bool:
-        """Returns True if trading is allowed, False if limits hit."""
+    async def check_risk_limits(self, is_open: bool = True) -> bool:
+        """Returns True if trading is allowed, False if limits hit.
+
+        ``is_open=True`` (default) checks the kill-switch and the daily-loss
+        cap — both apply to NEW positions. ``is_open=False`` skips both:
+        CLOSE signals must always be allowed through, otherwise flipping
+        the kill-switch on a position-already-open bot freezes the
+        position and SL/TP exits don't fire (audit H3, 2026-05-10).
+        Closing a position can only REDUCE risk, never add it.
+        """
         await self._ensure_loaded()
 
-        # Check kill switch
+        if not is_open:
+            return True
+
+        # Check kill switch (OPEN only — see docstring)
         if settings.kill_switch:
-            logger.warning("Kill switch active — trading disabled")
+            logger.warning("Kill switch active — new opens disabled")
             return False
 
-        # Check daily loss limit
+        # Check daily loss limit (OPEN only — closing reduces risk)
         if self._daily_pnl < -settings.max_daily_loss_usd:
             logger.warning(
                 "Daily loss limit hit: $%.2f (limit: $%.2f)",
