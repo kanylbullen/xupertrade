@@ -293,12 +293,21 @@ class HyperLiquidExchange(Exchange):
                 price=price,
                 status=OrderStatus.REJECTED,
             )
+        # Audit H2: snapshot the pre-order signed position size so a
+        # post-timeout poll can detect a delayed fill. Long = +size,
+        # short = -size. Best-effort — if the read fails, we lose the
+        # ability to detect a delayed fill on timeout but the order
+        # path itself proceeds normally.
+        try:
+            pre_signed = await self._signed_position_size(symbol)
+        except Exception:
+            pre_signed = None
         try:
             # Order placement gets the longer write timeout. HL match
             # engine can take a few seconds under load; we'd rather
             # accept that than risk a duplicate fill from a too-eager
             # timeout-then-retry loop. Order is NOT in _run_with_retry
-            # — a single timed-out attempt becomes REJECTED, not retried.
+            # — a single timed-out attempt risks duplicate fills.
             result = await self._run(
                 self._exchange.order,
                 symbol,
@@ -308,8 +317,31 @@ class HyperLiquidExchange(Exchange):
                 {"limit": {"tif": tif}},
                 timeout=settings.hl_order_timeout_seconds,
             )
+        except asyncio.TimeoutError:
+            # The SDK call timed out — but HL may STILL fill the order.
+            # Returning REJECTED here was the audit H2 bug: the runner
+            # would skip the DB write while the exchange built up a
+            # position. Reconcile catches it 5 min later, but during
+            # those 5 min the strategy can't manage the position.
+            # Poll for ~30s; if a new position appears, treat it as
+            # filled at the observed entry price.
+            logger.warning(
+                "HyperLiquid order TIMED OUT for %s %s %s — polling for "
+                "delayed fill before declaring REJECTED",
+                symbol, side, rounded_size,
+            )
+            return await self._poll_for_delayed_fill(
+                symbol=symbol,
+                side=side,
+                requested_size=size,
+                requested_rounded=rounded_size,
+                order_type=order_type,
+                price=price,
+                pre_signed=pre_signed,
+                limit_px=limit_px,
+            )
         except Exception:
-            logger.exception("HyperLiquid order failed (or timed out)")
+            logger.exception("HyperLiquid order failed")
             return Order(
                 id=str(uuid.uuid4()),
                 symbol=symbol,
@@ -374,6 +406,105 @@ class HyperLiquidExchange(Exchange):
             price=price,
             filled_price=filled_price,
             status=order_status,
+        )
+
+    async def _signed_position_size(self, symbol: str) -> float:
+        """Return the current position size for `symbol` with sign:
+        positive for long, negative for short, 0 for flat. Used as the
+        baseline for the audit-H2 timeout-poll path so we can detect a
+        delayed fill regardless of trade direction."""
+        pos = await self.get_position(symbol)
+        if pos is None:
+            return 0.0
+        return float(pos.size) if pos.side == "long" else -float(pos.size)
+
+    async def _poll_for_delayed_fill(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        requested_size: float,
+        requested_rounded: float,
+        order_type: OrderType,
+        price: float | None,
+        pre_signed: float | None,
+        limit_px: float,
+    ) -> Order:
+        """Audit H2: poll the exchange for a delayed fill after a
+        place_order timeout.
+
+        We can't tell from the SDK whether the order made it to HL's
+        match engine. If pre-order signed-size was X and post-order is
+        X ± requested_rounded (within a per-asset rounding tolerance),
+        the order DID fill — return Order(FILLED). Otherwise we treat
+        it as truly REJECTED.
+
+        If `pre_signed` is None (the pre-order baseline read failed),
+        we degrade to REJECTED — better to surface the timeout than
+        misclassify an unrelated existing position as a fresh fill.
+        """
+        if pre_signed is None:
+            logger.warning(
+                "Timeout-poll skipped (no pre-order baseline) — "
+                "returning REJECTED for %s %s %s",
+                symbol, side, requested_size,
+            )
+            return Order(
+                id=str(uuid.uuid4()), symbol=symbol, side=side,
+                size=requested_size, order_type=order_type, price=price,
+                status=OrderStatus.REJECTED,
+            )
+
+        expected_delta = requested_rounded if side == "buy" else -requested_rounded
+        target = pre_signed + expected_delta
+        # Tolerance: one min step at szDecimals precision, matching the
+        # parity-check rule in runner.py:_check_parity_after_trade.
+        sz_dec = self._sz_decimals.get(symbol, 4)
+        tolerance = max(10 ** (-sz_dec), 1e-9)
+
+        # Poll up to ~30s. Bursty at first to catch quick fills, then
+        # backs off so we don't hammer HL during a wider outage.
+        delays = [1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 5.0, 5.0, 8.0]
+        elapsed = 0.0
+        for delay in delays:
+            await asyncio.sleep(delay)
+            elapsed += delay
+            try:
+                current = await self._signed_position_size(symbol)
+            except Exception:
+                logger.warning(
+                    "Timeout-poll: read failed at %.0fs (will keep polling)",
+                    elapsed,
+                )
+                continue
+            if abs(current - target) <= tolerance:
+                # Match — the order filled while we were waiting.
+                # Read the actual entry from the position so the runner
+                # records the real fill price, not our limit_px guess.
+                try:
+                    pos = await self.get_position(symbol)
+                    fill_px = float(pos.entry_price) if pos else float(limit_px)
+                except Exception:
+                    fill_px = float(limit_px)
+                logger.warning(
+                    "Timeout-poll: detected delayed fill for %s %s %s "
+                    "after %.0fs (entry≈%.4f). Treating as FILLED.",
+                    symbol, side, requested_size, elapsed, fill_px,
+                )
+                return Order(
+                    id=str(uuid.uuid4()), symbol=symbol, side=side,
+                    size=requested_size, order_type=order_type, price=price,
+                    filled_price=fill_px, status=OrderStatus.FILLED,
+                )
+        logger.error(
+            "Timeout-poll: no delayed fill for %s %s %s after %.0fs — "
+            "returning REJECTED. Reconcile will catch it if HL fills late.",
+            symbol, side, requested_size, elapsed,
+        )
+        return Order(
+            id=str(uuid.uuid4()), symbol=symbol, side=side,
+            size=requested_size, order_type=order_type, price=price,
+            status=OrderStatus.REJECTED,
         )
 
     async def update_leverage(self, symbol: str, leverage: int, is_cross: bool = True) -> bool:
