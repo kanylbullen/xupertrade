@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
@@ -116,7 +117,14 @@ export const strategyConfigs = pgTable("strategy_configs", {
 export const tenants = pgTable(
   "tenants",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
+    // No `.defaultRandom()` here — alembic 0009 emits `id UUID PRIMARY
+    // KEY` with no server default (PR #36 review removed the
+    // `gen_random_uuid()` default to avoid the pgcrypto extension
+    // dependency). Application code must supply UUIDs at insert time
+    // via `crypto.randomUUID()` or similar. Drizzle therefore treats
+    // `id` as REQUIRED on insert; if you forget it, the type checker
+    // catches it before runtime.
+    id: uuid("id").primaryKey(),
     authentikSub: varchar("authentik_sub", { length: 128 }).notNull(),
     email: varchar("email", { length: 255 }).notNull(),
     displayName: varchar("display_name", { length: 128 }),
@@ -140,7 +148,8 @@ export const tenants = pgTable(
 export const tenantBots = pgTable(
   "tenant_bots",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
+    // Same as tenants.id — application supplies UUID, no server default.
+    id: uuid("id").primaryKey(),
     tenantId: uuid("tenant_id")
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
@@ -164,6 +173,12 @@ export const tenantBots = pgTable(
     // at the DB layer too. Application-level multi_bot_enabled gate
     // is documented in the plan (§6 bot-create flow).
     tenantModeUq: uniqueIndex("uq_tenant_bots_mode").on(t.tenantId, t.mode),
+    // Partial index matching alembic 0009: speeds up "list all
+    // running bots" queries without indexing the (typically larger)
+    // pile of stopped bots.
+    runningIdx: index("idx_tenant_bots_running")
+      .on(t.isRunning)
+      .where(sql`is_running = true`),
   }),
 );
 

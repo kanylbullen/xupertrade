@@ -72,6 +72,15 @@ describe("tenant_bots table", () => {
     expect(uq).toBeDefined();
     expect(uq?.config.unique).toBe(true);
   });
+
+  it("declares the partial index on running bots", () => {
+    const cfg = getTableConfig(tenantBots);
+    const idx = cfg.indexes.find((i) => i.config.name === "idx_tenant_bots_running");
+    expect(idx).toBeDefined();
+    // The WHERE predicate is stored on the index config; we just
+    // assert it's set (Drizzle stores SQL fragments opaquely).
+    expect(idx?.config.where).toBeDefined();
+  });
 });
 
 describe("tenant_secrets table", () => {
