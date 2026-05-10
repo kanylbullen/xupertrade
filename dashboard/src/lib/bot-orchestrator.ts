@@ -43,6 +43,15 @@ export type BotStartParams = {
    * via `crypto/secrets.ts:decryptSecret` and not logging anything.
    */
   decryptedSecrets: Record<string, string>;
+  /**
+   * System-managed env vars (orchestrator-supplied, not
+   * user-supplied). e.g. `DATABASE_URL` with the tenant's PG role
+   * credentials (Phase 5b). Distinguished from `decryptedSecrets`
+   * so it's clear the user can't override these via the secret CRUD
+   * API. Merged into the env list AFTER decryptedSecrets so system
+   * vars win on collision.
+   */
+  systemEnv?: Record<string, string>;
 };
 
 const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "hypertrade-bot:latest";
@@ -83,14 +92,24 @@ export function requiredSecretsForMode(mode: BotMode): string[] {
  * Build the container spec — pure function, easy to test.
  */
 export function buildSpec(params: BotStartParams): ContainerSpec {
-  const env = [
-    `TENANT_ID=${params.tenantId}`,
-    `BOT_ID=${params.botId}`,
-    `EXCHANGE_MODE=${params.mode}`,
-    ...Object.entries(params.decryptedSecrets).map(
-      ([k, v]) => `${k}=${v}`,
-    ),
-  ];
+  // Build a single key→value map so each env var has exactly one
+  // entry. POSIX allows duplicate `KEY=value` entries in a
+  // process's env array but `getenv()` behaviour is implementation-
+  // defined (PR #46 review fix) — relying on "last wins" was a
+  // portability footgun. Order of overrides:
+  //   1. fixed system identifiers (TENANT_ID, BOT_ID, EXCHANGE_MODE)
+  //   2. decryptedSecrets (user-supplied)
+  //   3. systemEnv (orchestrator-supplied; wins over user)
+  // Steps 2 and 3 collisions: orchestrator wins, so a malicious
+  // user can't override DATABASE_URL via the secret CRUD API.
+  const envMap: Record<string, string> = {
+    TENANT_ID: params.tenantId,
+    BOT_ID: params.botId,
+    EXCHANGE_MODE: params.mode,
+    ...params.decryptedSecrets,
+    ...(params.systemEnv ?? {}),
+  };
+  const env = Object.entries(envMap).map(([k, v]) => `${k}=${v}`);
   return {
     name: containerName(params.tenantId, params.mode),
     image: IMAGE,

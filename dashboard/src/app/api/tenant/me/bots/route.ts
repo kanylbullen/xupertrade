@@ -29,6 +29,11 @@ import {
   startBot,
 } from "@/lib/bot-orchestrator";
 import { requireTenant, requireUnlockedKey } from "@/lib/tenant";
+import {
+  generateRolePassword,
+  provisionRole,
+  tenantDatabaseUrl,
+} from "@/lib/tenant-pg-role";
 
 export const dynamic = "force-dynamic";
 
@@ -150,24 +155,26 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  // Reserve the DB row first so a concurrent POST can't claim the
-  // same (tenant, mode) slot. UNIQUE(tenant_id, mode) enforces it
+  // Reserve the DB row FIRST so a concurrent POST can't claim the
+  // same (tenant, mode) slot — and so a duplicate request doesn't
+  // rotate the shared role password before failing on UNIQUE
+  // (PR #46 review fix). UNIQUE(tenant_id, mode) enforces uniqueness
   // at the DB layer — if we lose the race we map ONLY the postgres
   // unique-violation (23505) to 409. Other errors (connectivity,
   // schema drift) propagate as 500 so we don't mis-attribute them.
   const botId = randomUUID();
-  const spec = buildSpec({
+  const containerNameStub = buildSpec({
     botId,
     tenantId: tenant.id,
     mode: mode as BotMode,
-    decryptedSecrets,
-  });
+    decryptedSecrets: {},
+  }).name;
   try {
     await db.insert(tenantBots).values({
       id: botId,
       tenantId: tenant.id,
       mode,
-      containerName: spec.name,
+      containerName: containerNameStub,
     });
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -179,6 +186,38 @@ export async function POST(req: Request): Promise<Response> {
     throw err;
   }
 
+  // Slot is ours. NOW provision the tenant's Postgres role and
+  // build the connection string. provisionRole is idempotent
+  // (re-runs ALTER ROLE with a fresh password). Bot connects as
+  // this role; alembic 0010's RLS policy filters every query so
+  // cross-tenant rows are invisible at the DB layer.
+  //
+  // v1 caveat (per tenant-pg-role.ts): rotating the password on
+  // every bot-create means concurrent bots of the same tenant share
+  // the role but only the newest container has the right password.
+  // Acceptable for single-bot tenants (closed-beta); multi-bot
+  // password sync gets a proper fix before multi_bot_enabled is
+  // exposed beyond the operator.
+  const tenantPassword = generateRolePassword();
+  let tenantDbUrl: string;
+  try {
+    await provisionRole(tenant.id, tenantPassword);
+    tenantDbUrl = tenantDatabaseUrl(tenant.id, tenantPassword);
+  } catch (err) {
+    // Roll back the row reservation so the next POST can retry.
+    await db
+      .delete(tenantBots)
+      .where(
+        and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+      )
+      .catch(() => undefined);
+    const message = err instanceof Error ? err.message : "unknown error";
+    return Response.json(
+      { error: `failed to provision tenant role: ${message}` },
+      { status: 500 },
+    );
+  }
+
   // Now start the container.
   let started: Awaited<ReturnType<typeof startBot>>;
   try {
@@ -187,6 +226,7 @@ export async function POST(req: Request): Promise<Response> {
       tenantId: tenant.id,
       mode: mode as BotMode,
       decryptedSecrets,
+      systemEnv: { DATABASE_URL: tenantDbUrl },
     });
   } catch (err) {
     // Container failed to start — roll back the DB row so the next

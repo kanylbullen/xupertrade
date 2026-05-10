@@ -129,6 +129,38 @@ describe("buildSpec", () => {
     });
     expect(spec.name).toBe(containerName(TENANT_ID, "paper"));
   });
+
+  it("systemEnv overrides decryptedSecrets on collision (Phase 5b)", () => {
+    // Single env entry per key (no duplicates in the array — POSIX
+    // allows them but getenv() behaviour is impl-defined). systemEnv
+    // wins via Object spread order so a malicious user can't sneak
+    // in their own DATABASE_URL via the secret CRUD API.
+    const spec = buildSpec({
+      tenantId: TENANT_ID,
+      botId: BOT_ID,
+      mode: "paper",
+      decryptedSecrets: { DATABASE_URL: "postgresql://attacker@evil/db" },
+      systemEnv: { DATABASE_URL: "postgresql://tenant_x@postgres/hypertrade" },
+    });
+    const databaseUrlEntries = spec.env.filter((e) =>
+      e.startsWith("DATABASE_URL="),
+    );
+    expect(databaseUrlEntries).toHaveLength(1);
+    expect(databaseUrlEntries[0]).toBe(
+      "DATABASE_URL=postgresql://tenant_x@postgres/hypertrade",
+    );
+  });
+
+  it("systemEnv is omitted from env when not supplied", () => {
+    const spec = buildSpec({
+      tenantId: TENANT_ID,
+      botId: BOT_ID,
+      mode: "paper",
+      decryptedSecrets: { FOO: "bar" },
+    });
+    expect(spec.env).toContain("FOO=bar");
+    expect(spec.env.some((e) => e.startsWith("DATABASE_URL="))).toBe(false);
+  });
 });
 
 describe("startBot delegation", () => {
