@@ -8,8 +8,6 @@
  *   DELETE                          — clear cached K (logout / lock)
  */
 
-import { createHash } from "node:crypto";
-
 import { eq } from "drizzle-orm";
 
 import {
@@ -21,25 +19,12 @@ import {
   verify,
 } from "@/lib/crypto/passphrase";
 import { db, tenants } from "@/lib/db";
-import { SESSION_COOKIE } from "@/lib/auth";
-import { requireTenant } from "@/lib/tenant";
+import {
+  getSessionIdFromRequest,
+  requireTenant,
+} from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
-
-/** Derive a stable session-id from the cookie itself (sha256 of the
- * signed cookie value). Used as the key suffix in Redis so the
- * cookie's signature doesn't have to be persisted server-side.
- * sha256 is one-way + deterministic; same cookie value always maps
- * to the same Redis key, different cookies map to different keys. */
-function sessionIdFromCookie(req: Request): string | null {
-  const cookieHeader = req.headers.get("cookie");
-  if (!cookieHeader) return null;
-  const match = cookieHeader.match(
-    new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`),
-  );
-  if (!match) return null;
-  return createHash("sha256").update(match[1]).digest("hex").slice(0, 32);
-}
 
 export async function POST(req: Request): Promise<Response> {
   let tenant: Awaited<ReturnType<typeof requireTenant>>;
@@ -79,7 +64,7 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json({ error: "wrong passphrase" }, { status: 401 });
   }
 
-  const sessionId = sessionIdFromCookie(req);
+  const sessionId = getSessionIdFromRequest(req);
   if (sessionId === null) {
     // Should never happen — requireTenant already verified the
     // session — but defensive.
@@ -107,7 +92,7 @@ export async function DELETE(req: Request): Promise<Response> {
     throw err;
   }
 
-  const sessionId = sessionIdFromCookie(req);
+  const sessionId = getSessionIdFromRequest(req);
   if (sessionId !== null) {
     await clearKey(tenant.id, sessionId);
   }

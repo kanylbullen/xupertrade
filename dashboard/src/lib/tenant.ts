@@ -7,7 +7,7 @@
  * flow — the Authentik group membership IS the registration.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 
@@ -18,8 +18,26 @@ import {
   getSessionSecret,
   verifySession,
 } from "./auth";
+import { loadKey } from "./crypto/k-cache";
 
 export type Tenant = typeof tenants.$inferSelect;
+
+/**
+ * Stable session-id derived from the signed cookie value: sha256
+ * truncated to 32 hex chars. Same cookie → same id (deterministic);
+ * different cookies → different ids (isolation). The cookie itself is
+ * MAC-verified by `verifySession` upstream, so we never key off
+ * forgeable input.
+ */
+export function getSessionIdFromRequest(req: Request): string | null {
+  const cookieHeader = req.headers.get("cookie");
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(
+    new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`),
+  );
+  if (!match) return null;
+  return createHash("sha256").update(match[1]).digest("hex").slice(0, 32);
+}
 
 /**
  * Read the session cookie from a `Request` and verify it. Returns
@@ -96,4 +114,33 @@ export async function requireTenant(req: Request): Promise<Tenant> {
     });
   }
   return t;
+}
+
+/**
+ * Fetch the tenant's cached K from Redis, or throw a 401 telling the
+ * caller to POST /api/tenant/me/unlock first. Used by secret-CRUD
+ * endpoints (Phase 2d) and bot-start endpoints (Phase 3) — anything
+ * that needs to decrypt or re-encrypt a stored secret.
+ *
+ * Returns the 32-byte K. Caller is responsible for not logging it.
+ */
+export async function requireUnlockedKey(
+  req: Request,
+  tenant: Tenant,
+): Promise<Buffer> {
+  const sessionId = getSessionIdFromRequest(req);
+  if (sessionId === null) {
+    throw new Response(JSON.stringify({ error: "no session" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const k = await loadKey(tenant.id, sessionId);
+  if (k === null) {
+    throw new Response(
+      JSON.stringify({ error: "tenant locked; POST /api/tenant/me/unlock first" }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  }
+  return k;
 }
