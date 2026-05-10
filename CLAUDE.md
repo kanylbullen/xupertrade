@@ -229,8 +229,11 @@ doesn't quietly survive multiple deploys.
 > the first build of any service that hasn't been built recently:**
 >
 > ```bash
-> phase run -- bash -c 'docker compose --profile mainnet build --no-cache bot-mainnet'
+> phase run -- bash -c 'docker compose --profile mainnet build --no-cache --pull bot-mainnet'
 > ```
+>
+> (`--pull` refreshes the base image too — combining both ensures the
+> entire image is rebuilt from current sources.)
 >
 > When in doubt, look at `docker images | grep bot-mainnet` — if the
 > "CREATED" column says days/weeks ago, force a no-cache rebuild
