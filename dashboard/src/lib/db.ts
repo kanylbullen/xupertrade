@@ -1,6 +1,27 @@
-import { pgTable, serial, varchar, doublePrecision, boolean, text, timestamp } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  serial,
+  varchar,
+  doublePrecision,
+  boolean,
+  text,
+  timestamp,
+  uuid,
+  customType,
+  index,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+
+// Postgres BYTEA — Drizzle has no built-in, so we declare a custom
+// type. Reads/writes are Node `Buffer` so callers can pass crypto
+// outputs directly.
+const bytea = customType<{ data: Buffer; default: false }>({
+  dataType() {
+    return "bytea";
+  },
+});
 
 const connectionString = process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/hypertrade";
 const client = postgres(connectionString);
@@ -73,3 +94,115 @@ export const strategyConfigs = pgTable("strategy_configs", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// Multi-tenancy (Phase 1 alembic migration 0009; Phase 2b mirror)
+//
+// Mirrors the four tables added by `bot/alembic/versions/
+// 0009_multi_tenancy_schema.py`. Authoritative schema lives in the
+// Python alembic migration; this is the Drizzle view that the
+// dashboard's API routes use to read/write the rows.
+//
+// Trust model B per docs/plans/multi-tenancy.md:
+// - `tenants.passphrase_salt` + `passphrase_verifier` are Argon2id
+//   outputs used to gate unlock attempts (see crypto/passphrase.ts)
+// - `tenant_secrets.ciphertext + nonce` is AES-256-GCM under K, where
+//   K is derived per-session from the user's passphrase (never
+//   persisted)
+// - The operator (DB-root) cannot decrypt either without the user's
+//   passphrase.
+// ─────────────────────────────────────────────────────────────────────
+
+export const tenants = pgTable(
+  "tenants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    authentikSub: varchar("authentik_sub", { length: 128 }).notNull(),
+    email: varchar("email", { length: 255 }).notNull(),
+    displayName: varchar("display_name", { length: 128 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // 16-byte Argon2id salt; null = passphrase not set yet
+    passphraseSalt: bytea("passphrase_salt"),
+    // 32-byte HMAC-SHA-256 verifier (see crypto/passphrase.ts:makeVerifier)
+    passphraseVerifier: bytea("passphrase_verifier"),
+    isActive: boolean("is_active").notNull().default(true),
+    isOperator: boolean("is_operator").notNull().default(false),
+    multiBotEnabled: boolean("multi_bot_enabled").notNull().default(false),
+    lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  },
+  (t) => ({
+    authentikSubIdx: uniqueIndex("idx_tenants_authentik_sub").on(t.authentikSub),
+  }),
+);
+
+export const tenantBots = pgTable(
+  "tenant_bots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    mode: varchar("mode", { length: 16 }).notNull(),  // paper | testnet | mainnet
+    containerId: varchar("container_id", { length: 64 }),
+    containerName: varchar("container_name", { length: 128 }),
+    isRunning: boolean("is_running").notNull().default(false),
+    // Anti-forge token for the Telegram webhook receiver
+    // (low-sensitivity per multi-tenancy plan §8 — the actual bot
+    // token stays encrypted in tenant_secrets).
+    telegramWebhookSecret: varchar("telegram_webhook_secret", { length: 64 }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+    lastStoppedAt: timestamp("last_stopped_at", { withTimezone: true }),
+  },
+  (t) => ({
+    tenantIdx: index("idx_tenant_bots_tenant").on(t.tenantId),
+    // UNIQUE(tenant_id, mode) — one bot per (tenant, mode); enforced
+    // at the DB layer too. Application-level multi_bot_enabled gate
+    // is documented in the plan (§6 bot-create flow).
+    tenantModeUq: uniqueIndex("uq_tenant_bots_mode").on(t.tenantId, t.mode),
+  }),
+);
+
+export const tenantSecrets = pgTable(
+  "tenant_secrets",
+  {
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    key: varchar("key", { length: 64 }).notNull(),
+    // AES-256-GCM ciphertext WITH the auth tag appended (final 16
+    // bytes of `ciphertext` per crypto/secrets.ts:encryptSecret).
+    ciphertext: bytea("ciphertext").notNull(),
+    // 12-byte GCM nonce (random per encryption).
+    nonce: bytea("nonce").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    // Composite PK = (tenant_id, key); same key for two tenants is fine,
+    // same key twice for one tenant is not.
+    pk: uniqueIndex("tenant_secrets_pkey").on(t.tenantId, t.key),
+  }),
+);
+
+export const tenantAuditLog = pgTable(
+  "tenant_audit_log",
+  {
+    id: serial("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    actor: varchar("actor", { length: 16 }).notNull(),     // 'tenant' | 'operator'
+    action: varchar("action", { length: 64 }).notNull(),   // e.g. 'secret.set', 'bot.start'
+    contextJson: text("context_json").default("{}"),
+    ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    tenantTsIdx: index("idx_tenant_audit_log_tenant_ts").on(t.tenantId, t.ts),
+  }),
+);
