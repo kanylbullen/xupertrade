@@ -32,12 +32,27 @@ class PortfolioManager:
 
     async def _ensure_loaded(self) -> None:
         """Load today's PnL from Redis once per process start, and reset
-        when the UTC date rolls over. Cheap to call every tick."""
+        when the UTC date rolls over. Cheap to call every tick.
+
+        Redis errors here are caught and logged — falling back to the
+        last in-memory value (or 0.0 on cold start) means a Redis blip
+        can't crash the engine tick or the post-trade record path. The
+        worst case is a missed restore for one tick; the next call to
+        `_ensure_loaded` retries.
+        """
         today = _today_str()
         if not self._loaded or today != self._date_str:
             self._date_str = today
             if self.control is not None:
-                self._daily_pnl = await self.control.get_daily_pnl(today)
+                try:
+                    self._daily_pnl = await self.control.get_daily_pnl(today)
+                except Exception:
+                    logger.exception(
+                        "Failed to load daily_pnl from Redis — using in-memory %.2f",
+                        self._daily_pnl,
+                    )
+                    # Don't mark loaded on failure — let the next call retry.
+                    return
                 if self._daily_pnl != 0.0:
                     logger.info(
                         "Restored daily_pnl from Redis: $%.2f for %s",

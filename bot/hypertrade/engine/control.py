@@ -156,9 +156,20 @@ class BotControl:
         if val is None:
             return 0.0
         try:
-            return float(val)
+            parsed = float(val)
         except (TypeError, ValueError):
             return 0.0
+        # Reject non-finite values. `nan < -limit` is False, which would
+        # silently disable the daily-loss kill-switch if the key got
+        # corrupted (e.g. hand-edited or written by a buggy version).
+        import math
+        if not math.isfinite(parsed):
+            logger.warning(
+                "Discarding non-finite daily_pnl value %r for %s",
+                val, date_str,
+            )
+            return 0.0
+        return parsed
 
     async def set_daily_pnl(self, date_str: str, pnl: float) -> None:
         if self._redis is None:

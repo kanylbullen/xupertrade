@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from hypertrade.config import settings
 from hypertrade.engine.portfolio import PortfolioManager
 
 
@@ -39,7 +40,7 @@ async def test_record_pnl_persists_to_control():
 
 
 @pytest.mark.asyncio
-async def test_check_risk_limits_loads_persisted_pnl_on_first_call():
+async def test_check_risk_limits_loads_persisted_pnl_on_first_call(monkeypatch):
     """A restart begins with `_loaded=False`. The first call to
     `check_risk_limits` must pull today's PnL from Redis so a lossy day
     isn't silently forgiven."""
@@ -48,12 +49,8 @@ async def test_check_risk_limits_loads_persisted_pnl_on_first_call():
     control.set_daily_pnl = AsyncMock()
     pm = PortfolioManager(exchange=MagicMock(), control=control)
 
-    # Default cap is $100 in test settings — but the important thing is
-    # that the loaded value is reflected, not zero.
-    from hypertrade.config import settings
-
-    settings.max_daily_loss_usd = 100  # ensure the cap is hit
-    settings.kill_switch = False
+    monkeypatch.setattr(settings, "max_daily_loss_usd", 100)
+    monkeypatch.setattr(settings, "kill_switch", False)
 
     allowed = await pm.check_risk_limits()
     assert allowed is False
@@ -62,7 +59,7 @@ async def test_check_risk_limits_loads_persisted_pnl_on_first_call():
 
 
 @pytest.mark.asyncio
-async def test_simulated_restart_resumes_with_persisted_loss():
+async def test_simulated_restart_resumes_with_persisted_loss(monkeypatch):
     """End-to-end: PortfolioManager A records a loss → reads back what A
     persisted from a freshly-constructed PortfolioManager B with the
     same control. B must see the loss."""
@@ -79,9 +76,8 @@ async def test_simulated_restart_resumes_with_persisted_loss():
     control.get_daily_pnl = AsyncMock(side_effect=_get)
     control.set_daily_pnl = AsyncMock(side_effect=_set)
 
-    from hypertrade.config import settings
-    settings.max_daily_loss_usd = 100
-    settings.kill_switch = False
+    monkeypatch.setattr(settings, "max_daily_loss_usd", 100)
+    monkeypatch.setattr(settings, "kill_switch", False)
 
     pm_before = PortfolioManager(exchange=MagicMock(), control=control)
     await pm_before.record_pnl(-120.0)
@@ -94,14 +90,13 @@ async def test_simulated_restart_resumes_with_persisted_loss():
 
 
 @pytest.mark.asyncio
-async def test_no_control_falls_back_to_in_memory():
+async def test_no_control_falls_back_to_in_memory(monkeypatch):
     """Without BotControl (paper-without-redis, tests) the manager
     silently tracks PnL in-memory. Cap still works within one process."""
     pm = PortfolioManager(exchange=MagicMock(), control=None)
 
-    from hypertrade.config import settings
-    settings.max_daily_loss_usd = 100
-    settings.kill_switch = False
+    monkeypatch.setattr(settings, "max_daily_loss_usd", 100)
+    monkeypatch.setattr(settings, "kill_switch", False)
 
     await pm.record_pnl(-150.0)
     allowed = await pm.check_risk_limits()
@@ -121,3 +116,46 @@ async def test_set_daily_pnl_failure_does_not_raise():
     # Must not raise
     await pm.record_pnl(-25.0)
     assert pm._daily_pnl == pytest.approx(-25.0)
+
+
+@pytest.mark.asyncio
+async def test_botcontrol_get_daily_pnl_rejects_nan():
+    """A stored "nan" / "inf" would silently disable the kill switch
+    (`nan < -limit` evaluates to False). PR #28 Copilot review: reject
+    non-finite values and treat them as 0.0. Tested directly on
+    BotControl since the manager just trusts what it reads."""
+    from hypertrade.engine.control import BotControl
+
+    fake_redis = MagicMock()
+
+    async def _get(key: str) -> str:
+        return "nan"
+
+    fake_redis.get = _get
+    control = BotControl()
+    control._redis = fake_redis
+    val = await control.get_daily_pnl("2026-05-10")
+    assert val == 0.0
+
+
+@pytest.mark.asyncio
+async def test_get_daily_pnl_failure_does_not_raise(monkeypatch):
+    """If Redis read fails on the first risk check (startup blip,
+    reconnect, date rollover), the engine tick must not crash. Reviewed
+    fix: PR #28 Copilot flagged this — _ensure_loaded now catches and
+    falls back to the in-memory value. Trading is allowed (in-memory =
+    0.0 on cold start) until the next call retries the load."""
+    monkeypatch.setattr(settings, "max_daily_loss_usd", 100)
+    monkeypatch.setattr(settings, "kill_switch", False)
+
+    control = MagicMock()
+    control.get_daily_pnl = AsyncMock(side_effect=RuntimeError("redis down"))
+    control.set_daily_pnl = AsyncMock()
+    pm = PortfolioManager(exchange=MagicMock(), control=control)
+
+    # Must not raise
+    allowed = await pm.check_risk_limits()
+    # In-memory is still 0.0 → check_risk_limits returns True (no loss yet)
+    assert allowed is True
+    # _loaded stays False so the next call will retry the Redis read
+    assert pm._loaded is False

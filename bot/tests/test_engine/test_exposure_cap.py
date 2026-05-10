@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from hypertrade.config import settings
 from hypertrade.engine.runner import EngineRunner
 from hypertrade.engine.signals import Signal, SignalAction
 
@@ -28,7 +29,7 @@ def _db_pos(symbol: str, side: str, size: float, entry: float, leverage: int = 1
     return p
 
 
-def _runner(open_positions: list, exchange_filled_price: float = 100.0) -> tuple:
+def _runner(open_positions: list) -> tuple:
     """Build a runner with stubbed deps. Returns (runner, repo)."""
     repo = MagicMock()
     repo.get_open_positions = AsyncMock(return_value=open_positions)
@@ -61,10 +62,8 @@ async def test_count_based_passes_real_dollars_blocks(monkeypatch):
     impl approximated existing margin as 4 × $200 = $800 (wrong both
     directions: counted leverage as if it were 1, and counted the $200
     cap-not-actual)."""
-    from hypertrade.config import settings
-
-    settings.max_total_exposure_usd = 500
-    settings.max_position_size_usd = 200
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 500)
+    monkeypatch.setattr(settings, "max_position_size_usd", 200)
 
     # 4 positions, $1000 notional each at 10x leverage = $100 margin each = $400 total
     open_pos = [
@@ -87,10 +86,8 @@ async def test_count_based_passes_real_dollars_blocks(monkeypatch):
 async def test_signal_size_override_counted_at_real_notional(monkeypatch):
     """vvv_hedge emits Signal(size=400). At VVV ≈ $5 that's $2k notional —
     must be counted as $2k of margin (lev=1), not as MAX_POSITION_SIZE_USD."""
-    from hypertrade.config import settings
-
-    settings.max_total_exposure_usd = 1000
-    settings.max_position_size_usd = 200
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 1000)
+    monkeypatch.setattr(settings, "max_position_size_usd", 200)
 
     runner, _ = _runner(open_positions=[])
 
@@ -109,10 +106,8 @@ async def test_signal_size_override_counted_at_real_notional(monkeypatch):
 async def test_under_cap_allows(monkeypatch):
     """Sanity: a small position well under the cap passes the gate.
     (We stop short of an actual fill — the gate is the unit under test.)"""
-    from hypertrade.config import settings
-
-    settings.max_total_exposure_usd = 5000
-    settings.max_position_size_usd = 200
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 5000)
+    monkeypatch.setattr(settings, "max_position_size_usd", 200)
 
     open_pos = [_db_pos("BTC", "long", 0.01, 50_000.0, leverage=1)]  # $500 margin
     runner, _ = _runner(open_pos)
@@ -147,14 +142,14 @@ async def test_under_cap_allows(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_leverage_divides_new_margin(monkeypatch):
-    """A 10x leverage open uses MAX_POSITION_SIZE_USD of margin
-    (notional = MAX × 10, margin = notional / 10 = MAX). With $400
-    of existing margin and $100 cap on new margin, $400 + $200 = $600
-    must compare against the cap, not $400 + $2000 (the notional)."""
-    from hypertrade.config import settings
-
-    settings.max_total_exposure_usd = 700
-    settings.max_position_size_usd = 200
+    """A 10x leverage open uses MAX_POSITION_SIZE_USD ($200) of margin
+    (notional = $200 × 10 = $2000, margin = $2000 / 10 = $200). With
+    one existing $500 margin position, the projected margin sum is
+    $500 + $200 = $700. Cap is set to $699 to push it over → must block.
+    The point: the gate compares $700 against the cap, not $500 + $2000
+    (the notional) — leverage MUST divide the new-position margin."""
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 699)
+    monkeypatch.setattr(settings, "max_position_size_usd", 200)
 
     open_pos = [_db_pos("BTC", "long", 0.01, 50_000.0, leverage=1)]  # $500 margin
     runner, _ = _runner(open_pos)
@@ -164,8 +159,5 @@ async def test_leverage_divides_new_margin(monkeypatch):
         symbol="ETH",
         strategy_name="ethstrat",
     )
-    # current $500 + new (200×10/10 = 200) = $700 — at cap, not over.
-    # Spec: `> cap` blocks, so $700 == cap should pass. Add 1 to push over.
-    settings.max_total_exposure_usd = 699
     ok = await runner._execute_signal(sig, current_price=2000.0, leverage=10)
-    assert ok is False, "$500 + $200 > $699 cap → must block"
+    assert ok is False, "$500 + $200 (= margin, NOT notional $2000) > $699 cap → block"
