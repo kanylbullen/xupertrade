@@ -642,37 +642,73 @@ destructive backfill — `tenant_id` columns are nullable until phase 5.
 
 ---
 
-## 11. Open questions
+## 11. Open questions — RESOLVED 2026-05-10
 
-1. **Passphrase recovery**: zero (user loses passphrase = secrets gone).
-   Confirmed acceptable per decision B. UX should be very explicit
-   ("YOU CANNOT RECOVER THIS — write it down").
-2. **Operator visibility into tenant bots**: can operator stop a
-   misbehaving tenant's bot (e.g. spam-trading)? **Proposed**: yes,
-   operator role can stop any bot and disable the tenant, but cannot
-   read secrets.
-3. **Resource quotas**: how many tenants per host? **Proposed**: hard
-   cap configurable in env (`MAX_TENANTS=10`), with per-tenant 1 CPU
-   + 512MB defaults. Dashboard refuses bot create when at cap.
-4. **Bot-mode switch / bot deletion**: changing mode = stop existing
-   bot + delete its `tenant_bots` row + create new one (since UNIQUE
-   on `(tenant_id, mode)` ties the slot). Do we let users delete a bot
-   while it has open positions in DB? **Proposed**: no — bot delete
-   requires no open positions. Force user to `/flat` first. (For
-   multi-bot tenants this question rarely comes up since they keep
-   each mode running indefinitely.)
-5. **Audit log**: per-tenant audit trail (who changed which secret
-   when, who started which bot)? **Proposed**: phase 5 deliverable,
-   stored in new `tenant_audit_log` table.
-6. **HL rate limits**: HL has per-IP and per-account rate limits. N
-   tenants on one IP could starve each other. **Proposed**: monitor
-   in phase 8 beta; add per-tenant request bucketing only if it bites.
-7. **Backups**: tenant data is encrypted-at-rest with their passphrase.
-   Backups of postgres are useless without each user's passphrase.
-   Acceptable per decision B; document explicitly.
-8. **GDPR / data deletion**: "delete my account" must wipe all
-   tenant_id rows + the tenants row + the tenant_secrets row. Cascade
-   delete handles it, but logs/backups need policy too.
+All 8 confirmed by operator before PR #35 merge:
+
+1. **Passphrase recovery**: ✅ zero. UX must be very explicit
+   ("YOU CANNOT RECOVER THIS — write it down"). **Phase-2 amendment**:
+   evaluate WebAuthn/passkey or Web3 wallet-signature as alternative
+   "unlock keys" — both could let users unlock without remembering
+   a passphrase, while preserving the property that operator can't
+   decrypt their secrets. See § 11.1 below.
+2. **Operator visibility**: ✅ operator role can stop any bot and
+   disable any tenant; cannot read secrets.
+3. **Resource quotas**: ✅ `MAX_TENANTS=10` initially. Per-bot 1 CPU
+   + 512MB default. Bumpable by operator on a per-tenant basis via
+   admin endpoint.
+4. **Bot-mode switch / bot deletion**: ✅ require no open positions
+   in DB; force user to `/flat` first.
+5. **Audit log**: ✅ Phase 5 deliverable. New `tenant_audit_log` table:
+   tenant_id, actor (tenant or operator), action, target, before,
+   after, ts. Indexed on tenant_id + ts.
+6. **HL rate limits**: ✅ monitor in Phase 8 beta. Add per-tenant
+   request bucketing only if HL starts 429-ing or if one tenant
+   demonstrably starves others.
+7. **Backups**: ✅ accept that postgres backups are useless without
+   each tenant's passphrase. Document explicitly in operator README:
+   "secret backups are the user's responsibility (e.g. write
+   passphrase + recovery export to their own offline store)".
+8. **GDPR / data deletion**: ✅ `DELETE FROM tenants WHERE id=?`
+   cascades to all tenant_id rows + tenant_secrets + tenant_bots.
+   Stop + remove containers first via app code. Logs/backups: rotate
+   weekly + scrub on tenant delete.
+
+### 11.1 Phase 2 design question — alternative unlock modes
+
+The passphrase model is the simplest "user holds the key, operator
+can't read at rest" design, but it puts UX burden on the user
+(remember a strong passphrase forever, no recovery).
+
+Two alternatives worth designing into Phase 2 (not blocking Phase 1):
+
+- **WebAuthn / passkey**: user registers a passkey on their
+  device. Server stores the public key. To unlock, user signs a
+  challenge → server verifies → if valid, derives K from a stable
+  per-credential value (e.g. the passkey's `signCount` + per-tenant
+  pepper isn't enough; we need the credential ID + a deterministic
+  signature scheme like the FIDO PRF extension). PRF is the right
+  primitive: it lets the authenticator deterministically derive a
+  per-relying-party secret without exposing it. Browser support:
+  Chrome ≥ 116, Safari ≥ 17, Firefox ≥ 119. Hardware key support
+  varies (modern FIDO2 keys + platform authenticators support PRF;
+  older devices don't).
+- **Web3 wallet signature**: user signs a fixed challenge string
+  with their EVM wallet (MetaMask / Rabby / etc). The signature
+  is deterministic for a given (challenge, key) pair → use it as
+  the seed for KDF → derive K. No password to forget; the user's
+  wallet is the credential. Friction: requires browser extension /
+  WalletConnect; mobile UX is iffy.
+
+**Recommendation**: build Phase 2 around passphrase as the baseline
+(works everywhere, no client deps). Add WebAuthn-PRF as a SECOND
+unlock method in Phase 2.5 once Phase 2 is shipped — both can coexist
+(user picks at registration which they want; can change later by
+re-encrypting their secrets with the new K). Web3 wallet signing as
+Phase 2.6 if there's demand.
+
+This lets us ship Phase 2 fast on the proven passphrase pattern,
+then offer the better UX as a follow-up that can be feature-flagged.
 
 ---
 
