@@ -131,6 +131,20 @@ services:
       # resolves to the container hostname — breaks OIDC).
       PUBLIC_URL: "${PUBLIC_URL:-${DASHBOARD_URL:-http://localhost:3000}}"
       API_KEY: "${API_KEY:-}"
+      # Multi-tenancy Phase 3a: dashboard creates per-tenant bot
+      # containers via the host docker daemon. The shared network
+      # name lets bots reach postgres + redis on the internal docker
+      # network without exposing extra ports.
+      HYPERTRADE_DOCKER_NETWORK: "${HYPERTRADE_DOCKER_NETWORK:-hypertrade_default}"
+      HYPERTRADE_BOT_IMAGE: "${HYPERTRADE_BOT_IMAGE:-hypertrade-bot:latest}"
+    volumes:
+      # Multi-tenancy Phase 3a: dashboard binds the host's docker
+      # socket so it can create/start/stop per-tenant bot containers
+      # via dockerode. Same blast-radius as the operator already has
+      # on the host (docker socket = root-equivalent), so no new
+      # privilege boundary. Read-only would be ideal but dockerode
+      # needs write for create/start/stop.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
