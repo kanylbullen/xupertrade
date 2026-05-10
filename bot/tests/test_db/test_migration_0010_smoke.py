@@ -106,3 +106,21 @@ def test_role_name_pattern_documented_in_function_body():
     # Reconstruction breaks UUID into 8-4-4-4-12 form
     assert "for 8" in function_sql
     assert "for 12" in function_sql
+
+
+def test_app_tenant_id_function_is_stable_not_immutable():
+    """PR #45 review fix. `current_user` is session-scoped, so the
+    function isn't truly constant — IMMUTABLE would let the planner
+    constant-fold calls across roles using cached plans and BREAK
+    tenant isolation. STABLE is the right marking."""
+    m = _load_migration()
+    captured: list[str] = []
+    with patch("alembic.op.execute") as mock_exec:
+        mock_exec.side_effect = lambda sql: captured.append(str(sql))
+        m.upgrade()
+    function_sql = next(s for s in captured if "app_tenant_id" in s)
+    assert "STABLE" in function_sql, (
+        "app_tenant_id() must be STABLE, not IMMUTABLE — "
+        "current_user is session-scoped"
+    )
+    assert "IMMUTABLE" not in function_sql

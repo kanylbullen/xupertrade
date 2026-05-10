@@ -53,9 +53,12 @@ def upgrade() -> None:
     # casts to UUID. Returns NULL for any role that doesn't match
     # the pattern (operator's postgres role, etc.).
     #
-    # IMMUTABLE: function depends only on `current_user`, not on any
-    # table data. Safe to inline into RLS policies without query plan
-    # bloat. SECURITY DEFINER not needed (no privileged DB lookups).
+    # Marked STABLE (NOT IMMUTABLE — PR #45 review fix). `current_user`
+    # is session-scoped and can change via `SET ROLE`, so the function
+    # is not truly constant. IMMUTABLE would let the planner
+    # constant-fold the call across roles using cached plans, which
+    # would BREAK tenant isolation. STABLE is the right marking:
+    # value is constant within a transaction but can vary across them.
     op.execute(
         """
         CREATE OR REPLACE FUNCTION app_tenant_id() RETURNS UUID AS $$
@@ -78,7 +81,7 @@ def upgrade() -> None:
             -- tenant_id, so the role sees nothing.
             RETURN NULL;
         END;
-        $$ LANGUAGE plpgsql IMMUTABLE;
+        $$ LANGUAGE plpgsql STABLE;
         """
     )
 
