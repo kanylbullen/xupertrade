@@ -43,6 +43,15 @@ export type BotStartParams = {
    * via `crypto/secrets.ts:decryptSecret` and not logging anything.
    */
   decryptedSecrets: Record<string, string>;
+  /**
+   * System-managed env vars (orchestrator-supplied, not
+   * user-supplied). e.g. `DATABASE_URL` with the tenant's PG role
+   * credentials (Phase 5b). Distinguished from `decryptedSecrets`
+   * so it's clear the user can't override these via the secret CRUD
+   * API. Merged into the env list AFTER decryptedSecrets so system
+   * vars win on collision.
+   */
+  systemEnv?: Record<string, string>;
 };
 
 const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "hypertrade-bot:latest";
@@ -90,6 +99,9 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     ...Object.entries(params.decryptedSecrets).map(
       ([k, v]) => `${k}=${v}`,
     ),
+    // systemEnv overrides decryptedSecrets on collision — the user
+    // can't sneak in their own DATABASE_URL via the secret CRUD API.
+    ...Object.entries(params.systemEnv ?? {}).map(([k, v]) => `${k}=${v}`),
   ];
   return {
     name: containerName(params.tenantId, params.mode),

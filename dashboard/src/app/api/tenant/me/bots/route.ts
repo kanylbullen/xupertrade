@@ -29,6 +29,11 @@ import {
   startBot,
 } from "@/lib/bot-orchestrator";
 import { requireTenant, requireUnlockedKey } from "@/lib/tenant";
+import {
+  generateRolePassword,
+  provisionRole,
+  tenantDatabaseUrl,
+} from "@/lib/tenant-pg-role";
 
 export const dynamic = "force-dynamic";
 
@@ -150,6 +155,29 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
+  // Phase 5b: provision the tenant's Postgres role (idempotent —
+  // re-runs ALTER ROLE with a fresh password). Bot connects as this
+  // role; alembic 0010's RLS policy filters every query so cross-
+  // tenant rows are invisible at the DB layer.
+  //
+  // v1 caveat (per tenant-pg-role.ts): rotating the password on
+  // every bot-create means concurrent bots of the same tenant share
+  // the role but only the newest container has the right password.
+  // Acceptable for single-bot tenants (closed-beta); multi-bot
+  // password sync gets a proper fix before multi_bot_enabled is
+  // exposed beyond the operator.
+  const tenantPassword = generateRolePassword();
+  try {
+    await provisionRole(tenant.id, tenantPassword);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown error";
+    return Response.json(
+      { error: `failed to provision tenant role: ${message}` },
+      { status: 500 },
+    );
+  }
+  const tenantDbUrl = tenantDatabaseUrl(tenant.id, tenantPassword);
+
   // Reserve the DB row first so a concurrent POST can't claim the
   // same (tenant, mode) slot. UNIQUE(tenant_id, mode) enforces it
   // at the DB layer — if we lose the race we map ONLY the postgres
@@ -161,6 +189,7 @@ export async function POST(req: Request): Promise<Response> {
     tenantId: tenant.id,
     mode: mode as BotMode,
     decryptedSecrets,
+    systemEnv: { DATABASE_URL: tenantDbUrl },
   });
   try {
     await db.insert(tenantBots).values({
@@ -187,6 +216,7 @@ export async function POST(req: Request): Promise<Response> {
       tenantId: tenant.id,
       mode: mode as BotMode,
       decryptedSecrets,
+      systemEnv: { DATABASE_URL: tenantDbUrl },
     });
   } catch (err) {
     // Container failed to start — roll back the DB row so the next

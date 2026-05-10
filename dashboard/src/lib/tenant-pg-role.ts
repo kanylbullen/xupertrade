@@ -1,0 +1,161 @@
+/**
+ * Per-tenant Postgres role helpers — multi-tenancy Phase 5b.
+ *
+ * Each tenant gets a Postgres role named `tenant_<32hex>` matching
+ * the contract that alembic 0010's `app_tenant_id()` function decodes.
+ * The bot container connects as that role; RLS policies (Phase 5a)
+ * filter every query so the tenant can only see/write its own rows.
+ *
+ * v1 caveat: a fresh role password is generated on every bot-create,
+ * overwriting any previous one. If a tenant ever has multiple bots
+ * running concurrently (only operator does today via
+ * multi_bot_enabled), the older bot's connection breaks on its next
+ * reconnect. Acceptable for the closed-beta single-bot pattern;
+ * multi-bot password sync gets a proper fix before
+ * multi_bot_enabled is exposed to non-operator tenants.
+ */
+
+import { randomBytes } from "node:crypto";
+
+import { sql } from "drizzle-orm";
+
+import { db } from "./db";
+
+/**
+ * Role name for a given tenant UUID. Strips dashes + lowercases.
+ *   3a2f1e4c-aaaa-bbbb-cccc-dddd11112222 → tenant_3a2f1e4caaaabbbbccccdddd11112222
+ *
+ * Postgres role names are case-folded by default but UUIDs are
+ * already lowercase hex; explicit `.toLowerCase()` for safety.
+ */
+export function roleNameForTenant(tenantId: string): string {
+  const hex = tenantId.replace(/-/g, "").toLowerCase();
+  if (hex.length !== 32) {
+    throw new RangeError(
+      `tenantId must be a 32-hex UUID (got ${hex.length} chars)`,
+    );
+  }
+  return `tenant_${hex}`;
+}
+
+/**
+ * 32-byte URL-safe base64 password, ≈42 chars. Plenty of entropy for
+ * a service-account credential that lives in container env vars and
+ * is rotated on every bot-restart.
+ */
+export function generateRolePassword(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+/**
+ * Tables a tenant role needs read+write access to. Mirrors alembic
+ * 0009's `_TABLES_NEEDING_TENANT_ID` minus the dashboard-only tables
+ * (tenants, tenant_bots, tenant_secrets, tenant_audit_log) which the
+ * tenant must NEVER touch directly.
+ */
+const TENANT_DATA_TABLES = [
+  "trades",
+  "positions",
+  "equity_snapshots",
+  "funding_payments",
+  "backtest_runs",
+  "strategy_configs",
+  "manual_onchain_levels",
+  "hodl_purchases",
+  "user_vault_entries",
+];
+
+/**
+ * Idempotent: creates the role if missing, otherwise rotates its
+ * password. Grants schema USAGE + DML on the data tables + USAGE on
+ * sequences (for autoincrement IDs). Safe to call on every bot-create.
+ *
+ * Postgres identifiers can't be parameterised, so the role-name and
+ * password are interpolated as string literals. They're caller-
+ * controlled (we generate the password ourselves) but we still
+ * defensive-validate the role-name shape and quote the password
+ * literal explicitly.
+ */
+export async function provisionRole(
+  tenantId: string,
+  password: string,
+): Promise<string> {
+  const roleName = roleNameForTenant(tenantId);
+  // Defense: roleName must match the strict pattern even though we
+  // built it ourselves above. Catches any future hand-edit that
+  // weakens the regex.
+  if (!/^tenant_[a-f0-9]{32}$/.test(roleName)) {
+    throw new Error(`invalid role name: ${roleName}`);
+  }
+  // Postgres password literal: single-quote-escape any quote in the
+  // password. Since we generate base64url ourselves there shouldn't
+  // be any, but defense-in-depth.
+  const pwLiteral = password.replace(/'/g, "''");
+  const tablesList = TENANT_DATA_TABLES.join(", ");
+
+  // CREATE-OR-ALTER pattern: try CREATE; on duplicate, ALTER WITH
+  // PASSWORD. Postgres has no IF NOT EXISTS for CREATE ROLE.
+  await db.execute(sql.raw(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN
+        CREATE ROLE ${roleName} LOGIN PASSWORD '${pwLiteral}';
+      ELSE
+        ALTER ROLE ${roleName} WITH PASSWORD '${pwLiteral}';
+      END IF;
+    END $$;
+  `));
+  // Grants are idempotent — re-running them is safe.
+  await db.execute(sql.raw(`GRANT USAGE ON SCHEMA public TO ${roleName};`));
+  await db.execute(sql.raw(
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ${tablesList} TO ${roleName};`,
+  ));
+  await db.execute(sql.raw(
+    `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${roleName};`,
+  ));
+  return roleName;
+}
+
+/**
+ * DROP a tenant's role (used at tenant-delete time, never at
+ * bot-stop). Idempotent. Drops privileges first so the DROP itself
+ * succeeds without "role still has assigned privileges" errors.
+ */
+export async function dropRole(tenantId: string): Promise<void> {
+  const roleName = roleNameForTenant(tenantId);
+  if (!/^tenant_[a-f0-9]{32}$/.test(roleName)) {
+    throw new Error(`invalid role name: ${roleName}`);
+  }
+  await db.execute(sql.raw(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${roleName}') THEN
+        REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${roleName};
+        REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ${roleName};
+        REVOKE USAGE ON SCHEMA public FROM ${roleName};
+        DROP ROLE ${roleName};
+      END IF;
+    END $$;
+  `));
+}
+
+/**
+ * Build the DATABASE_URL the tenant bot uses. Always points at the
+ * same Postgres host as the dashboard (internal docker network),
+ * just with the tenant's role + freshly-generated password.
+ */
+export function tenantDatabaseUrl(
+  tenantId: string,
+  password: string,
+): string {
+  const role = roleNameForTenant(tenantId);
+  // Pull host/db parts from the dashboard's existing DATABASE_URL —
+  // single source of truth for which Postgres we're talking to.
+  const baseUrl =
+    process.env.DATABASE_URL ??
+    "postgresql://postgres:postgres@postgres:5432/hypertrade";
+  const parsed = new URL(baseUrl);
+  // postgres+asyncpg style URLs (used by the Python bot via SQLAlchemy)
+  // need their scheme adjusted; keep the postgresql scheme for libpq-
+  // compatible drivers and let the bot's pydantic-settings normalise.
+  const scheme = parsed.protocol.replace(/:$/, "");
+  return `${scheme}://${role}:${encodeURIComponent(password)}@${parsed.host}${parsed.pathname}`;
+}
