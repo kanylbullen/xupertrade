@@ -162,10 +162,22 @@ class TelegramNotifier:
         self._redis = redis.from_url(self._redis_url, decode_responses=True)
         self._session = aiohttp.ClientSession()
         # Push the slash-command list to Telegram so the in-chat "Menu"
-        # button + autocomplete shows our commands. Fire-and-forget;
-        # failures are logged but don't block startup (Telegram menu
-        # is a UX nicety, not load-bearing).
-        await self._publish_command_menu()
+        # button + autocomplete shows our commands. Truly fire-and-forget
+        # via create_task so a slow Telegram doesn't add even 5s to the
+        # bot's cold-start path (PR #25 review fix). The function already
+        # swallows + logs its own failures.
+        menu_task = asyncio.create_task(self._publish_command_menu())
+
+        def _menu_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "Telegram menu publish task died: %s",
+                    exc, exc_info=(type(exc), exc, exc.__traceback__),
+                )
+        menu_task.add_done_callback(_menu_done)
         self._event_task = asyncio.create_task(self._event_loop())
         if self._repo is not None:
             self._daily_task = asyncio.create_task(self._daily_loop())

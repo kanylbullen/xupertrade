@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import logging
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -92,8 +93,10 @@ async def test_publish_menu_swallows_network_error():
 
 
 @pytest.mark.asyncio
-async def test_publish_menu_logs_warning_on_non_200():
-    """Non-200 responses log a warning but don't raise."""
+async def test_publish_menu_logs_warning_on_non_200(caplog):
+    """Non-200 responses log a warning AND don't raise. Verifies both
+    via caplog assertion (PR #25 review fix — was only checking
+    no-raise, name implied warning verification too)."""
     class _FakeResp:
         status = 401
         async def __aenter__(self): return self
@@ -103,5 +106,9 @@ async def test_publish_menu_logs_warning_on_non_200():
     session = MagicMock()
     session.post = lambda url, **kw: _FakeResp()
     notif = _notifier_with_session(session)
-    # Must not raise
-    await notif._publish_command_menu()
+    with caplog.at_level(logging.WARNING, logger="hypertrade.notify.telegram"):
+        await notif._publish_command_menu()  # must not raise
+    assert any(
+        "setMyCommands HTTP 401" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
+    ), f"expected warning log on 401; got: {[r.message for r in caplog.records]}"
