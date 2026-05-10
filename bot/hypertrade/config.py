@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     kill_switch: bool = False
     taker_fee_rate: float = 0.00045
 
+    # `signal.size`-override safety ceiling (audit H8). Strategies that
+    # emit `Signal(size=N)` (e.g. vvv_hedge) bypass _calculate_size so
+    # MAX_POSITION_SIZE_USD doesn't bind. The bot rejects opens whose
+    # `size × current_price` exceeds this multiplier × MAX_POSITION_SIZE_USD.
+    # Default 10× = a $200 cap allows up to $2k notional on a sized signal,
+    # which covers vvv_hedge's design (400 VVV × $5 = $2k) without
+    # accommodating an accidental 10× param bump.
+    signal_size_max_multiplier: float = 10.0
+
     # Mainnet allowlist (audit C3). Comma-separated list of strategy names
     # that are allowed to trade on mainnet. EMPTY = no strategies trade —
     # explicit fail-closed on first mainnet deploy. Operator must add the

@@ -77,8 +77,23 @@ class PortfolioManager:
         if not is_open:
             return True
 
-        # Check kill switch (OPEN only — see docstring)
-        if settings.kill_switch:
+        # Check kill switch (OPEN only — see docstring). Audit H7: prefer
+        # the Redis-backed runtime override; fall back to env default.
+        # When override unset, env wins. When env=true and Redis=false,
+        # Redis wins (operator can deactivate at runtime). When env=false
+        # and Redis=true, Redis wins (operator can activate at runtime).
+        kill_active = settings.kill_switch
+        if self.control is not None:
+            try:
+                redis_state = await self.control.is_kill_switch_active()
+                if redis_state is not None:
+                    kill_active = redis_state
+            except Exception:
+                logger.exception(
+                    "Failed to read kill-switch from Redis — using env default %s",
+                    kill_active,
+                )
+        if kill_active:
             logger.warning("Kill switch active — new opens disabled")
             return False
 

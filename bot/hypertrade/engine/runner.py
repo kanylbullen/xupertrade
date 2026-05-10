@@ -817,6 +817,51 @@ class EngineRunner:
 
         size = signal.size or self._calculate_size(current_price, leverage)
 
+        # Audit H8 (2026-05-10): hard ceiling on `signal.size` overrides.
+        # Strategies that emit `Signal(size=400)` (vvv_hedge) bypass
+        # `_calculate_size` entirely → MAX_POSITION_SIZE_USD doesn't bind.
+        # An accidental param bump (holding_vvv 400 → 4000) silently
+        # produces a 10× position with the same hard SL. Cap at
+        # `signal_size_max_multiplier × MAX_POSITION_SIZE_USD` of notional.
+        if (
+            signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
+            and signal.size
+        ):
+            max_notional = (
+                settings.signal_size_max_multiplier
+                * settings.max_position_size_usd
+            )
+            requested_notional = float(size) * float(current_price)
+            if requested_notional > max_notional:
+                logger.warning(
+                    "[%s] Skipping %s %s — Signal(size=%s) notional "
+                    "$%.0f exceeds the %.0fx safety ceiling $%.0f "
+                    "(SIGNAL_SIZE_MAX_MULTIPLIER × MAX_POSITION_SIZE_USD)",
+                    signal.strategy_name,
+                    signal.action.value,
+                    signal.symbol,
+                    signal.size,
+                    requested_notional,
+                    settings.signal_size_max_multiplier,
+                    max_notional,
+                )
+                if self.event_bus:
+                    try:
+                        await self.event_bus.publish(
+                            ErrorOccurred(
+                                strategy=signal.strategy_name,
+                                message=(
+                                    f"Refused {signal.action.value} {signal.symbol}: "
+                                    f"signal.size notional ${requested_notional:,.0f} "
+                                    f"exceeds {settings.signal_size_max_multiplier}× cap "
+                                    f"${max_notional:,.0f}"
+                                ),
+                            )
+                        )
+                    except Exception:
+                        logger.exception("H8 cap: event publish failed")
+                return False
+
         if signal.action == SignalAction.OPEN_LONG:
             order = await self.exchange.place_order(
                 signal.symbol, "buy", size, OrderType.MARKET
@@ -1039,11 +1084,25 @@ class EngineRunner:
                 break
 
         diff = abs(db_net - ex_net)
-        # Tolerance = 10× the exchange's minimum step. `Exchange` base
-        # defines `get_size_precision` with default 4dp, so the call
-        # is safe for any concrete exchange. (Audit M4.)
+        # Tolerance combines two bounds (audit H4, 2026-05-10):
+        #   step_bound  = 10× exchange minimum step (catches HL rounding)
+        #   ratio_bound = 0.5% of expected size (catches partial-fill drift
+        #                 on small positions, where the szDecimals bound
+        #                 alone is way too loose: SOL szDecimals=2 →
+        #                 0.1 SOL ≈ $15 of drift slips through; on a $200
+        #                 position that's a 7.5% silent error)
+        # We take the MIN so the looser bound never wins. The expected
+        # size is `max(|db_net|, |ex_net|)` — using both means a partial
+        # close that left exchange at 0 still gets a meaningful bound
+        # against the DB's recorded size.
         sz_decimals = self.exchange.get_size_precision(symbol)
-        tolerance = 10 * (10 ** -sz_decimals)
+        step_bound = 10 * (10 ** -sz_decimals)
+        expected_size = max(abs(db_net), abs(ex_net))
+        ratio_bound = 0.005 * expected_size  # 0.5%
+        # If both sides are zero, only step_bound applies.
+        tolerance = (
+            min(step_bound, ratio_bound) if expected_size > 0 else step_bound
+        )
         if diff <= tolerance:
             return True
 

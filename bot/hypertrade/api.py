@@ -390,6 +390,39 @@ def _control_routes(
         await control.request_flat_all(token)
         return _cors({"flat_request_id": token})
 
+    async def kill_switch_set(request: web.Request) -> web.Response:
+        """POST /api/control/kill-switch — audit H7. Body:
+        `{"active": true}` activates, `{"active": false}` deactivates,
+        `{"clear": true}` removes the override (env default takes back over).
+        Always API_KEY-gated since this directly disables/enables trading.
+        """
+        if (err := _require_auth(request)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if body.get("clear"):
+            await control.clear_kill_switch_override()
+            redis_state = await control.is_kill_switch_active()
+            return _cors({"override_cleared": True, "redis_state": redis_state})
+        active = bool(body.get("active", False))
+        await control.set_kill_switch(active)
+        return _cors({"kill_switch": active})
+
+    async def kill_switch_get(request: web.Request) -> web.Response:
+        """GET /api/control/kill-switch — returns the effective state.
+        Public (no API_KEY) — read-only and useful for the dashboard
+        status badge."""
+        from hypertrade.config import settings as _s
+        redis_state = await control.is_kill_switch_active()
+        effective = redis_state if redis_state is not None else _s.kill_switch
+        return _cors({
+            "effective": effective,
+            "env_default": _s.kill_switch,
+            "redis_override": redis_state,
+        })
+
     async def toggle_strategy(request: web.Request) -> web.Response:
         if (err := _require_auth(request)) is not None:
             return err
@@ -768,6 +801,8 @@ def _control_routes(
     app.router.add_post("/api/control/pause", pause)
     app.router.add_post("/api/control/resume", resume)
     app.router.add_post("/api/control/flat-all", flat_all)
+    app.router.add_get("/api/control/kill-switch", kill_switch_get)
+    app.router.add_post("/api/control/kill-switch", kill_switch_set)
     app.router.add_post("/api/control/strategy/{name}/toggle", toggle_strategy)
     app.router.add_post("/api/control/strategy/{name}/leverage", set_leverage)
     app.router.add_post("/api/control/strategy/{name}/leverage/reset", reset_leverage)
