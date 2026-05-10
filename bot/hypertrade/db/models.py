@@ -1,5 +1,6 @@
 """SQLAlchemy models for trade history and strategy state."""
 
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -8,11 +9,13 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Boolean,
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import Uuid
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -20,10 +23,166 @@ class Base(DeclarativeBase):
     pass
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Multi-tenancy (audit-tracking PR #35 plan, Phase 1)
+#
+# Tables added Phase 1; tenant_id columns added to existing tables but
+# kept NULLABLE for backwards compat. Phase 6 (operator cutover)
+# backfills operator as tenant 1 and converts to NOT NULL.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class Tenant(Base):
+    """One row per authenticated user. The operator is tenant 1, with
+    `is_operator=true` and `multi_bot_enabled=true`. All other users
+    default to single-bot mode (one mode per tenant).
+
+    Secrets at rest are encrypted with a key derived from the user's
+    passphrase via Argon2id; this row stores only the salt + verifier.
+    The derived key K is never persisted.
+    """
+
+    __tablename__ = "tenants"
+
+    id = Column(
+        Uuid(), primary_key=True, default=uuid.uuid4
+    )
+    authentik_sub = Column(String(128), unique=True, nullable=False, index=True)
+    email = Column(String(255), nullable=False)
+    display_name = Column(String(128), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    # Argon2id outputs — set after the user picks their passphrase.
+    # Both NULL = no passphrase set yet (user must complete onboarding).
+    passphrase_salt = Column(LargeBinary(16), nullable=True)
+    passphrase_verifier = Column(LargeBinary(32), nullable=True)
+    # is_active: false = login disabled (operator-disabled or self-deactivated)
+    is_active = Column(Boolean, default=True, nullable=False)
+    # is_operator: true grants admin endpoints (stop-any-bot, list-tenants);
+    # operator role bypasses tenant RLS but still cannot decrypt secrets
+    is_operator = Column(Boolean, default=False, nullable=False)
+    # multi_bot_enabled: true allows up to 3 bots (one per mode); false
+    # gates bot-create at the application layer to max 1
+    multi_bot_enabled = Column(Boolean, default=False, nullable=False)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class TenantBot(Base):
+    """A single bot belonging to a tenant. Up to 3 per tenant (one per
+    mode), enforced by UNIQUE (tenant_id, mode). Single-bot tenants
+    have at most 1 row; multi-bot tenants (operator) can have all 3.
+
+    container_id/container_name are written when the dashboard's bot
+    lifecycle endpoint starts a docker container; cleared on stop.
+    """
+
+    __tablename__ = "tenant_bots"
+
+    id = Column(
+        Uuid(), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    mode = Column(String(16), nullable=False)  # paper | testnet | mainnet
+    container_id = Column(String(64), nullable=True)
+    container_name = Column(String(128), nullable=True)
+    is_running = Column(Boolean, default=False, nullable=False, index=True)
+    # Telegram webhook anti-forge token (low-sensitivity per PR #35 §8;
+    # plaintext OK so dashboard can validate webhooks without unlock).
+    # The actual bot token (which can impersonate) lives encrypted in
+    # `tenant_secrets`.
+    telegram_webhook_secret = Column(String(64), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    last_started_at = Column(DateTime(timezone=True), nullable=True)
+    last_stopped_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "mode", name="uq_tenant_bots_mode"),
+    )
+
+
+class TenantSecret(Base):
+    """One encrypted secret per (tenant, key). AES-GCM ciphertext +
+    nonce; no plaintext is ever stored. Key is derived per-session from
+    the tenant's passphrase via Argon2id (see tenants.passphrase_salt).
+
+    `key` examples: HYPERLIQUID_PRIVATE_KEY, HYPERLIQUID_ACCOUNT_ADDRESS,
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, etc.
+    """
+
+    __tablename__ = "tenant_secrets"
+
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    key = Column(String(64), primary_key=True)
+    ciphertext = Column(LargeBinary, nullable=False)
+    nonce = Column(LargeBinary(12), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class TenantAuditLog(Base):
+    """Per-tenant audit trail (PR #35 §11.5). Phase 5 starts writing
+    to this table; created in Phase 1 so Phase 5 doesn't need another
+    migration. Append-only. Indexed on (tenant_id, ts) for the common
+    "show me my recent activity" query.
+    """
+
+    __tablename__ = "tenant_audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Who took the action: 'tenant' (the user themselves) or 'operator'
+    actor = Column(String(16), nullable=False)
+    # What happened: e.g. 'secret.set', 'bot.start', 'passphrase.changed',
+    # 'tenant.disabled' (operator action)
+    action = Column(String(64), nullable=False)
+    # Free-form context: which secret key was set, which bot id was
+    # started, etc. Plaintext but never the secret values themselves.
+    context_json = Column(Text, default="{}")
+    ts = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+        index=True,
+    )
+
+
 class Trade(Base):
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    # Multi-tenancy: nullable in Phase 1 for backwards compat; backfilled
+    # to operator's tenant in Phase 6, made NOT NULL after that.
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     order_id = Column(String(64), unique=True, nullable=False)
     strategy_name = Column(String(64), nullable=False, index=True)
     symbol = Column(String(16), nullable=False, index=True)
@@ -46,6 +205,12 @@ class PositionRecord(Base):
     __tablename__ = "positions"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     strategy_name = Column(String(64), nullable=False, index=True)
     symbol = Column(String(16), nullable=False, index=True)
     side = Column(String(8), nullable=False)  # long/short
@@ -71,6 +236,12 @@ class EquitySnapshot(Base):
     __tablename__ = "equity_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     total_equity = Column(Float, nullable=False)
     available_balance = Column(Float, nullable=False)
     unrealized_pnl = Column(Float, default=0.0)
@@ -96,6 +267,12 @@ class FundingPayment(Base):
     __tablename__ = "funding_payments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     # HL's funding event time (epoch ms → DateTime)
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
     # HL hash for idempotency. user_funding_history can return overlapping
@@ -119,6 +296,12 @@ class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     strategy_name = Column(String(64), nullable=False, index=True)
     symbol = Column(String(16), nullable=False)
     timeframe = Column(String(8), nullable=False)
@@ -159,6 +342,12 @@ class ManualOnchainLevel(Base):
     __tablename__ = "manual_onchain_levels"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     recorded_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -184,6 +373,12 @@ class HodlPurchase(Base):
     __tablename__ = "hodl_purchases"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     purchased_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -278,6 +473,12 @@ class UserVaultEntry(Base):
 
     __tablename__ = "user_vault_entries"
 
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     user_address = Column(String(42), primary_key=True)
     vault_address = Column(
         String(42),
@@ -335,6 +536,16 @@ class StrategyConfig(Base):
     __tablename__ = "strategy_configs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    # Multi-tenant: name is unique PER TENANT, not globally. Phase 6
+    # cutover replaces this UNIQUE with a composite once all rows have
+    # tenant_id. For now we keep the column-level UNIQUE so Phase 1
+    # is purely additive and doesn't break the operator's deploy.
     name = Column(String(64), unique=True, nullable=False)
     symbol = Column(String(16), nullable=False)
     timeframe = Column(String(8), nullable=False)
