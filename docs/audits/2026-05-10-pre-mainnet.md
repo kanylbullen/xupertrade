@@ -42,7 +42,7 @@ non-binding.
 ### C2 — Daily-loss kill-switch is in-memory only; resets to 0 on every restart
 
 - **File:** `bot/hypertrade/engine/portfolio.py:15,33,44`
-- **Description:** `PortfolioManager._daily_pnl` is a Python int
+- **Description:** `PortfolioManager._daily_pnl` is a Python float
   initialized to 0.0. Not persisted. After a $400 loss, a
   `docker compose restart bot-mainnet` (e.g. for any reason —
   health-check restart, deploy, OOM kill) zeroes the counter and
