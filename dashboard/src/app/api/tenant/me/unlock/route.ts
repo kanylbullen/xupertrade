@@ -45,8 +45,12 @@ export async function POST(req: Request): Promise<Response> {
   let tenant: Awaited<ReturnType<typeof requireTenant>>;
   try {
     tenant = await requireTenant(req);
-  } catch (resp) {
-    return resp as Response;
+  } catch (err) {
+    // requireTenant throws Response for the auth-fail case (401). Only
+    // intercept those; let real errors (DB/Redis/network) propagate so
+    // Next reports them properly instead of returning an Error-as-Response.
+    if (err instanceof Response) return err;
+    throw err;
   }
 
   if (tenant.passphraseSalt === null || tenant.passphraseVerifier === null) {
@@ -95,8 +99,12 @@ export async function DELETE(req: Request): Promise<Response> {
   let tenant: Awaited<ReturnType<typeof requireTenant>>;
   try {
     tenant = await requireTenant(req);
-  } catch (resp) {
-    return resp as Response;
+  } catch (err) {
+    // requireTenant throws Response for the auth-fail case (401). Only
+    // intercept those; let real errors (DB/Redis/network) propagate so
+    // Next reports them properly instead of returning an Error-as-Response.
+    if (err instanceof Response) return err;
+    throw err;
   }
 
   const sessionId = sessionIdFromCookie(req);

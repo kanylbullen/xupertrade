@@ -5,9 +5,6 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-// `ioredis-mock` ships ESM with no published types. It's a test-only
-// dependency; safe to skip the lint here.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 import RedisMock from "ioredis-mock";
 import type { Redis } from "ioredis";
 

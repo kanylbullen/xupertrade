@@ -76,9 +76,14 @@ export async function loadKey(
     return null;
   }
   if (buf.length !== KEY_BYTES) {
+    // Don't log the session-id half of the key — it's a stable
+    // session correlate that could leak into centralised logs. Tenant
+    // id alone is plenty for diagnosis. Also DEL the malformed entry
+    // so the warning doesn't repeat for every subsequent request.
     console.warn(
-      `[k-cache] discarding malformed K for ${redisKey(tenantId, sessionId)} (length ${buf.length})`,
+      `[k-cache] discarding malformed K for tenant=${tenantId} (length ${buf.length})`,
     );
+    await client.del(redisKey(tenantId, sessionId));
     return null;
   }
   return buf;

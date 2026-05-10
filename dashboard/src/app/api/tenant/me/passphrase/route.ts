@@ -31,8 +31,12 @@ export async function POST(req: Request): Promise<Response> {
   let tenant: Awaited<ReturnType<typeof requireTenant>>;
   try {
     tenant = await requireTenant(req);
-  } catch (resp) {
-    return resp as Response;
+  } catch (err) {
+    // requireTenant throws Response for the auth-fail case (401). Only
+    // intercept those; let real errors (DB/Redis/network) propagate so
+    // Next reports them properly instead of returning an Error-as-Response.
+    if (err instanceof Response) return err;
+    throw err;
   }
 
   let body: unknown;
@@ -58,8 +62,19 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
+  // Inconsistent state guard: salt + verifier are set as a pair. If
+  // exactly one is null, something went wrong on a prior set (mid-write
+  // crash?) and this tenant is unusable until repaired.
+  const saltSet = tenant.passphraseSalt !== null;
+  const verifierSet = tenant.passphraseVerifier !== null;
+  if (saltSet !== verifierSet) {
+    return Response.json(
+      { error: "tenant passphrase state is inconsistent; contact operator" },
+      { status: 500 },
+    );
+  }
   // v1: refuse if a passphrase already exists. Change-flow comes later.
-  if (tenant.passphraseVerifier !== null) {
+  if (verifierSet) {
     return Response.json(
       {
         error:

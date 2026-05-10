@@ -58,7 +58,12 @@ export async function getCurrentTenant(req: Request): Promise<Tenant | null> {
   // First time we see this sub — create a tenant. Email defaults to
   // the sub itself (Authentik's sub is typically email-shaped already);
   // a richer profile sync can update it later.
-  const inserted = await db
+  //
+  // Concurrency: two parallel requests for a brand-new sub can both
+  // miss the SELECT, then collide on the unique index when both try
+  // INSERT. `onConflictDoNothing` makes the second one a silent no-op;
+  // the re-SELECT below picks up whichever row won the race.
+  await db
     .insert(tenants)
     .values({
       id: randomUUID(),
@@ -66,8 +71,19 @@ export async function getCurrentTenant(req: Request): Promise<Tenant | null> {
       email: session.sub,
       displayName: session.sub,
     })
-    .returning();
-  return inserted[0];
+    .onConflictDoNothing({ target: tenants.authentikSub });
+
+  const created = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.authentikSub, session.sub))
+    .limit(1);
+  if (created.length === 0) {
+    // Should be impossible — we just inserted (or another request did).
+    // If we get here, something is very wrong with the DB.
+    throw new Error("tenant insert succeeded but row not found");
+  }
+  return created[0];
 }
 
 /** Return tenant or throw a Response (401) — convenience for API routes. */
