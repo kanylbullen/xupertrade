@@ -200,7 +200,7 @@ as a placeholder if a doc example needs to refer to it.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && \
    git fetch origin && git reset --hard origin/master && \
-   phase run -- bash -c 'docker compose build && docker compose up -d'"
+   phase run -- bash -c 'docker compose build --pull && docker compose up -d'"
 ```
 
 For mainnet (opt-in via `--profile mainnet`):
@@ -209,12 +209,35 @@ For mainnet (opt-in via `--profile mainnet`):
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && \
    git fetch origin && git reset --hard origin/master && \
-   phase run -- bash -c 'docker compose --profile mainnet build && \
+   phase run -- bash -c 'docker compose --profile mainnet build --pull && \
                           docker compose --profile mainnet up -d'"
 ```
 
+`--pull` forces docker to refetch the base image so a stale base layer
+doesn't quietly survive multiple deploys.
+
+> ⚠️ **Cache trap on first build of a profile-gated service.**
+> If a service has never been built before (e.g. bot-mainnet on a
+> testnet-only host), an old image with the same `name:tag` from a
+> long-stopped previous build can silently win the layer cache, and a
+> plain `docker compose build bot-mainnet` does NOT invalidate it —
+> the build "succeeds" in seconds with zero COPY-step output but the
+> resulting image is days/weeks old and missing your latest code.
+> This bit us on the first mainnet boot 2026-05-10: the image lacked
+> the audit-C3 allowlist and all 21 strategies traded on real money
+> for one tick before pause caught it. **Always force `--no-cache` on
+> the first build of any service that hasn't been built recently:**
+>
+> ```bash
+> phase run -- bash -c 'docker compose --profile mainnet build --no-cache bot-mainnet'
+> ```
+>
+> When in doubt, look at `docker images | grep bot-mainnet` — if the
+> "CREATED" column says days/weeks ago, force a no-cache rebuild
+> before starting the container.
+
 Build only what changed for speed (e.g.
-`phase run -- bash -c 'docker compose build bot-testnet bot-paper dashboard'`).
+`phase run -- bash -c 'docker compose build --pull bot-testnet bot-paper dashboard'`).
 
 ### Standard "is the bot OK?" check
 
