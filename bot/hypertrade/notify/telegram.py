@@ -161,6 +161,23 @@ class TelegramNotifier:
             return
         self._redis = redis.from_url(self._redis_url, decode_responses=True)
         self._session = aiohttp.ClientSession()
+        # Push the slash-command list to Telegram so the in-chat "Menu"
+        # button + autocomplete shows our commands. Truly fire-and-forget
+        # via create_task so a slow Telegram doesn't add even 5s to the
+        # bot's cold-start path (PR #25 review fix). The function already
+        # swallows + logs its own failures.
+        menu_task = asyncio.create_task(self._publish_command_menu())
+
+        def _menu_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error(
+                    "Telegram menu publish task died: %s",
+                    exc, exc_info=(type(exc), exc, exc.__traceback__),
+                )
+        menu_task.add_done_callback(_menu_done)
         self._event_task = asyncio.create_task(self._event_loop())
         if self._repo is not None:
             self._daily_task = asyncio.create_task(self._daily_loop())
@@ -173,6 +190,51 @@ class TelegramNotifier:
             sorted(self._enabled_types),
             self._poll_task is not None,
         )
+
+    async def _publish_command_menu(self) -> None:
+        """Register our slash-commands with Telegram so the chat's
+        Menu button + autocomplete list them. One-shot per startup;
+        Telegram caches the list per-bot until next setMyCommands call.
+
+        Dedupes on description so /start and /help (same handler, same
+        description) don't appear twice in the menu.
+        """
+        seen_descs: set[str] = set()
+        commands = []
+        for cmd, (_, desc) in self._commands.items():
+            if desc in seen_descs:
+                continue
+            seen_descs.add(desc)
+            commands.append({
+                "command": cmd.lstrip("/"),  # API expects no leading slash
+                "description": desc[:256],   # 256 char hard limit
+            })
+        try:
+            url = f"https://api.telegram.org/bot{self._token}/setMyCommands"
+            async with self._session.post(
+                url, json={"commands": commands},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    body = await resp.json()
+                    if body.get("ok"):
+                        logger.info(
+                            "Telegram menu populated with %d commands",
+                            len(commands),
+                        )
+                        return
+                    logger.warning(
+                        "setMyCommands returned ok=false: %s", body,
+                    )
+                else:
+                    logger.warning(
+                        "setMyCommands HTTP %d: %s",
+                        resp.status, (await resp.text())[:200],
+                    )
+        except Exception:
+            logger.exception(
+                "Failed to publish Telegram command menu (non-fatal)"
+            )
 
     async def stop(self) -> None:
         for t in (self._event_task, self._poll_task, self._daily_task, self._weekly_task):
