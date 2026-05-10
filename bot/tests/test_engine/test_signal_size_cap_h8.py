@@ -72,9 +72,12 @@ async def test_size_within_cap_passes(monkeypatch):
 @pytest.mark.asyncio
 async def test_size_above_cap_rejected(monkeypatch):
     """The accidental-bump scenario: 4000 VVV × $5 = $20k. With cap
-    $2k, must reject without placing the order."""
+    $2k, must reject without placing the order. Disable the
+    total-exposure gate so the failure unambiguously asserts the H8
+    cap (PR #32 review)."""
     monkeypatch.setattr(settings, "max_position_size_usd", 200)
     monkeypatch.setattr(settings, "signal_size_max_multiplier", 10.0)
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 0)  # disable that gate
     runner = _runner()
     sig = Signal(
         action=SignalAction.OPEN_LONG, symbol="VVV",
@@ -105,6 +108,67 @@ async def test_close_signals_unaffected_by_cap(monkeypatch):
     # control flow reached _resolve_close_size.
     await runner._execute_signal(sig, current_price=5.0, leverage=1)
     runner._resolve_close_size.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_leveraged_sized_signal_uses_margin_not_notional(monkeypatch):
+    """PR #32 review fix: H8 cap is in MARGIN terms because
+    MAX_POSITION_SIZE_USD is the margin cap, not notional. A 200-unit
+    signal at $5 / 10× leverage = $1000 notional = $100 margin. With
+    cap = 10× × $200 = $2000 of margin, this must PASS — pre-fix code
+    compared $1000 notional > $2000 cap and would have rejected, OR (with
+    a smaller setting) rejected legitimate leveraged opens at low margin."""
+    monkeypatch.setattr(settings, "max_position_size_usd", 200)
+    monkeypatch.setattr(settings, "signal_size_max_multiplier", 10.0)
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 0)
+    runner = _runner()
+    # 200 units * $50 / 10x = $1000 / 10 = $100 margin (well under $2k cap)
+    sig = Signal(
+        action=SignalAction.OPEN_LONG, symbol="ETH",
+        strategy_name="leveraged_strat", size=200.0,
+    )
+    from hypertrade.exchange.base import Order, OrderStatus, OrderType
+    runner.exchange.place_order = AsyncMock(return_value=Order(
+        id="x", symbol="ETH", side="buy", size=200.0,
+        order_type=OrderType.MARKET, filled_price=50.0,
+        status=OrderStatus.FILLED,
+    ))
+    runner.repo.record_trade_and_open_position = AsyncMock()
+    runner._check_parity_after_trade = AsyncMock(return_value=True)
+    await runner._execute_signal(sig, current_price=50.0, leverage=10)
+    runner.exchange.place_order.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_signal_size_zero_treated_as_explicit_override(monkeypatch):
+    """PR #32 review fix: `signal.size or ...` treated 0.0 as falsy and
+    fell back to _calculate_size. Now `is not None` keeps 0.0 in the
+    override path. The H8 cap doesn't trip on 0 (margin = 0), but the
+    downstream HL place_order will reject the rounded-to-zero size —
+    which surfaces the strategy bug instead of silently substituting
+    a default size."""
+    monkeypatch.setattr(settings, "max_position_size_usd", 200)
+    monkeypatch.setattr(settings, "signal_size_max_multiplier", 10.0)
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 0)
+    runner = _runner()
+    sig = Signal(
+        action=SignalAction.OPEN_LONG, symbol="VVV",
+        strategy_name="vvv_hedge", size=0.0,
+    )
+    from hypertrade.exchange.base import Order, OrderStatus, OrderType
+    captured = {}
+    async def _capture(symbol, side, size, *a, **kw):
+        captured["size"] = size
+        return Order(
+            id="x", symbol=symbol, side=side, size=size,
+            order_type=OrderType.MARKET, filled_price=5.0,
+            status=OrderStatus.REJECTED,
+        )
+    runner.exchange.place_order = _capture
+    runner._check_parity_after_trade = AsyncMock(return_value=True)
+    await runner._execute_signal(sig, current_price=5.0, leverage=1)
+    # Size 0 was forwarded verbatim (not replaced by _calculate_size)
+    assert captured["size"] == 0.0
 
 
 @pytest.mark.asyncio
