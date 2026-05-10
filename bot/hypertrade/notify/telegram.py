@@ -258,6 +258,17 @@ class TelegramNotifier:
                 "command": name,
                 "description": desc[:256],   # 256 char hard limit
             })
+        # Short-circuit on empty list: Telegram treats setMyCommands with
+        # an empty array as "delete all commands", which would silently
+        # wipe a previously-working menu if some bug filtered everything
+        # out. Better to leave the existing menu in place and surface the
+        # bug in the logs.
+        if not commands:
+            logger.warning(
+                "_publish_command_menu: 0 valid commands after filtering — "
+                "skipping setMyCommands call to avoid wiping the existing menu"
+            )
+            return
         try:
             url = f"https://api.telegram.org/bot{self._token}/setMyCommands"
             async with self._session.post(
