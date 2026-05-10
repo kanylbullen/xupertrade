@@ -78,7 +78,7 @@ class EngineRunner:
         self.repo = repo
         self.event_bus = event_bus
         self.control = control
-        self.portfolio = PortfolioManager(exchange)
+        self.portfolio = PortfolioManager(exchange, control=control)
         self._last_reconcile = 0.0  # epoch seconds
         self._last_funding_poll = 0.0
         self._last_hodl_check = 0.0
@@ -513,7 +513,7 @@ class EngineRunner:
                             filled_price,
                             realized_pnl,
                         )
-                self.portfolio.record_pnl(realized_pnl)
+                await self.portfolio.record_pnl(realized_pnl)
                 logger.warning(
                     "Closed %s %s @ %.2f (PnL %.2f)",
                     pos.side,
@@ -714,6 +714,12 @@ class EngineRunner:
 
             # Total exposure cap: block if opening this would exceed the
             # configured margin sum across all open strategy positions.
+            # Audit C1 (2026-05-10): the previous implementation discarded
+            # the correctly-computed `current_margin` and approximated each
+            # open row as contributing `MAX_POSITION_SIZE_USD` of margin,
+            # which made the cap a position-COUNT cap, not a dollar cap.
+            # Strategies that emit `Signal(size=…)` (e.g. vvv_hedge) and
+            # leveraged strategies were both undercounted.
             if (
                 self.repo
                 and settings.max_total_exposure_usd > 0
@@ -723,18 +729,28 @@ class EngineRunner:
                     float(p.size) * float(p.entry_price) / max(getattr(p, "leverage", 1) or 1, 1)
                     for p in open_pos
                 )
-                # Approximation: each open strategy position contributes
-                # MAX_POSITION_SIZE_USD of margin (the same cap used at open).
-                approx_existing_margin = len(open_pos) * settings.max_position_size_usd
-                if approx_existing_margin + settings.max_position_size_usd > settings.max_total_exposure_usd:
+                # Margin for the *new* position being opened. Strategies
+                # that override `signal.size` (vvv_hedge sends 400 VVV) get
+                # their actual notional counted; others fall back to the
+                # standard sized position. Both are divided by leverage.
+                lev = max(int(leverage or 1), 1)
+                if signal.size:
+                    new_notional = float(signal.size) * float(current_price)
+                else:
+                    new_notional = float(settings.max_position_size_usd) * lev
+                new_position_margin = new_notional / lev
+                projected_margin = current_margin + new_position_margin
+                if projected_margin > settings.max_total_exposure_usd:
                     logger.warning(
                         "[%s] Skipping %s %s — total exposure cap "
-                        "reached: %d open positions × $%.0f >= $%.0f",
+                        "would be exceeded: $%.0f current + $%.0f new "
+                        "= $%.0f > $%.0f cap",
                         signal.strategy_name,
                         signal.action.value,
                         signal.symbol,
-                        len(open_pos),
-                        settings.max_position_size_usd,
+                        current_margin,
+                        new_position_margin,
+                        projected_margin,
                         settings.max_total_exposure_usd,
                     )
                     return False
@@ -859,7 +875,7 @@ class EngineRunner:
                     pnl=realized_pnl or 0,
                     reason=signal.reason,
                 )
-                self.portfolio.record_pnl(realized_pnl or 0)
+                await self.portfolio.record_pnl(realized_pnl or 0)
 
         # Snapshot post-signal strategy state to Redis. Covers the
         # cooldown-after-close gap (audit M6 / PR #19 review): position

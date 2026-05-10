@@ -137,6 +137,38 @@ class BotControl:
             return
         await self._redis.hdel(self._key_leverage, strategy_name)
 
+    # --- Daily realized-PnL persistence (audit C2)
+    # The MAX_DAILY_LOSS_USD kill must survive container restarts. Without
+    # this, a $400 loss followed by `docker compose restart` (which the
+    # `restart: unless-stopped` policy can trigger on its own) zeroes the
+    # in-memory counter and trading resumes despite blowing the cap.
+    # Key: hypertrade:{mode}:daily_pnl:{YYYY-MM-DD}, TTL 48h so a date roll
+    # at midnight UTC starts fresh while yesterday's record stays around
+    # briefly for the daily digest.
+    @staticmethod
+    def _daily_pnl_key(mode: str, date_str: str) -> str:
+        return f"hypertrade:{mode}:daily_pnl:{date_str}"
+
+    async def get_daily_pnl(self, date_str: str) -> float:
+        if self._redis is None:
+            return 0.0
+        val = await self._redis.get(self._daily_pnl_key(self._mode, date_str))
+        if val is None:
+            return 0.0
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def set_daily_pnl(self, date_str: str, pnl: float) -> None:
+        if self._redis is None:
+            return
+        await self._redis.set(
+            self._daily_pnl_key(self._mode, date_str),
+            f"{pnl:.10f}",
+            ex=48 * 3600,
+        )
+
     async def get_allow_multi_coin(self) -> bool:
         if self._redis is None:
             return False
