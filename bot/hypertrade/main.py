@@ -102,19 +102,66 @@ async def main() -> None:
     # later, after they're constructed
     telegram: TelegramNotifier | None = None
 
-    # Instantiate every registered strategy. Disabling at runtime is done
-    # via Redis (BotControl.disable_strategy) — Options page or Telegram
-    # /strategies. New strategies added under hypertrade/strategies/ and
-    # imported in registry.load_all() automatically appear here.
-    strategies = [get_strategy(name) for name in list_strategies()]
+    # Instantiate strategies. Paper/testnet runs the full registered set;
+    # mainnet honors the MAINNET_ENABLED_STRATEGIES allowlist (audit C3).
+    # An EMPTY allowlist on mainnet means zero strategies — the bot still
+    # boots (heartbeat, API, dashboard work) but trades nothing until the
+    # operator explicitly opts a strategy in. Fail-closed by design so a
+    # fresh mainnet deploy can't auto-trade with all 21 strategies as it
+    # did pre-fix.
+    all_names = list_strategies()
+    if settings.is_mainnet:
+        raw = settings.mainnet_enabled_strategies.strip()
+        if not raw:
+            allowed_names: list[str] = []
+            logger.critical(
+                "MAINNET starting with EMPTY MAINNET_ENABLED_STRATEGIES — "
+                "no strategies will trade. Set MAINNET_ENABLED_STRATEGIES="
+                "name1,name2 in .env and restart."
+            )
+        else:
+            requested = {n.strip() for n in raw.split(",") if n.strip()}
+            unknown = requested - set(all_names)
+            if unknown:
+                logger.warning(
+                    "MAINNET_ENABLED_STRATEGIES references unknown names "
+                    "(ignored): %s", sorted(unknown),
+                )
+            allowed_names = [n for n in all_names if n in requested]
+            logger.warning(
+                "MAINNET allowlist active: %d/%d strategies will trade: %s",
+                len(allowed_names), len(all_names), allowed_names,
+            )
+    else:
+        allowed_names = all_names
+    strategies = [get_strategy(name) for name in allowed_names]
     logger.info("Active strategies: %s", [s.name for s in strategies])
 
     # Now that exchange + control + strategies exist, start Telegram
     # (only if enabled on this bot instance — typically only one mode's bot
     # has TELEGRAM_ENABLED=true to avoid 3 simultaneous Telegram pollers)
     if settings.telegram_enabled:
+        # Audit C4: also construct a BotControl handle pointing at MAINNET's
+        # Redis-namespaced keys so /pause-mainnet, /flat-mainnet etc. reach
+        # the mainnet bot. Connect best-effort — if Redis is down, the
+        # /-mainnet commands will degrade gracefully ("Mainnet control not
+        # wired") rather than crashing Telegram startup. Skipped when this
+        # bot itself IS mainnet (in which case `control` already points
+        # there).
+        mainnet_control: BotControl | None = None
+        if not settings.is_mainnet:
+            try:
+                mainnet_control = BotControl(mode="mainnet")
+                await mainnet_control.connect()
+            except Exception:
+                logger.warning(
+                    "Mainnet BotControl unreachable — /-mainnet Telegram commands "
+                    "will report 'not wired'"
+                )
+                mainnet_control = None
         telegram = TelegramNotifier(
             control=control, exchange=exchange, strategies=strategies, repo=repo,
+            mainnet_control=mainnet_control,
         )
     else:
         telegram = TelegramNotifier(token="", chat_id="")  # disabled stub
