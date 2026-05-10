@@ -14,7 +14,7 @@
  * endpoint as a generic kv store and to keep DB row sizes bounded.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { encryptSecret } from "@/lib/crypto/secrets";
 import { db, tenantSecrets } from "@/lib/db";
@@ -91,7 +91,10 @@ export async function PUT(req: Request, ctx: Params): Promise<Response> {
       set: {
         ciphertext,
         nonce,
-        updatedAt: new Date(),
+        // Use DB-side `NOW()` so the update path matches the insert
+        // path's `defaultNow()` source. Avoids ordering surprises if
+        // app and DB clocks differ.
+        updatedAt: sql`now()`,
       },
     });
 
