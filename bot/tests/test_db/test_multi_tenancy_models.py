@@ -90,6 +90,9 @@ async def test_tenant_unique_authentik_sub(session):
     await _make_tenant(session, sub="dup-sub")
     with pytest.raises(IntegrityError):
         await _make_tenant(session, sub="dup-sub")
+    # Reset session state so any follow-up assertions in this test
+    # would still work (PR #36 review).
+    await session.rollback()
 
 
 @pytest.mark.asyncio
@@ -102,6 +105,7 @@ async def test_tenant_bot_unique_per_mode(session):
     session.add(TenantBot(tenant_id=t.id, mode="paper"))  # duplicate mode
     with pytest.raises(IntegrityError):
         await session.commit()
+    await session.rollback()
 
 
 @pytest.mark.asyncio
@@ -154,7 +158,7 @@ async def test_tenant_secret_composite_pk(session):
     ))
     with pytest.raises(IntegrityError):
         await session.commit()
-    await session.rollback()
+    await session.rollback()  # already present; keep for consistency
 
 
 @pytest.mark.asyncio
@@ -243,9 +247,11 @@ async def test_audit_log_append_only_indexed_on_tenant_ts(session):
         ))
     await session.commit()
 
+    # Tiebreaker on `id` — multiple inserts inside one millisecond can
+    # share `ts`, making the test flaky on fast machines (PR #36 review).
     rows = (await session.scalars(
         select(TenantAuditLog)
         .where(TenantAuditLog.tenant_id == t.id)
-        .order_by(TenantAuditLog.ts.asc())
+        .order_by(TenantAuditLog.ts.asc(), TenantAuditLog.id.asc())
     )).all()
     assert [r.action for r in rows] == ["secret.set", "bot.start", "bot.stop"]

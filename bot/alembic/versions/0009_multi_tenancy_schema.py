@@ -45,9 +45,11 @@ def upgrade() -> None:
             "id",
             postgresql.UUID(as_uuid=True),
             primary_key=True,
-            server_default=sa.text("gen_random_uuid()"),
         ),
-        sa.Column("authentik_sub", sa.String(128), nullable=False, unique=True),
+        # authentik_sub is unique — enforced by the named index below
+        # (skipping column-level `unique=True` to avoid a redundant
+        # auto-generated unique constraint).
+        sa.Column("authentik_sub", sa.String(128), nullable=False),
         sa.Column("email", sa.String(255), nullable=False),
         sa.Column("display_name", sa.String(128), nullable=True),
         sa.Column(
@@ -85,7 +87,6 @@ def upgrade() -> None:
             "id",
             postgresql.UUID(as_uuid=True),
             primary_key=True,
-            server_default=sa.text("gen_random_uuid()"),
         ),
         sa.Column(
             "tenant_id",
@@ -151,7 +152,7 @@ def upgrade() -> None:
         ),
         sa.Column("actor", sa.String(16), nullable=False),
         sa.Column("action", sa.String(64), nullable=False),
-        sa.Column("context_json", sa.Text(), server_default="{}"),
+        sa.Column("context_json", sa.Text(), server_default=sa.text("'{}'")),
         sa.Column(
             "ts",
             sa.DateTime(timezone=True),
