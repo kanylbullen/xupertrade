@@ -19,7 +19,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 export const NONCE_BYTES = 12;            // GCM standard
 export const AUTH_TAG_BYTES = 16;
-const KEY_BYTES = 32;                     // AES-256
+export const KEY_BYTES = 32;              // AES-256 (re-exported so callers/tests don't duplicate the magic number)
 
 export type SecretBlob = {
   /** ciphertext WITH the auth tag appended (GCM standard layout) */

@@ -20,9 +20,24 @@ export const SALT_BYTES = 16;
 export const KEY_BYTES = 32;            // 256-bit key for AES-256-GCM
 export const VERIFIER_BYTES = 32;       // HMAC-SHA-256 output
 
-// `hashRaw` defaults to algorithm=Argon2id; we don't pass it explicitly
-// because @node-rs/argon2 ships `Algorithm` as a `const enum`, which
-// we can't dereference under Next's `isolatedModules: true`.
+/**
+ * KDF parameters for Phase 2 v1.
+ *
+ * **These values are IMMUTABLE once any tenant has set their passphrase.**
+ * The salt + verifier we persist do not encode the params; if we ever
+ * change `memoryCost`/`timeCost`/`parallelism` here, every existing
+ * tenant's verifier will fail to validate (and their secrets become
+ * undecryptable) without a migration path.
+ *
+ * Future hardening (deferred): persist `kdf_version` on each tenant
+ * row, route `deriveKey` through a version table, and allow background
+ * "re-encrypt with new params" jobs after a successful unlock. Until
+ * we need it, treat these constants as a forever-decision.
+ *
+ * `hashRaw` defaults to algorithm=Argon2id; we don't pass it explicitly
+ * because @node-rs/argon2 ships `Algorithm` as a `const enum`, which
+ * we can't dereference under Next's `isolatedModules: true`.
+ */
 const KDF_PARAMS = {
   memoryCost: 64 * 1024,                // 64 MiB
   timeCost: 3,                          // 3 iterations

@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
-import { AUTH_TAG_BYTES, NONCE_BYTES, decryptSecret, encryptSecret } from "../secrets";
+import {
+  AUTH_TAG_BYTES,
+  KEY_BYTES,
+  NONCE_BYTES,
+  decryptSecret,
+  encryptSecret,
+} from "../secrets";
 
-const TEST_KEY = () => randomBytes(32);
+const TEST_KEY = () => randomBytes(KEY_BYTES);
 
 describe("AES-GCM secret roundtrip", () => {
   it("encrypts to a non-empty ciphertext + 12-byte nonce", () => {
