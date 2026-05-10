@@ -11,6 +11,17 @@ class Settings(BaseSettings):
         "extra": "ignore",
     }
 
+    # Multi-tenancy (audit Phase 3b). When set (UUID string from env
+    # `TENANT_ID`, injected by the dashboard's bot-orchestrator), the
+    # repository tags every INSERT with this tenant_id and scopes
+    # SELECTs/UPDATEs/DELETEs to it. When NULL (operator's current
+    # 3-mode deploy until Phase 6 cutover), repository falls back to
+    # today's tenant-agnostic behavior. `BOT_ID` is the corresponding
+    # `tenant_bots.id` UUID — used for Redis key scoping when two
+    # bots from the same tenant share a coin (multi-bot tenants).
+    tenant_id: str | None = None
+    bot_id: str | None = None
+
     # Exchange
     # "paper"   = simulated locally, no exchange contact
     # "testnet" = live orders against HyperLiquid testnet (fake money)
