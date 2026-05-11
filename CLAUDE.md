@@ -239,10 +239,11 @@ doesn't quietly survive multiple deploys.
 > "CREATED" column says days/weeks ago, force a no-cache rebuild
 > before starting the container.
 >
-> **This trap is not mainnet-specific** — bit dashboard the same way
-> on 2026-05-11 during the healthcheck-fix iterations. Five PRs back-
-> to-back rebuilt dashboard but `docker compose build --pull dashboard`
-> hit the layer cache every time and never produced a new image SHA.
+> **This trap is not mainnet-specific** — it bit the dashboard the
+> same way on 2026-05-11 during the healthcheck-fix iterations. Five
+> back-to-back PRs rebuilt dashboard but `docker compose build --pull
+> dashboard` hit the layer cache every time and never produced a new
+> image SHA.
 > `--force-recreate` then recreated the container off the same stale
 > image, so the new code never reached production. Symptom: deploy
 > command exits 0, container restarts, but live behavior matches the
