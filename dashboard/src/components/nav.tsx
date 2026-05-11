@@ -4,15 +4,17 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { ModeSwitch } from "@/components/mode-switch";
 import { BotStatusIndicator } from "@/components/bot-status-indicator";
-import { SignOut } from "@/components/sign-out";
+import { UserMenu } from "@/components/user-menu";
 
+// Options moved into the UserMenu (renamed Settings). Sign out also
+// lives there now — keeps the top bar focused on navigation, with
+// account-level actions tucked into the avatar dropdown.
 const links = [
   { href: "/", label: "Overview" },
   { href: "/trades", label: "Trades" },
   { href: "/strategies", label: "Strategies" },
   { href: "/hodl", label: "HODL" },
   { href: "/vaults", label: "Vaults" },
-  { href: "/options", label: "Options" },
   { href: "/status", label: "Status" },
 ];
 
@@ -52,7 +54,7 @@ export function Nav() {
               ))}
             </div>
             <ModeSwitch />
-            <SignOut />
+            <UserMenu suffix={suffix} />
           </div>
         </div>
         {/* Row 2: links on mobile only */}
