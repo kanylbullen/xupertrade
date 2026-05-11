@@ -268,15 +268,23 @@ class BotControl:
             "dashboard:auth:oidc:scopes",
         ]
         vals = await self._redis.mget(*keys)
+        # Env-first override (Phase 6c followup). When the operator
+        # sets these in Phase, env wins over Redis so the dashboard
+        # gets the env-managed value and the Redis row is irrelevant.
+        # Empty env value = fall back to Redis (back-compat with the
+        # old Settings UI).
+        from hypertrade.config import settings
         return {
-            "mode": vals[0] or "disabled",
+            "mode": settings.auth_mode or vals[0] or "disabled",
             "basic_user": vals[1] or "",
             "basic_hash": vals[2] or "",
             "session_secret": vals[3] or "",
-            "oidc_issuer": vals[4] or "",
-            "oidc_client_id": vals[5] or "",
-            "oidc_client_secret": vals[6] or "",
-            "oidc_scopes": vals[7] or "openid profile email",
+            "oidc_issuer": settings.oidc_issuer or vals[4] or "",
+            "oidc_client_id": settings.oidc_client_id or vals[5] or "",
+            "oidc_client_secret": settings.oidc_client_secret or vals[6] or "",
+            "oidc_scopes": (
+                settings.oidc_scopes or vals[7] or "openid profile email"
+            ),
         }
 
     async def set_auth_config(self, **kwargs: str) -> None:
@@ -310,20 +318,29 @@ class BotControl:
     #   dashboard:tls:cf_token   — Cloudflare API token (Zone:Read + Zone DNS:Edit)
 
     async def get_tls_config(self) -> dict:
+        # Env-first override (Phase 6c followup). When the operator
+        # sets these in Phase, env wins over Redis. Empty env values
+        # fall back to Redis to keep back-compat with the old UI.
+        from hypertrade.config import settings
         if self._redis is None:
-            return {"enabled": False, "domain": "", "email": "", "cf_token": ""}
-        keys = [
-            "dashboard:tls:enabled",
-            "dashboard:tls:domain",
-            "dashboard:tls:email",
-            "dashboard:tls:cf_token",
-        ]
-        vals = await self._redis.mget(*keys)
+            vals = [None, None, None, None]
+        else:
+            keys = [
+                "dashboard:tls:enabled",
+                "dashboard:tls:domain",
+                "dashboard:tls:email",
+                "dashboard:tls:cf_token",
+            ]
+            vals = await self._redis.mget(*keys)
+        env_enabled = settings.tls_enabled_env  # "1" / "0" / ""
+        enabled = (
+            env_enabled == "1" if env_enabled else (vals[0] == "1")
+        )
         return {
-            "enabled": vals[0] == "1",
-            "domain": vals[1] or "",
-            "email": vals[2] or "",
-            "cf_token": vals[3] or "",
+            "enabled": enabled,
+            "domain": settings.tls_domain or vals[1] or "",
+            "email": settings.tls_email or vals[2] or "",
+            "cf_token": settings.tls_cf_api_token or vals[3] or "",
         }
 
     async def set_tls_config(self, **kwargs: str) -> None:
