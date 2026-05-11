@@ -14,6 +14,10 @@ const PUBLIC_PATHS = new Set([
   "/api/auth/config",
   "/api/auth/oidc/start",
   "/api/auth/oidc/callback",
+  // Liveness probe used by the compose healthcheck. Must be public so
+  // the auth gate doesn't 307 it to /login (which would make the probe
+  // succeed-but-with-redirect, an ambiguous signal).
+  "/api/healthz",
 ]);
 
 function isPublic(pathname: string): boolean {
