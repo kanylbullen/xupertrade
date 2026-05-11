@@ -178,6 +178,40 @@ services:
       dashboard:
         condition: service_started
 
+  # Cloudflare Tunnel: terminates public TLS at CF edge, forwards
+  # `hypertrade.xuper.fun` (or whatever public hostname is configured
+  # in the Cloudflare Zero Trust dashboard) to dashboard:3000 over the
+  # internal docker network. No inbound ports — cloudflared connects
+  # OUT to CF and accepts forwarded requests over that tunnel.
+  #
+  # Caddy is intentionally kept for LAN access (operator on
+  # 192.168.x.x reaches the dashboard via Caddy + Let's Encrypt).
+  # Public users come through this tunnel and never touch Caddy or
+  # the host's :443.
+  #
+  # CF DDoS-protection + bot-management apply to public traffic
+  # automatically. Cloudflare Access (extra auth gate on top of
+  # Authentik) is NOT enabled by default — opt in via the CF Zero
+  # Trust UI if needed (see docs/CLOUDFLARE_TUNNEL.md).
+  #
+  # Profile-gated to opt-in: deploy with `--profile public` or
+  # add `public` to COMPOSE_PROFILES so LAN-only deploys don't
+  # need a CF account.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: hypertrade-cloudflared
+    profiles: [public]
+    restart: unless-stopped
+    # `--no-autoupdate` because the docker image tag is what we
+    # control versioning through; let dependabot bump it explicitly.
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      dashboard:
+        condition: service_started
+    # cloudflared connects OUTBOUND to CF; no ports exposed.
+    # Joining the default network gives it routing to dashboard:3000
+    # via docker DNS.
+
 volumes:
   pgdata:
   caddy_data:
