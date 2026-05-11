@@ -113,14 +113,14 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   //   1. fixed system identifiers (TENANT_ID, BOT_ID, EXCHANGE_MODE)
   //   2. decryptedSecrets (user-supplied)
   //   3. systemEnv (orchestrator-supplied; wins over user)
+  //   4. API_PORT (mode-pinned, wins over EVERYTHING else)
   // Steps 2 and 3 collisions: orchestrator wins, so a malicious
-  // user can't override DATABASE_URL via the secret CRUD API.
-  //
-  // API_PORT is fixed per mode so per-tenant bots match the routing
-  // convention used by operator's compose-defined bots (Phase 6c bot
-  // routing — see lib/bot-api.ts:apiPortForMode + getBotApiUrl). Set
-  // via systemEnv (step 3) so the orchestrator wins over any
-  // user-supplied API_PORT in their secrets.
+  // user can't override DATABASE_URL via the secret CRUD API. Step 4
+  // is set explicitly AFTER the spread so a caller can't accidentally
+  // override the routing convention either — bots must listen on the
+  // port their mode dictates (paper=8000, testnet=8001, mainnet=8002)
+  // so a single getBotApiUrl helper (lib/bot-api.ts) works for both
+  // operator's compose-defined bots and per-tenant orchestrator bots.
   const envMap: Record<string, string> = {
     TENANT_ID: params.tenantId,
     BOT_ID: params.botId,

@@ -133,8 +133,10 @@ describe("buildSpec", () => {
   it("injects API_PORT per mode so per-tenant bots match the routing convention (Phase 6c PR δ)", () => {
     // Operator's compose-defined bots use 8000/8001/8002 per mode.
     // Per-tenant bots must follow the same convention so a single
-    // getBotApiUrl helper works for both. orchestrator wins over
-    // user-supplied API_PORT via systemEnv-after-secrets order.
+    // getBotApiUrl helper works for both. The mode-pinned API_PORT is
+    // assigned EXPLICITLY in buildSpec after the systemEnv/secrets
+    // spread (step 4 in the override order documented inline) so
+    // neither user-supplied secrets nor systemEnv can clobber it.
     for (const [mode, expectedPort] of [
       ["paper", 8000],
       ["testnet", 8001],
@@ -144,8 +146,10 @@ describe("buildSpec", () => {
         tenantId: TENANT_ID,
         botId: BOT_ID,
         mode,
-        // User tries to override — must NOT win.
+        // User tries to override via secrets — must NOT win.
         decryptedSecrets: { API_PORT: "9999" },
+        // systemEnv tries to override too — must also NOT win.
+        systemEnv: { API_PORT: "7777" },
       });
       expect(spec.env).toContain(`API_PORT=${expectedPort}`);
       // Also verify only one API_PORT entry — POSIX duplicates are

@@ -1,4 +1,4 @@
-import { API_PORT_BY_MODE, type BotMode } from "./bot-orchestrator";
+import { API_PORT_BY_MODE, isValidMode, type BotMode } from "./bot-orchestrator";
 import type { tenantBots } from "./db";
 
 export type Mode = BotMode;
@@ -36,12 +36,11 @@ export function getBotApiUrl(
   row: typeof tenantBots.$inferSelect,
 ): string | null {
   if (!row.containerName) return null;
-  if (!isValidBotMode(row.mode)) return null;
-  return `http://${row.containerName}:${API_PORT_BY_MODE[row.mode]}`;
-}
-
-function isValidBotMode(s: string): s is BotMode {
-  return s === "paper" || s === "testnet" || s === "mainnet";
+  // isValidMode is the canonical mode validator (bot-orchestrator.ts
+  // owns the BotMode union). Reuse rather than duplicate the literal
+  // list here so the two stay in lockstep.
+  if (!isValidMode(row.mode)) return null;
+  return `http://${row.containerName}:${API_PORT_BY_MODE[row.mode as BotMode]}`;
 }
 
 function parseMode(req: Request): Mode {
