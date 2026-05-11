@@ -115,8 +115,10 @@ Some endpoints stay operator-only:
 - `/api/control/*` for shared infra (none currently — all `/api/control/*`
   is per-bot which means per-tenant after this PR)
 
-Add `requireOperator(req)` helper: throws 403 unless
-`tenant.is_operator === true`. Apply to TLS routes immediately.
+Add `requireOperator(req)` helper: throws 403 unless `tenant.isOperator
+=== true` (Drizzle camelCase — DB column is `is_operator` but the row
+shape from `typeof tenants.$inferSelect` uses the JS field name). Apply
+to both TLS routes immediately.
 
 ### D5 — `/api/events` SSE stream
 
@@ -183,23 +185,44 @@ export async function requireOperator(req: Request): Promise<Tenant> {
 }
 ```
 
-Wire into `/api/tls/config` (GET stays public — TLS state is not secret)
-and `/api/tls/configure` (POST requires operator).
+Wire into both `/api/tls/config` (GET) and `/api/tls/configure` (POST).
+GET also requires operator because the dashboard proxies via `botFetch`
+which forwards `API_KEY`, and the bot's `tls_get_config` handler is
+auth-gated — making it dashboard-public would bypass that gate. The
+returned payload also exposes the configured domain/email, which is
+operator-only data.
 
 ### Step 3 — tenant-scoped DB pool factory
 
 New file `dashboard/src/lib/db-tenant.ts`:
 ```ts
-const POOL_CACHE = new Map<string, PostgresJsClient>();
+type TenantDb = ReturnType<typeof drizzle>;
+type PoolEntry = {
+  db: TenantDb;
+  client: ReturnType<typeof postgres>;
+  expiresAt: number;
+};
+
+const POOL_CACHE = new Map<string, PoolEntry>();
 const POOL_TTL_MS = 5 * 60 * 1000;
 
-export async function dbForTenant(tenant: Tenant, password: string) {
+export async function dbForTenant(
+  tenant: Tenant,
+  password: string,
+): Promise<TenantDb> {
   const cached = POOL_CACHE.get(tenant.id);
   if (cached && cached.expiresAt > Date.now()) return cached.db;
+  if (cached) cached.client.end({ timeout: 5 }); // evict expired
+
   const url = tenantDatabaseUrl(tenant.id, password); // Phase 5b
-  const client = postgres(url, {max: 4, idle_timeout: 30});
-  POOL_CACHE.set(tenant.id, {db: drizzle(client), expiresAt: Date.now() + POOL_TTL_MS});
-  return drizzle(client);
+  const client = postgres(url, { max: 4, idle_timeout: 30 });
+  const db = drizzle(client);
+  POOL_CACHE.set(tenant.id, {
+    db,
+    client,
+    expiresAt: Date.now() + POOL_TTL_MS,
+  });
+  return db;
 }
 ```
 
