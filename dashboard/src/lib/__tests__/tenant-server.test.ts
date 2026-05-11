@@ -30,6 +30,7 @@ vi.mock("../auth", () => ({
   SESSION_COOKIE: "hypertrade_session",
   getSessionSecret: vi.fn(),
   verifySession: vi.fn(),
+  fetchAuthConfig: vi.fn(),
 }));
 
 vi.mock("../db", () => ({
@@ -41,19 +42,32 @@ vi.mock("../db", () => ({
 }));
 
 import { cookies } from "next/headers";
-import { getSessionSecret, verifySession } from "../auth";
+import { fetchAuthConfig, getSessionSecret, verifySession } from "../auth";
 import { db } from "../db";
 import { requireTenantServer } from "../tenant-server";
 
 const mockedCookies = vi.mocked(cookies);
 const mockedGetSecret = vi.mocked(getSessionSecret);
 const mockedVerify = vi.mocked(verifySession);
+const mockedFetchAuthConfig = vi.mocked(fetchAuthConfig);
 const mockedSelect = vi.mocked(db.select);
 const mockedInsert = vi.mocked(db.insert);
 
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+// Default: auth is enabled (basic or oidc) — disabled-mode short-
+// circuit is exercised in dedicated tests below.
+function authEnabled() {
+  mockedFetchAuthConfig.mockResolvedValue({
+    mode: "basic",
+    basic_user_set: true,
+    oidc_issuer: "",
+    oidc_client_id: "",
+    oidc_scopes: "",
+  } as never);
+}
 
 function setCookie(value: string | null) {
   const get = vi.fn().mockReturnValue(value === null ? undefined : { value });
@@ -70,17 +84,20 @@ function chainSelectReturning(rows: unknown[]) {
 
 describe("requireTenantServer", () => {
   it("redirects to /login when there is no session cookie", async () => {
+    authEnabled();
     setCookie(null);
     await expect(requireTenantServer()).rejects.toThrow(/NEXT_REDIRECT;\/login/);
   });
 
   it("redirects to /login when session secret is unavailable", async () => {
+    authEnabled();
     setCookie("any.signed.value");
     mockedGetSecret.mockRejectedValue(new Error("bot unreachable"));
     await expect(requireTenantServer()).rejects.toThrow(/NEXT_REDIRECT;\/login/);
   });
 
   it("redirects to /login when session signature is invalid", async () => {
+    authEnabled();
     setCookie("tampered.value");
     mockedGetSecret.mockResolvedValue("secret");
     mockedVerify.mockReturnValue(null);
@@ -88,6 +105,7 @@ describe("requireTenantServer", () => {
   });
 
   it("returns the existing tenant row when found", async () => {
+    authEnabled();
     setCookie("good.cookie");
     mockedGetSecret.mockResolvedValue("secret");
     mockedVerify.mockReturnValue({
@@ -109,6 +127,7 @@ describe("requireTenantServer", () => {
   });
 
   it("auto-creates a new tenant row on first sight, then returns it", async () => {
+    authEnabled();
     setCookie("good.cookie");
     mockedGetSecret.mockResolvedValue("secret");
     mockedVerify.mockReturnValue({
@@ -146,5 +165,47 @@ describe("requireTenantServer", () => {
         email: "newuser@example.com",
       }),
     );
+  });
+
+  it("returns operator tenant in disabled-auth mode (no cookie required)", async () => {
+    // proxy.ts lets all requests through when cfg.mode === "disabled".
+    // requireTenantServer must mirror that — resolving the operator
+    // tenant rather than redirecting to a login that doesn't exist.
+    mockedFetchAuthConfig.mockResolvedValue({
+      mode: "disabled",
+      basic_user_set: false,
+      oidc_issuer: "",
+      oidc_client_id: "",
+      oidc_scopes: "",
+    } as never);
+    const operator = {
+      id: "00000000-0000-0000-0000-000000000001",
+      authentikSub: "x@xuper.fun",
+      isOperator: true,
+    };
+    chainSelectReturning([operator]);
+    // No cookie set on purpose — disabled mode must not require one.
+    setCookie(null);
+
+    const t = await requireTenantServer();
+    expect(t).toBe(operator);
+  });
+
+  it("falls back to cookie path if disabled-mode operator row is missing", async () => {
+    // Defensive: if cfg.mode is "disabled" but Phase 6b never ran, the
+    // operator row doesn't exist. Don't silently render with no
+    // tenant — let the cookie path run, which will redirect to /login
+    // (failing closed).
+    mockedFetchAuthConfig.mockResolvedValue({
+      mode: "disabled",
+      basic_user_set: false,
+      oidc_issuer: "",
+      oidc_client_id: "",
+      oidc_scopes: "",
+    } as never);
+    chainSelectReturning([]);
+    setCookie(null);
+
+    await expect(requireTenantServer()).rejects.toThrow(/NEXT_REDIRECT;\/login/);
   });
 });
