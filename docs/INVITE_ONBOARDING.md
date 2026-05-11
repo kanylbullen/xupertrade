@@ -331,7 +331,8 @@ Before inviting your first non-operator user:
       users it's **Cloudflare Tunnel** (see
       [`CLOUDFLARE_TUNNEL.md`](CLOUDFLARE_TUNNEL.md))
 - [ ] Cloudflare Tunnel container running (`docker compose
-      --profile public ps cloudflared` shows `Up`) — closed-beta only
+      --profile public ps cloudflared` shows `Up`; verify
+      tunnel health in CF Zero Trust dashboard) — closed-beta only
 - [ ] `npm run test:integration` green against an ephemeral
       Postgres (testcontainers) — proves the RLS policies still
       enforce isolation

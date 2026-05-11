@@ -179,13 +179,13 @@ services:
         condition: service_started
 
   # Cloudflare Tunnel: terminates public TLS at CF edge, forwards
-  # `hypertrade.xuper.fun` (or whatever public hostname is configured
-  # in the Cloudflare Zero Trust dashboard) to dashboard:3000 over the
-  # internal docker network. No inbound ports — cloudflared connects
-  # OUT to CF and accepts forwarded requests over that tunnel.
+  # the operator's configured public hostname to dashboard:3000 over
+  # the internal docker network. No inbound ports — cloudflared
+  # connects OUT to CF and accepts forwarded requests over that
+  # tunnel.
   #
-  # Caddy is intentionally kept for LAN access (operator on
-  # 192.168.x.x reaches the dashboard via Caddy + Let's Encrypt).
+  # Caddy is intentionally kept for LAN access (operator on the
+  # internal network reaches the dashboard via Caddy + Let's Encrypt).
   # Public users come through this tunnel and never touch Caddy or
   # the host's :443.
   #
@@ -198,13 +198,23 @@ services:
   # add `public` to COMPOSE_PROFILES so LAN-only deploys don't
   # need a CF account.
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    # Pinned to a specific tag (NOT :latest) so deploys are
+    # reproducible. cloudflared releases are frequent — bump this
+    # tag intentionally after reading the changelog rather than
+    # taking whatever happens to be on Docker Hub today.
+    image: cloudflare/cloudflared:2025.5.0
     container_name: hypertrade-cloudflared
     profiles: [public]
     restart: unless-stopped
-    # `--no-autoupdate` because the docker image tag is what we
-    # control versioning through; let dependabot bump it explicitly.
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    # exec-form (YAML list) + `${VAR:?msg}` so a missing token
+    # fails fast at compose-up time with a clear error instead of
+    # crash-looping inside the container with an empty `--token`.
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required for the public profile (set in Phase, injected via `phase run`)}
     depends_on:
       dashboard:
         condition: service_started

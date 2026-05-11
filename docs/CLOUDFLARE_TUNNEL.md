@@ -119,18 +119,27 @@ docker logs hypertrade-cloudflared --since 1m | grep -E 'connection|tunnel'
 From OUTSIDE the LAN (e.g. cellular hotspot on your phone):
 
 ```
-curl -v https://hypertrade.example.com/api/health
+curl -v https://hypertrade.example.com/api/auth/config
 ```
 
-Should:
+The dashboard exposes `/api/auth/config` without auth so the login
+page can decide which auth modes to render. A successful response
+proves:
 
-- Return 200 with the `/health` JSON
 - TLS handshake succeeds (CF cert)
-- No auth required for `/api/health` (it's gated by the dashboard
-  but the bot's `/api/health` is operator-test path)
+- CF Tunnel routes to the dashboard
+- The dashboard is up and responsive
 
-If you instead get the dashboard's login redirect, that's also
-fine — confirms public reachability + auth gate working.
+```
+curl -v https://hypertrade.example.com/login
+```
+
+`/login` is also unauthenticated and returns the login page HTML.
+Either is a good public-reachability smoke test.
+
+If you get a redirect to `/login` from another path, that's also
+a healthy sign — confirms public reachability + auth gate working
+on a protected route.
 
 ---
 
@@ -255,8 +264,11 @@ this side; Access intercepts BEFORE the tunnel forwards traffic.
 The closed-beta launch in
 [`INVITE_ONBOARDING.md`](INVITE_ONBOARDING.md) now requires:
 
-- [ ] Cloudflare Tunnel running (`docker compose ps cloudflared`
-      shows `Up` + `healthy`)
+- [ ] Cloudflare Tunnel running (`docker compose --profile public
+      ps cloudflared` shows `Up`). The container has no Compose
+      healthcheck defined — verify health from the CF Zero Trust
+      dashboard (tunnel status: Healthy) or
+      `docker logs hypertrade-cloudflared | grep "Connection registered"`.
 - [ ] `https://<your-public-hostname>/` reachable from outside the
       LAN
 - [ ] First test sign-in by a tenant from outside the LAN works
