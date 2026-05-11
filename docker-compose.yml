@@ -120,6 +120,15 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # Force Next.js standalone to bind 0.0.0.0. Setting HOSTNAME via
+      # the Dockerfile ENV doesn't work because docker auto-injects
+      # HOSTNAME=<container-id> at runtime, shadowing the image-level
+      # value. Compose `environment:` overrides the docker default,
+      # so it actually reaches the node process. Without this, Next.js
+      # binds only to the container's docker-network address and the
+      # in-container healthcheck (`wget localhost:3000/...`) fails with
+      # "connection refused".
+      HOSTNAME: "0.0.0.0"
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hypertrade
       REDIS_URL: redis://redis:6379/0
       BOT_API_URL_PAPER: http://bot-paper:8000
