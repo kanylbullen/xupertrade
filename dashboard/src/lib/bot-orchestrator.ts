@@ -30,6 +30,19 @@ export function isValidMode(s: unknown): s is BotMode {
   return typeof s === "string" && (VALID_MODES as readonly string[]).includes(s);
 }
 
+/**
+ * Bot HTTP API port per mode. Operator's compose-defined bots already
+ * use these (paper=8000, testnet=8001, mainnet=8002 set via the
+ * environment block in docker-compose.yml). Per-tenant orchestrator-
+ * spawned bots inherit the same convention via API_PORT in
+ * `buildSpec` so a single getBotApiUrl helper works for both.
+ */
+export const API_PORT_BY_MODE: Readonly<Record<BotMode, number>> = {
+  paper: 8000,
+  testnet: 8001,
+  mainnet: 8002,
+};
+
 export type BotStartParams = {
   /** UUID of the tenant_bots row. */
   botId: string;
@@ -102,12 +115,19 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   //   3. systemEnv (orchestrator-supplied; wins over user)
   // Steps 2 and 3 collisions: orchestrator wins, so a malicious
   // user can't override DATABASE_URL via the secret CRUD API.
+  //
+  // API_PORT is fixed per mode so per-tenant bots match the routing
+  // convention used by operator's compose-defined bots (Phase 6c bot
+  // routing — see lib/bot-api.ts:apiPortForMode + getBotApiUrl). Set
+  // via systemEnv (step 3) so the orchestrator wins over any
+  // user-supplied API_PORT in their secrets.
   const envMap: Record<string, string> = {
     TENANT_ID: params.tenantId,
     BOT_ID: params.botId,
     EXCHANGE_MODE: params.mode,
     ...params.decryptedSecrets,
     ...(params.systemEnv ?? {}),
+    API_PORT: String(API_PORT_BY_MODE[params.mode]),
   };
   const env = Object.entries(envMap).map(([k, v]) => `${k}=${v}`);
   return {

@@ -1,4 +1,7 @@
-export type Mode = "paper" | "testnet" | "mainnet";
+import { API_PORT_BY_MODE, type BotMode } from "./bot-orchestrator";
+import type { tenantBots } from "./db";
+
+export type Mode = BotMode;
 
 const URLS: Record<Mode, string> = {
   paper: process.env.BOT_API_URL_PAPER || "http://localhost:8000",
@@ -11,6 +14,35 @@ export function botUrl(mode: Mode): string {
 }
 
 export const BOT_API_URL = URLS.testnet; // back-compat for older imports
+
+/**
+ * Build the dashboard→bot HTTP URL from a `tenant_bots` row. Replaces
+ * the env-driven `botUrl(mode)` for tenant-aware routes (Phase 6c
+ * PR ε will wire the existing routes to use this).
+ *
+ * Convention:
+ *   - host = container_name (docker DNS resolves it inside the
+ *     compose network for both operator's compose-defined bots and
+ *     orchestrator-spawned tenant bots)
+ *   - port = API_PORT_BY_MODE[mode] (single source of truth in
+ *     bot-orchestrator.ts; orchestrator injects API_PORT for new
+ *     tenant bots so they match operator's compose convention)
+ *
+ * Returns `null` if the row has no `containerName` (bot is provisioned
+ * in DB but the orchestrator hasn't actually started a container yet
+ * — caller should treat this as "no bot for this mode" → 404 to UI).
+ */
+export function getBotApiUrl(
+  row: typeof tenantBots.$inferSelect,
+): string | null {
+  if (!row.containerName) return null;
+  if (!isValidBotMode(row.mode)) return null;
+  return `http://${row.containerName}:${API_PORT_BY_MODE[row.mode]}`;
+}
+
+function isValidBotMode(s: string): s is BotMode {
+  return s === "paper" || s === "testnet" || s === "mainnet";
+}
 
 function parseMode(req: Request): Mode {
   const url = new URL(req.url);
