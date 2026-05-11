@@ -3,6 +3,10 @@ export const dynamic = "force-dynamic";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { requireTenantServer } from "@/lib/tenant-server";
+import { db, tenantBots } from "@/lib/db";
+import { getBotApiUrl } from "@/lib/bot-api";
+import { and, eq } from "drizzle-orm";
 
 type Check = {
   name: string;
@@ -63,12 +67,13 @@ export default async function HodlPage({
   const mode: "paper" | "testnet" | "mainnet" =
     rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
 
-  const botApiUrls: Record<string, string> = {
-    paper: process.env.BOT_API_URL_PAPER ?? "http://bot-paper:8000",
-    testnet: process.env.BOT_API_URL_TESTNET ?? "http://bot-testnet:8001",
-    mainnet: process.env.BOT_API_URL_MAINNET ?? "http://bot-mainnet:8002",
-  };
-  const botApiUrl = botApiUrls[mode];
+  const tenant = await requireTenantServer();
+  const botRows = await db
+    .select()
+    .from(tenantBots)
+    .where(and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.mode, mode)))
+    .limit(1);
+  const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
 
   // /api/hodl/* are auth-gated when API_KEY is set on the bot. Server-side
   // render forwards the dashboard's API_KEY so we don't 401 ourselves.
@@ -79,7 +84,7 @@ export default async function HodlPage({
   let levels: ManualLevels | null = null;
   let purchases: Purchase[] = [];
   let botApiOnline = false;
-  try {
+  if (botApiUrl) try {
     const [signalsRes, levelsRes, purchasesRes] = await Promise.all([
       fetch(`${botApiUrl}/api/hodl/signals`, { cache: "no-store", headers: authHeaders }),
       fetch(`${botApiUrl}/api/hodl/levels`, { cache: "no-store", headers: authHeaders }),

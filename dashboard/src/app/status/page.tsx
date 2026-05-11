@@ -4,6 +4,7 @@ import { StatCard } from "@/components/stat-card";
 import { LiveLog } from "@/components/live-log";
 import { BotControls } from "@/components/bot-controls";
 import { getLatestEquity, getOpenPositions, getRecentTrades } from "@/lib/queries";
+import { requireTenantServer } from "@/lib/tenant-server";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,8 @@ export default async function StatusPage({
   const mode: "paper" | "testnet" | "mainnet" =
     rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
 
+  const tenant = await requireTenantServer();
+
   let equity = 10_000;
   let positionCount = 0;
   let tradeCount = 0;
@@ -25,9 +28,9 @@ export default async function StatusPage({
 
   try {
     const [latestEquity, positions, trades] = await Promise.all([
-      getLatestEquity(mode),
-      getOpenPositions(mode),
-      getRecentTrades(1, mode),
+      getLatestEquity(tenant.id, mode),
+      getOpenPositions(tenant.id, mode),
+      getRecentTrades(tenant.id, 1, mode),
     ]);
     equity = latestEquity?.totalEquity ?? 10_000;
     positionCount = positions.length;

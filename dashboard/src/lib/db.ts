@@ -30,8 +30,14 @@ export const db = drizzle(client);
 
 // Mirror the Python SQLAlchemy models
 
+// tenant_id is NOT NULL on all data tables as of alembic 0011 (Phase 6c
+// PR β). The Drizzle schema mirrors that — every read site MUST filter
+// by tenantId or it leaks across tenants. queries.ts requires a tenantId
+// arg on every exported function; server components must pass it.
+
 export const trades = pgTable("trades", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   orderId: varchar("order_id", { length: 64 }).notNull(),
   strategyName: varchar("strategy_name", { length: 64 }).notNull(),
   symbol: varchar("symbol", { length: 16 }).notNull(),
@@ -48,6 +54,7 @@ export const trades = pgTable("trades", {
 
 export const positions = pgTable("positions", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   strategyName: varchar("strategy_name", { length: 64 }).notNull(),
   symbol: varchar("symbol", { length: 16 }).notNull(),
   side: varchar("side", { length: 8 }).notNull(),
@@ -64,6 +71,7 @@ export const positions = pgTable("positions", {
 
 export const equitySnapshots = pgTable("equity_snapshots", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   totalEquity: doublePrecision("total_equity").notNull(),
   availableBalance: doublePrecision("available_balance").notNull(),
   unrealizedPnl: doublePrecision("unrealized_pnl").default(0),
@@ -74,6 +82,7 @@ export const equitySnapshots = pgTable("equity_snapshots", {
 
 export const fundingPayments = pgTable("funding_payments", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
   hash: varchar("hash", { length: 80 }).notNull(),
   coin: varchar("coin", { length: 16 }).notNull(),
@@ -87,7 +96,8 @@ export const fundingPayments = pgTable("funding_payments", {
 
 export const strategyConfigs = pgTable("strategy_configs", {
   id: serial("id").primaryKey(),
-  name: varchar("name", { length: 64 }).notNull().unique(),
+  tenantId: uuid("tenant_id").notNull(),
+  name: varchar("name", { length: 64 }).notNull(),
   symbol: varchar("symbol", { length: 16 }).notNull(),
   timeframe: varchar("timeframe", { length: 8 }).notNull(),
   enabled: boolean("enabled").default(true),

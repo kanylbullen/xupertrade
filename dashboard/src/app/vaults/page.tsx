@@ -2,6 +2,10 @@ export const dynamic = "force-dynamic";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { requireTenantServer } from "@/lib/tenant-server";
+import { db, tenantBots } from "@/lib/db";
+import { getBotApiUrl } from "@/lib/bot-api";
+import { and, eq } from "drizzle-orm";
 
 type Vault = {
   address: string;
@@ -68,12 +72,13 @@ export default async function VaultsPage({
   const mode: "paper" | "testnet" | "mainnet" =
     rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
 
-  const botApiUrls: Record<string, string> = {
-    paper: process.env.BOT_API_URL_PAPER ?? "http://bot-paper:8000",
-    testnet: process.env.BOT_API_URL_TESTNET ?? "http://bot-testnet:8001",
-    mainnet: process.env.BOT_API_URL_MAINNET ?? "http://bot-mainnet:8002",
-  };
-  const botApiUrl = botApiUrls[mode];
+  const tenant = await requireTenantServer();
+  const botRows = await db
+    .select()
+    .from(tenantBots)
+    .where(and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.mode, mode)))
+    .limit(1);
+  const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
 
   // /api/vaults/mine is auth-gated when API_KEY is set on the bot.
   // We're server-side rendering so it's safe to read API_KEY from env
@@ -84,7 +89,7 @@ export default async function VaultsPage({
   let vaults: Vault[] = [];
   let myPositions: MyPositionsResponse | null = null;
   let botApiOnline = false;
-  try {
+  if (botApiUrl) try {
     const [listRes, mineRes] = await Promise.all([
       fetch(`${botApiUrl}/api/vaults`, {
         cache: "no-store",

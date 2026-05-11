@@ -3,42 +3,84 @@ import { desc, eq, and, gte, sql, sum, count } from "drizzle-orm";
 
 export type Mode = "paper" | "testnet" | "mainnet";
 
-export async function getRecentTrades(limit = 50, mode: Mode = "paper") {
+// Every query takes `tenantId` as a required parameter. The dashboard
+// connects as the postgres superuser (per the Phase 6c PR δ plan
+// amendment — the tenant-role pool needs password persistence which is
+// out of scope for the closed-beta launch), so RLS is NOT enforced
+// here. Every WHERE clause must include `tenant_id = ?` or it leaks
+// across tenants. New query functions must follow the same pattern.
+// Drizzle's schema marks `tenantId` as notNull on every data table,
+// so a missing tenantId arg is a TypeScript error.
+
+export async function getRecentTrades(
+  tenantId: string,
+  limit = 50,
+  mode: Mode = "paper",
+) {
   return db
     .select()
     .from(trades)
-    .where(eq(trades.mode, mode))
+    .where(and(eq(trades.tenantId, tenantId), eq(trades.mode, mode)))
     .orderBy(desc(trades.timestamp))
     .limit(limit);
 }
 
-export async function getOpenPositions(mode: Mode = "paper") {
+export async function getOpenPositions(tenantId: string, mode: Mode = "paper") {
   return db
     .select()
     .from(positions)
-    .where(and(eq(positions.isOpen, true), eq(positions.mode, mode)));
+    .where(
+      and(
+        eq(positions.tenantId, tenantId),
+        eq(positions.isOpen, true),
+        eq(positions.mode, mode),
+      ),
+    );
 }
 
-export async function getClosedPositions(limit = 50, mode: Mode = "paper") {
+export async function getClosedPositions(
+  tenantId: string,
+  limit = 50,
+  mode: Mode = "paper",
+) {
   return db
     .select()
     .from(positions)
-    .where(and(eq(positions.isOpen, false), eq(positions.mode, mode)))
+    .where(
+      and(
+        eq(positions.tenantId, tenantId),
+        eq(positions.isOpen, false),
+        eq(positions.mode, mode),
+      ),
+    )
     .orderBy(desc(positions.closedAt))
     .limit(limit);
 }
 
-export async function getEquityHistory(limit = 200, mode: Mode = "paper") {
+export async function getEquityHistory(
+  tenantId: string,
+  limit = 200,
+  mode: Mode = "paper",
+) {
   return db
     .select()
     .from(equitySnapshots)
-    .where(eq(equitySnapshots.mode, mode))
+    .where(
+      and(
+        eq(equitySnapshots.tenantId, tenantId),
+        eq(equitySnapshots.mode, mode),
+      ),
+    )
     .orderBy(desc(equitySnapshots.timestamp))
     .limit(limit);
 }
 
-export async function getStrategyConfigs() {
-  return db.select().from(strategyConfigs).orderBy(strategyConfigs.name);
+export async function getStrategyConfigs(tenantId: string) {
+  return db
+    .select()
+    .from(strategyConfigs)
+    .where(eq(strategyConfigs.tenantId, tenantId))
+    .orderBy(strategyConfigs.name);
 }
 
 export type StrategyPnl = {
@@ -51,10 +93,11 @@ export type StrategyPnl = {
 };
 
 export async function getStrategyPnlBreakdown(
+  tenantId: string,
   mode: Mode = "paper",
   sinceDays: number | null = null,
 ): Promise<StrategyPnl[]> {
-  const conditions = [eq(trades.mode, mode)];
+  const conditions = [eq(trades.tenantId, tenantId), eq(trades.mode, mode)];
   if (sinceDays !== null) {
     const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
     conditions.push(gte(trades.timestamp, since));
@@ -91,6 +134,7 @@ export type DailyPnl = {
 };
 
 export async function getDailyPnl(
+  tenantId: string,
   mode: Mode = "paper",
   days = 30,
 ): Promise<DailyPnl[]> {
@@ -105,7 +149,13 @@ export async function getDailyPnl(
       trades: count(trades.id),
     })
     .from(trades)
-    .where(and(eq(trades.mode, mode), gte(trades.timestamp, since)))
+    .where(
+      and(
+        eq(trades.tenantId, tenantId),
+        eq(trades.mode, mode),
+        gte(trades.timestamp, since),
+      ),
+    )
     .groupBy(sql`to_char(${trades.timestamp}, 'YYYY-MM-DD')`);
 
   // Funding aggregated by date (separate query — different table)
@@ -116,7 +166,11 @@ export async function getDailyPnl(
     })
     .from(fundingPayments)
     .where(
-      and(eq(fundingPayments.mode, mode), gte(fundingPayments.timestamp, since)),
+      and(
+        eq(fundingPayments.tenantId, tenantId),
+        eq(fundingPayments.mode, mode),
+        gte(fundingPayments.timestamp, since),
+      ),
     )
     .groupBy(sql`to_char(${fundingPayments.timestamp}, 'YYYY-MM-DD')`);
 
@@ -153,7 +207,10 @@ export async function getDailyPnl(
   return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-export async function getRealizedPnlTotal(mode: Mode = "paper"): Promise<{
+export async function getRealizedPnlTotal(
+  tenantId: string,
+  mode: Mode = "paper",
+): Promise<{
   realizedPnl: number;
   fees: number;
   trades: number;
@@ -165,7 +222,7 @@ export async function getRealizedPnlTotal(mode: Mode = "paper"): Promise<{
       trades: count(trades.id),
     })
     .from(trades)
-    .where(eq(trades.mode, mode));
+    .where(and(eq(trades.tenantId, tenantId), eq(trades.mode, mode)));
   const r = rows[0] ?? { realizedPnl: 0, fees: 0, trades: 0 };
   return {
     realizedPnl: Number(r.realizedPnl),
@@ -175,10 +232,14 @@ export async function getRealizedPnlTotal(mode: Mode = "paper"): Promise<{
 }
 
 export async function getFundingTotal(
+  tenantId: string,
   mode: Mode = "paper",
   sinceDays: number | null = null,
 ): Promise<{ totalUsdc: number; count: number }> {
-  const conditions = [eq(fundingPayments.mode, mode)];
+  const conditions = [
+    eq(fundingPayments.tenantId, tenantId),
+    eq(fundingPayments.mode, mode),
+  ];
   if (sinceDays !== null) {
     const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
     conditions.push(gte(fundingPayments.timestamp, since));
@@ -194,11 +255,16 @@ export async function getFundingTotal(
   return { totalUsdc: Number(r.totalUsdc), count: Number(r.count) };
 }
 
-export async function getLatestEquity(mode: Mode = "paper") {
+export async function getLatestEquity(tenantId: string, mode: Mode = "paper") {
   const rows = await db
     .select()
     .from(equitySnapshots)
-    .where(eq(equitySnapshots.mode, mode))
+    .where(
+      and(
+        eq(equitySnapshots.tenantId, tenantId),
+        eq(equitySnapshots.mode, mode),
+      ),
+    )
     .orderBy(desc(equitySnapshots.timestamp))
     .limit(1);
   return rows[0] ?? null;
