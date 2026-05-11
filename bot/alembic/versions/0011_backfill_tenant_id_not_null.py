@@ -31,10 +31,11 @@ branch_labels = None
 depends_on = None
 
 
-# Operator's tenant UUID, set by the Phase 6b backfill. Hardcoded here
-# because we can't import application code from a migration; this UUID
-# is a load-bearing constant across phases (also referenced in
-# dashboard/src/lib/tenant.ts and the Phase 6b SQL).
+# Operator's tenant UUID, set by the Phase 6b SQL backfill (run on the
+# host once during the multi-tenancy cutover). Hardcoded here because
+# alembic migrations can't import application code; if 6b's UUID ever
+# changes, this constant + the matching default in docker-compose.yml's
+# x-bot-env block (TENANT_ID) must both be updated in lockstep.
 OPERATOR_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 

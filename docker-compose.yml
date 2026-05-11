@@ -28,6 +28,14 @@ x-bot-env: &bot-env
   KILL_SWITCH: "false"
   API_KEY: "${API_KEY:-}"
   DASHBOARD_URL: "${DASHBOARD_URL:-http://localhost:3000}"
+  # Operator's tenant UUID (set by Phase 6b backfill). Required so the
+  # bot's Repository tags every INSERT with a non-NULL tenant_id —
+  # alembic 0011 flips the tenant_id column to NOT NULL, and without
+  # this env the operator's existing 3 bots would crash on the first
+  # write after the migration. Per-tenant bots (Phase 3a, started by
+  # the dashboard orchestrator) get their own TENANT_ID injected at
+  # container-create time.
+  TENANT_ID: "${TENANT_ID:-00000000-0000-0000-0000-000000000001}"
 
 services:
   postgres:
