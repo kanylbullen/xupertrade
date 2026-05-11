@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TradeTable } from "@/components/trade-table";
 import { getRecentTrades } from "@/lib/queries";
+import { requireTenantServer } from "@/lib/tenant-server";
 
 export const dynamic = "force-dynamic";
 
@@ -14,10 +15,12 @@ export default async function TradesPage({
   const mode: "paper" | "testnet" | "mainnet" =
     rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
 
+  const tenant = await requireTenantServer();
+
   let trades: Awaited<ReturnType<typeof getRecentTrades>> = [];
 
   try {
-    trades = await getRecentTrades(100, mode);
+    trades = await getRecentTrades(tenant.id, 100, mode);
   } catch {
     // DB offline
   }

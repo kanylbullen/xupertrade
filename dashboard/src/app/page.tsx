@@ -15,6 +15,10 @@ import {
   getRealizedPnlTotal,
   getFundingTotal,
 } from "@/lib/queries";
+import { requireTenantServer } from "@/lib/tenant-server";
+import { db, tenantBots } from "@/lib/db";
+import { getBotApiUrl } from "@/lib/bot-api";
+import { and, eq } from "drizzle-orm";
 import type { PositionRow } from "@/components/position-card";
 import {
   StrategyPnlTable,
@@ -43,12 +47,21 @@ export default async function OverviewPage({
   const mode: "paper" | "testnet" | "mainnet" =
     rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
 
-  const botApiUrls: Record<string, string> = {
-    paper: process.env.BOT_API_URL_PAPER ?? "http://bot-paper:8000",
-    testnet: process.env.BOT_API_URL_TESTNET ?? "http://bot-testnet:8001",
-    mainnet: process.env.BOT_API_URL_MAINNET ?? "http://bot-mainnet:8002",
-  };
-  const botApiUrl = botApiUrls[mode];
+  // Resolves the calling tenant or redirects to /login. proxy.ts
+  // already gates the page route for unauthenticated users — this is
+  // belt-and-braces and gives us the tenant.id for tenant-scoped reads.
+  const tenant = await requireTenantServer();
+
+  // Per-tenant bot URL from tenant_bots row (Phase 6c PR δ helper). For
+  // operator this resolves to bot-paper/testnet/mainnet via the Phase
+  // 6b backfill; for tenants without a started bot for this mode the
+  // exchange-position fetch is skipped and we render DB rows only.
+  const botRows = await db
+    .select()
+    .from(tenantBots)
+    .where(and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.mode, mode)))
+    .limit(1);
+  const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
 
   let trades: Awaited<ReturnType<typeof getRecentTrades>> = [];
   let dbPositions: Awaited<ReturnType<typeof getOpenPositions>> = [];
@@ -71,14 +84,14 @@ export default async function OverviewPage({
       realizedTotal,
       fundingTotal,
     ] = await Promise.all([
-      getRecentTrades(20, mode),
-      getOpenPositions(mode),
-      getEquityHistory(200, mode),
-      getLatestEquity(mode),
-      getStrategyPnlBreakdown(mode),
-      getDailyPnl(mode, 30),
-      getRealizedPnlTotal(mode),
-      getFundingTotal(mode),
+      getRecentTrades(tenant.id, 20, mode),
+      getOpenPositions(tenant.id, mode),
+      getEquityHistory(tenant.id, 200, mode),
+      getLatestEquity(tenant.id, mode),
+      getStrategyPnlBreakdown(tenant.id, mode),
+      getDailyPnl(tenant.id, mode, 30),
+      getRealizedPnlTotal(tenant.id, mode),
+      getFundingTotal(tenant.id, mode),
     ]);
     dbConnected = true;
   } catch {
@@ -96,7 +109,12 @@ export default async function OverviewPage({
   const apiKey = process.env.API_KEY || "";
   const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
-  try {
+  // Skip the fetch if tenant has no bot for this mode — SSR shows
+  // empty exchange-positions, falls back to DB rows (which will also
+  // be empty for a fresh tenant).
+  if (!botApiUrl) {
+    // no bot yet — leave positionsFromExchange=false so DB fallback runs
+  } else try {
     const res = await fetch(`${botApiUrl}/api/positions`, { cache: "no-store", headers: authHeaders });
     if (res.ok) {
       const data = await res.json() as { positions: ExchangePos[] };

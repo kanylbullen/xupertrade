@@ -7,6 +7,10 @@ import { LeverageInput } from "@/components/leverage-input";
 import { MultiCoinToggle } from "@/components/multi-coin-toggle";
 import { AuthConfig } from "@/components/auth-config";
 import { TlsConfig } from "@/components/tls-config";
+import { requireTenantServer } from "@/lib/tenant-server";
+import { db, tenantBots } from "@/lib/db";
+import { getBotApiUrl } from "@/lib/bot-api";
+import { and, eq } from "drizzle-orm";
 
 export default async function OptionsPage({
   searchParams,
@@ -18,12 +22,13 @@ export default async function OptionsPage({
   const mode: "paper" | "testnet" | "mainnet" =
     rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
 
-  const botApiUrls: Record<string, string> = {
-    paper: process.env.BOT_API_URL_PAPER ?? "http://bot-paper:8000",
-    testnet: process.env.BOT_API_URL_TESTNET ?? "http://bot-testnet:8001",
-    mainnet: process.env.BOT_API_URL_MAINNET ?? "http://bot-mainnet:8002",
-  };
-  const botApiUrl = botApiUrls[mode];
+  const tenant = await requireTenantServer();
+  const botRows = await db
+    .select()
+    .from(tenantBots)
+    .where(and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.mode, mode)))
+    .limit(1);
+  const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
 
   // /strategies is auth-gated when API_KEY is set on the bot. Forward the
   // dashboard's API_KEY from server-side env so SSR doesn't 401.
@@ -33,7 +38,7 @@ export default async function OptionsPage({
   type StrategyMeta = { name: string; symbol: string; timeframe: string };
   let strategies: StrategyMeta[] = [];
   let botApiOnline = false;
-  try {
+  if (botApiUrl) try {
     const res = await fetch(`${botApiUrl}/strategies`, { cache: "no-store", headers: authHeaders });
     if (res.ok) {
       const data = await res.json() as { strategies: StrategyMeta[] };

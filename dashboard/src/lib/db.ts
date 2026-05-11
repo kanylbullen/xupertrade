@@ -30,8 +30,23 @@ export const db = drizzle(client);
 
 // Mirror the Python SQLAlchemy models
 
+// tenant_id is NOT NULL on all data tables as of alembic 0011 (Phase 6c
+// PR β). The Drizzle schema mirrors that on the 5 tables this module
+// exposes (trades / positions / equity_snapshots / funding_payments /
+// strategy_configs). Other tenant-scoped tables in alembic 0011
+// (backtest_runs / manual_onchain_levels / hodl_purchases /
+// user_vault_entries) are not declared here because the dashboard
+// doesn't query them via Drizzle today — they're read through the
+// bot's API. Add them here if/when a server-component query needs
+// them, with the same notNull tenantId column.
+//
+// Every read site MUST filter by tenantId or it leaks across tenants.
+// queries.ts requires a tenantId arg on every exported function;
+// server components must pass it.
+
 export const trades = pgTable("trades", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   orderId: varchar("order_id", { length: 64 }).notNull(),
   strategyName: varchar("strategy_name", { length: 64 }).notNull(),
   symbol: varchar("symbol", { length: 16 }).notNull(),
@@ -48,6 +63,7 @@ export const trades = pgTable("trades", {
 
 export const positions = pgTable("positions", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   strategyName: varchar("strategy_name", { length: 64 }).notNull(),
   symbol: varchar("symbol", { length: 16 }).notNull(),
   side: varchar("side", { length: 8 }).notNull(),
@@ -64,6 +80,7 @@ export const positions = pgTable("positions", {
 
 export const equitySnapshots = pgTable("equity_snapshots", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   totalEquity: doublePrecision("total_equity").notNull(),
   availableBalance: doublePrecision("available_balance").notNull(),
   unrealizedPnl: doublePrecision("unrealized_pnl").default(0),
@@ -74,6 +91,7 @@ export const equitySnapshots = pgTable("equity_snapshots", {
 
 export const fundingPayments = pgTable("funding_payments", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
   timestamp: timestamp("timestamp", { withTimezone: true }).notNull(),
   hash: varchar("hash", { length: 80 }).notNull(),
   coin: varchar("coin", { length: 16 }).notNull(),
@@ -87,6 +105,15 @@ export const fundingPayments = pgTable("funding_payments", {
 
 export const strategyConfigs = pgTable("strategy_configs", {
   id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
+  // .unique() mirrors the global UNIQUE on `name` from alembic 0001
+  // (still in effect — see `\d strategy_configs` on prod). This is
+  // technically wrong for multi-tenancy: two tenants using the same
+  // strategy name would collide. The proper fix is an alembic
+  // migration to drop the global unique and replace with a
+  // (tenant_id, name) composite — tracked as a follow-up to Phase 6c.
+  // The table is empty in prod today (0 rows pre-cutover) so the
+  // collision risk is theoretical until a tenant actually inserts.
   name: varchar("name", { length: 64 }).notNull().unique(),
   symbol: varchar("symbol", { length: 16 }).notNull(),
   timeframe: varchar("timeframe", { length: 8 }).notNull(),
