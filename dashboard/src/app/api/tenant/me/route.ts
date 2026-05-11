@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireTenant } from "@/lib/tenant";
+import { requireTenant, type Tenant } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
  * 401 when there's no/invalid session.
  */
 export async function GET(req: Request) {
-  let tenant;
+  let tenant: Tenant;
   try {
     tenant = await requireTenant(req);
   } catch (e) {
