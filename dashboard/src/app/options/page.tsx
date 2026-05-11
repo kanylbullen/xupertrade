@@ -5,8 +5,6 @@ import { Separator } from "@/components/ui/separator";
 import { StrategyToggle } from "@/components/strategy-toggle";
 import { LeverageInput } from "@/components/leverage-input";
 import { MultiCoinToggle } from "@/components/multi-coin-toggle";
-import { AuthConfig } from "@/components/auth-config";
-import { TlsConfig } from "@/components/tls-config";
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
@@ -80,15 +78,20 @@ export default async function OptionsPage({
 
       <Separator />
 
-      {/* Authentication */}
-      <AuthConfig />
+      {/* Authentication + TLS config UI intentionally NOT shown on
+          this page. Authentik OIDC is on for every signed-in user
+          (tenant-level toggles wouldn't make sense), and TLS is a
+          host-level Caddy concern that doesn't belong on a per-
+          tenant page either.
 
-      <Separator />
-
-      {/* HTTPS / TLS */}
-      <TlsConfig />
-
-      <Separator />
+          Current state (UI-cleanup only):
+          - /api/tls/{config,configure} stay behind requireOperator
+            (Phase 6c PR γ #59). Underlying Caddy config still lives
+            in Redis where the removed UI wrote it.
+          - /api/auth/configure is currently NOT operator-gated —
+            tenant-isolation gap left over from PR ε that the
+            followup PR will close along with migrating both stores
+            from Redis to Phase-injected env vars. */}
 
       {/* Strategy controls */}
       <Card>
