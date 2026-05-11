@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { ModeSwitch } from "@/components/mode-switch";
 import { BotStatusIndicator } from "@/components/bot-status-indicator";
 import { SignOut } from "@/components/sign-out";
@@ -17,9 +17,14 @@ const links = [
 ];
 
 export function Nav() {
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const modeParam = searchParams.get("mode");
   const suffix = modeParam ? `?mode=${modeParam}` : "";
+
+  // Public pages (login) shouldn't show the in-app nav — those links
+  // would 307 back to /login anyway. Cleaner to render nothing.
+  if (pathname === "/login") return null;
 
   return (
     <nav className="border-b bg-background">
