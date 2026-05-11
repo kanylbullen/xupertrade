@@ -1,7 +1,7 @@
-import { botFetch } from "@/lib/bot-api";
+import { tenantBotFetch } from "@/lib/bot-api";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  return botFetch(req, "/api/indicator-status");
+  return tenantBotFetch(req, "/api/indicator-status");
 }

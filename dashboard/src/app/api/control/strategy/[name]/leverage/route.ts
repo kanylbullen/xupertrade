@@ -1,4 +1,4 @@
-import { botFetch } from "@/lib/bot-api";
+import { tenantBotFetch } from "@/lib/bot-api";
 
 export const dynamic = "force-dynamic";
 
@@ -8,7 +8,7 @@ export async function POST(
 ) {
   const { name } = await params;
   const body = await req.json().catch(() => ({}));
-  return botFetch(req, `/api/control/strategy/${encodeURIComponent(name)}/leverage`, {
+  return tenantBotFetch(req, `/api/control/strategy/${encodeURIComponent(name)}/leverage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -20,7 +20,7 @@ export async function DELETE(
   { params }: { params: Promise<{ name: string }> }
 ) {
   const { name } = await params;
-  return botFetch(req, `/api/control/strategy/${encodeURIComponent(name)}/leverage/reset`, {
+  return tenantBotFetch(req, `/api/control/strategy/${encodeURIComponent(name)}/leverage/reset`, {
     method: "POST",
   });
 }
