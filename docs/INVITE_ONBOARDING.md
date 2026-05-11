@@ -326,7 +326,13 @@ Before inviting your first non-operator user:
       is in effect (Phase 5a infrastructure)
 - [ ] `hypertrade-users` Authentik group exists + has a Group
       Membership policy on the dashboard's OIDC provider
-- [ ] Dashboard reachable over HTTPS (Caddy + valid cert)
+- [ ] Dashboard reachable over HTTPS — for LAN-only tier 1 deploys
+      this is Caddy + Let's Encrypt; for closed-beta with external
+      users it's **Cloudflare Tunnel** (see
+      [`CLOUDFLARE_TUNNEL.md`](CLOUDFLARE_TUNNEL.md))
+- [ ] Cloudflare Tunnel container running (`docker compose
+      --profile public ps cloudflared` shows `Up`; verify
+      tunnel health in CF Zero Trust dashboard) — closed-beta only
 - [ ] `npm run test:integration` green against an ephemeral
       Postgres (testcontainers) — proves the RLS policies still
       enforce isolation
