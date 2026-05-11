@@ -202,7 +202,7 @@ services:
     # reproducible. cloudflared releases are frequent — bump this
     # tag intentionally after reading the changelog rather than
     # taking whatever happens to be on Docker Hub today.
-    image: cloudflare/cloudflared:2025.5.0
+    image: cloudflare/cloudflared:2026.3.0
     container_name: hypertrade-cloudflared
     profiles: [public]
     restart: unless-stopped
