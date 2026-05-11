@@ -152,11 +152,16 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      # Probe an unauthenticated endpoint (returns 200) instead of `/`
-      # which redirects to /login when auth is enabled — `curl -sf`
-      # treats 3xx as failure without `-L`, falsely marking the
-      # container unhealthy when auth is on.
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/auth/config || exit 1"]
+      # Probe a dedicated liveness endpoint that has zero downstream
+      # dependencies (no DB, no bot, no Redis) — just confirms the
+      # Next.js process is serving requests. `/api/auth/config` was a
+      # bad choice: it 503s when the bot is unreachable, cascading
+      # bot outages into dashboard "unhealthy" even though the dashboard
+      # itself is fine.
+      #
+      # wget (not curl) because node:22-alpine ships with neither;
+      # the dashboard Dockerfile installs wget specifically for this.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/healthz || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
