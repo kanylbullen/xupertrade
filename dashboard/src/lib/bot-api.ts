@@ -1,5 +1,8 @@
+import { and, eq } from "drizzle-orm";
+
 import { API_PORT_BY_MODE, isValidMode, type BotMode } from "./bot-orchestrator";
-import type { tenantBots } from "./db";
+import { db, tenantBots } from "./db";
+import { requireTenant } from "./tenant";
 
 export type Mode = BotMode;
 
@@ -49,10 +52,17 @@ function parseMode(req: Request): Mode {
   return m === "paper" || m === "mainnet" ? m : "testnet";
 }
 
-export async function botFetch(req: Request, path: string, init?: RequestInit) {
-  const mode = parseMode(req);
-  const base = botUrl(mode);
-
+/**
+ * Internal: do the actual fetch with API_KEY forwarding + standard
+ * error mapping. Shared by `botFetch` (env-URL legacy path) and
+ * `tenantBotFetch` (tenant_bots-lookup path).
+ */
+async function _doBotFetch(
+  base: string,
+  path: string,
+  mode: Mode,
+  init?: RequestInit,
+): Promise<Response> {
   // Forward the dashboard's API_KEY as X-Api-Key so the bot's
   // _require_auth gate accepts our control-route POSTs (pause, flat-all,
   // strategy toggle, leverage, tls/configure, auth/configure, ...).
@@ -94,4 +104,64 @@ export async function botFetch(req: Request, path: string, init?: RequestInit) {
       { status: 502 }
     );
   }
+}
+
+/**
+ * Legacy env-URL proxy. Used by routes that haven't been migrated to
+ * `tenantBotFetch` yet. After Phase 6c PR ε this is only retained for
+ * back-compat — no production code path should depend on it.
+ */
+export async function botFetch(req: Request, path: string, init?: RequestInit) {
+  const mode = parseMode(req);
+  const base = botUrl(mode);
+  return _doBotFetch(base, path, mode, init);
+}
+
+/**
+ * Tenant-aware proxy (Phase 6c PR ε). Resolves the calling tenant via
+ * `requireTenant`, looks up their bot for the requested mode in
+ * `tenant_bots`, and proxies to that bot's URL. Returns 401 (no
+ * session), 404 (no bot for this mode), or 502 (bot unreachable).
+ *
+ * Operator gets routed to their existing 3 bots via the rows Phase 6b
+ * inserted into tenant_bots — no special-case code path needed.
+ */
+export async function tenantBotFetch(
+  req: Request,
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  // Resolve tenant — throws Response (401) if no/invalid session.
+  let tenantId: string;
+  try {
+    const t = await requireTenant(req);
+    tenantId = t.id;
+  } catch (e) {
+    if (e instanceof Response) return e;
+    throw e;
+  }
+
+  const mode = parseMode(req);
+
+  const rows = await db
+    .select()
+    .from(tenantBots)
+    .where(and(eq(tenantBots.tenantId, tenantId), eq(tenantBots.mode, mode)))
+    .limit(1);
+  if (rows.length === 0) {
+    return Response.json(
+      { error: `no ${mode} bot for tenant`, mode },
+      { status: 404 },
+    );
+  }
+
+  const base = getBotApiUrl(rows[0]);
+  if (!base) {
+    return Response.json(
+      { error: `tenant ${mode} bot not started`, mode },
+      { status: 404 },
+    );
+  }
+
+  return _doBotFetch(base, path, mode, init);
 }

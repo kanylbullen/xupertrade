@@ -1,8 +1,23 @@
 import { createRedisSubscriber, CHANNEL } from "@/lib/redis";
+import { requireOperator } from "@/lib/operator";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  // Operator-only for now (Phase 6c PR ε). The bot's Event class
+  // doesn't include tenant_id, so we can't filter the Redis channel
+  // per-tenant — every event would leak across tenants. A follow-up
+  // PR will (a) add tenant_id to the bot's Event base class and (b)
+  // either filter on tenant_id here or move to per-tenant Redis
+  // channels. Until then, only operator gets the live SSE stream;
+  // beta tenants poll instead.
+  try {
+    await requireOperator(req);
+  } catch (e) {
+    if (e instanceof Response) return e;
+    throw e;
+  }
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
