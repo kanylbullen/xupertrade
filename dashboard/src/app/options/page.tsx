@@ -5,8 +5,6 @@ import { Separator } from "@/components/ui/separator";
 import { StrategyToggle } from "@/components/strategy-toggle";
 import { LeverageInput } from "@/components/leverage-input";
 import { MultiCoinToggle } from "@/components/multi-coin-toggle";
-import { AuthConfig } from "@/components/auth-config";
-import { TlsConfig } from "@/components/tls-config";
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
@@ -80,15 +78,17 @@ export default async function OptionsPage({
 
       <Separator />
 
-      {/* Authentication */}
-      <AuthConfig />
-
-      <Separator />
-
-      {/* HTTPS / TLS */}
-      <TlsConfig />
-
-      <Separator />
+      {/* Authentication + TLS config are intentionally NOT shown on
+          this page — both are operator-managed via Phase secrets +
+          env vars (OIDC_CLIENT_SECRET, CLOUDFLARE_API_TOKEN) rather
+          than runtime UI mutations. Authentik OIDC is on for every
+          signed-in user; tenant-level toggles wouldn't make sense.
+          Caddy reads its DNS-01 token from env at boot. The
+          /api/auth/configure + /api/tls/configure POST endpoints are
+          operator-only at the dashboard layer (gated by
+          requireOperator) and slated for removal in a follow-up PR
+          that migrates the bot to read those values directly from
+          env instead of Redis. */}
 
       {/* Strategy controls */}
       <Card>
