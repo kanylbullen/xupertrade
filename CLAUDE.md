@@ -238,6 +238,24 @@ doesn't quietly survive multiple deploys.
 > When in doubt, look at `docker images | grep bot-mainnet` — if the
 > "CREATED" column says days/weeks ago, force a no-cache rebuild
 > before starting the container.
+>
+> **This trap is not mainnet-specific** — bit dashboard the same way
+> on 2026-05-11 during the healthcheck-fix iterations. Five PRs back-
+> to-back rebuilt dashboard but `docker compose build --pull dashboard`
+> hit the layer cache every time and never produced a new image SHA.
+> `--force-recreate` then recreated the container off the same stale
+> image, so the new code never reached production. Symptom: deploy
+> command exits 0, container restarts, but live behavior matches the
+> pre-PR state. After three rounds of "but I deployed it!" confusion,
+> `docker image inspect hypertrade-dashboard -f '{{.Created}}'` showed
+> the image was 2 days old. **Verify image age after every deploy when
+> you change the dashboard or bot code:**
+>
+> ```bash
+> docker image inspect hypertrade-dashboard -f 'built: {{.Created}}'
+> ```
+>
+> If the timestamp pre-dates your commit, force a no-cache rebuild.
 
 Build only what changed for speed (e.g.
 `phase run -- bash -c 'docker compose build --pull bot-testnet bot-paper dashboard'`).
