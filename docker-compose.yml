@@ -168,9 +168,15 @@ services:
       # bot outages into dashboard "unhealthy" even though the dashboard
       # itself is fine.
       #
-      # wget (not curl) because node:22-alpine ships with neither;
-      # the dashboard Dockerfile installs wget specifically for this.
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/healthz || exit 1"]
+      # wget (not curl) because node:22-alpine ships busybox wget but
+      # not curl. busybox `wget --spider` returns 0 on 2xx and non-zero
+      # on connection failure / 4xx-5xx — exactly what we want.
+      #
+      # 127.0.0.1 (not localhost): busybox wget tries IPv6 (`[::1]`)
+      # first when given `localhost` and does NOT fall back to IPv4 on
+      # connection-refused. Next.js standalone binds IPv4-only (no
+      # tcp6 socket), so the IPv6 attempt fails and wget gives up.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/api/healthz || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
