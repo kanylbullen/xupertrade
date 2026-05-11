@@ -25,4 +25,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 USER nextjs
 EXPOSE 3000
 ENV PORT=3000
+# Bind to all interfaces, not just the container's hostname address.
+# Without this, Next.js standalone listens only on the docker-network
+# IP (e.g. 172.18.0.x) and `wget http://localhost:3000/...` from inside
+# the container fails with "connection refused" — breaking the compose
+# healthcheck even though external requests via the published port
+# mapping work fine.
+ENV HOSTNAME=0.0.0.0
 CMD ["node", "server.js"]
