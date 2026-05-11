@@ -78,17 +78,20 @@ export default async function OptionsPage({
 
       <Separator />
 
-      {/* Authentication + TLS config are intentionally NOT shown on
-          this page — both are operator-managed via Phase secrets +
-          env vars (OIDC_CLIENT_SECRET, CLOUDFLARE_API_TOKEN) rather
-          than runtime UI mutations. Authentik OIDC is on for every
-          signed-in user; tenant-level toggles wouldn't make sense.
-          Caddy reads its DNS-01 token from env at boot. The
-          /api/auth/configure + /api/tls/configure POST endpoints are
-          operator-only at the dashboard layer (gated by
-          requireOperator) and slated for removal in a follow-up PR
-          that migrates the bot to read those values directly from
-          env instead of Redis. */}
+      {/* Authentication + TLS config UI intentionally NOT shown on
+          this page. Authentik OIDC is on for every signed-in user
+          (tenant-level toggles wouldn't make sense), and TLS is a
+          host-level Caddy concern that doesn't belong on a per-
+          tenant page either.
+
+          Current state (UI-cleanup only):
+          - /api/tls/{config,configure} stay behind requireOperator
+            (Phase 6c PR γ #59). Underlying Caddy config still lives
+            in Redis where the removed UI wrote it.
+          - /api/auth/configure is currently NOT operator-gated —
+            tenant-isolation gap left over from PR ε that the
+            followup PR will close along with migrating both stores
+            from Redis to Phase-injected env vars. */}
 
       {/* Strategy controls */}
       <Card>
