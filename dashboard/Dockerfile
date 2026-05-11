@@ -14,10 +14,10 @@ RUN npm run build
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-# wget is needed for the compose healthcheck probe. node:22-alpine ships
-# without curl/wget; without this the healthcheck command silently exits
-# 127 ("not found") and Compose marks the container unhealthy.
-RUN apk add --no-cache wget
+# Note: the compose healthcheck uses `wget --spider`. node:22-alpine
+# ships busybox wget pre-installed at /usr/bin/wget, which supports
+# `--spider` and returns the exit codes we need — no extra package
+# install required.
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./

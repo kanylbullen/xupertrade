@@ -168,8 +168,9 @@ services:
       # bot outages into dashboard "unhealthy" even though the dashboard
       # itself is fine.
       #
-      # wget (not curl) because node:22-alpine ships with neither;
-      # the dashboard Dockerfile installs wget specifically for this.
+      # wget (not curl) because node:22-alpine ships busybox wget but
+      # not curl. busybox `wget --spider` returns 0 on 2xx and non-zero
+      # on connection failure / 4xx-5xx — exactly what we want.
       #
       # 127.0.0.1 (not localhost): busybox wget tries IPv6 (`[::1]`)
       # first when given `localhost` and does NOT fall back to IPv4 on
