@@ -313,7 +313,7 @@ class BotControl:
     # --- TLS / HTTPS configuration (Caddy reverse proxy)
     # Keys:
     #   dashboard:tls:enabled    — "0" or "1"
-    #   dashboard:tls:domain     — e.g. "hypertrade.xuper.fun"
+    #   dashboard:tls:domain     — e.g. "mybot.example.com"
     #   dashboard:tls:email      — for Let's Encrypt notifications
     #   dashboard:tls:cf_token   — Cloudflare API token (Zone:Read + Zone DNS:Edit)
 

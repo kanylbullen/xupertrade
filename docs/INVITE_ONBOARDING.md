@@ -331,7 +331,7 @@ Before inviting your first non-operator user:
       bot routing via `tenant_bots` lookup (per-tenant bot URLs
       replace hardcoded env URLs); SSE locked to operator until
       bot Event class carries `tenant_id`. End-to-end verified
-      2026-05-11 with `hypertest1@xuper.fun` test account: own
+      2026-05-11 with `betauser1@example.com` test account: own
       tenant row auto-created on first sight, dashboard shows
       empty data + bot-offline (no `tenant_bots` row), no operator
       data leaked.
@@ -341,7 +341,7 @@ Before inviting your first non-operator user:
 - [x] Dashboard reachable over HTTPS — Caddy + Let's Encrypt for
       LAN; **Cloudflare Tunnel** (see
       [`CLOUDFLARE_TUNNEL.md`](CLOUDFLARE_TUNNEL.md)) for public
-      access at `hypertrade.xuper.fun`
+      access at `mybot.example.com`
 - [x] Cloudflare Tunnel container running (`docker compose
       --profile public ps cloudflared` shows `Up`); pinned to
       `cloudflare/cloudflared:2026.3.0`

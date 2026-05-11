@@ -35,6 +35,27 @@ description = "Hardcoded SECRET_KEY/API_KEY/PASSWORD/PRIVATE_KEY literal"
 # optional so unquoted dotenv lines (`API_KEY=actualvalue`) also fire.
 regex = '''(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*[:=][ ]*["']?[A-Za-z0-9_+/=-]{16,}["']?'''
 
+# --- Identity / infra leaks (added 2026-05-11 after security audit) ---
+# Mirrors the soft-warns from .githooks/pre-commit. CI fails on these
+# even though local hook is warn-only — the public-repo cost-benefit
+# favors hard-fail in CI (audit found 8+ leaks across config + docs
+# that nobody noticed at commit time).
+
+[[rules]]
+id = "operator-domain"
+description = "Operator-owned personal/company domain in committed code"
+regex = '''(?i)\b[a-zA-Z0-9._%+-]*@?(xuper\.fun|molnkontakt\.se)\b'''
+
+[[rules]]
+id = "operator-service-subdomain"
+description = "Operator-specific service subdomain (auth/phase/secrets/console/admin/api)"
+regex = '''(?i)\b(auth|phase|secrets|console|admin|api)\.[a-z0-9-]+\.(fun|com|net|org|io|dev|se|app)\b'''
+
+[[rules]]
+id = "absolute-home-path"
+description = "Absolute /home/<user>/ path reveals operator OS username"
+regex = '''\b/home/[a-z][a-z0-9_-]{1,30}/'''
+
 # --- Allowlist (false positives) ---
 
 [allowlist]
@@ -57,4 +78,12 @@ regexes = [
   '''0x[a-fA-F0-9]{64}.*example''',
   '''\$DEPLOY_HOST''',
   '''\$YOUR_DOMAIN''',
+  # RFC 2606 reserved-for-documentation TLDs. The new
+  # operator-service-subdomain rule would otherwise fire on
+  # `auth.example.com` / `secrets.example.com` etc, which are
+  # the policy-recommended placeholders in CLAUDE.md.
+  '''(?i)\b(auth|phase|secrets|console|admin|api)\.example\.(com|org|net)\b''',
+  '''(?i)\b(auth|phase|secrets|console|admin|api)\.(example|invalid|localhost|test)\b''',
+  # `your-actual-domain.com`, `<your-domain>` style placeholders.
+  '''(?i)\b(auth|phase|secrets|console|admin|api)\.(your|my|the)-?[a-z0-9-]*-?domain\.[a-z]{2,4}\b''',
 ]
