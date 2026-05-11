@@ -152,6 +152,25 @@ class Settings(BaseSettings):
     # API authentication
     api_key: str = ""  # if set, all POST endpoints require X-Api-Key header
 
+    # Dashboard auth config (Phase 6c followup — env-backed override
+    # of the Redis values written by the now-removed Settings UI).
+    # When any of these are set in env (Phase-injected), the bot's
+    # `/api/auth/config` + `/api/auth/oidc-secret` endpoints return
+    # the env values instead of Redis. Empty = fall back to Redis.
+    auth_mode: str = ""               # "" | "disabled" | "basic" | "oidc"
+    oidc_issuer: str = ""             # e.g. https://auth.xuper.fun/application/o/hypertrade/
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""      # SECRET — only ever read from env
+    oidc_scopes: str = ""             # default "openid profile email" if blank
+
+    # TLS / Caddy config (same pattern as auth). cf_api_token is the
+    # secret that the Settings UI previously stored in Redis; moved
+    # to Phase as the source of truth.
+    tls_enabled_env: str = ""         # "1" or "0"; empty = Redis fallback
+    tls_domain: str = ""
+    tls_email: str = ""
+    tls_cf_api_token: str = ""        # SECRET — only ever read from env
+
     # Telegram notifications (optional). Only enable on ONE bot instance
     # in multi-mode setups — that single notifier subscribes to all 3 modes'
     # event channels and routes commands per-mode internally.
