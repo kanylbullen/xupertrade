@@ -90,14 +90,32 @@ async function _doBotFetch(
       cache: "no-store",
       headers,
     });
-    if (!res.ok) {
+
+    // Pass through both 2xx and 4xx so the dashboard surfaces actionable
+    // bot-side errors verbatim (e.g. 400 invalid leverage, 401 API_KEY
+    // mismatch, 403 strategy disabled). Bot 5xx is squashed to 502 to
+    // distinguish "bot misbehaved" from "the dashboard misbehaved".
+    //
+    // Body parsing is best-effort: most bot endpoints return JSON, but
+    // a few error paths (or non-error endpoints) return text. Forward
+    // whichever we got rather than choking on parse failure.
+    if (res.status >= 500) {
+      const body = await res.text().catch(() => "");
       return Response.json(
-        { error: `Bot API returned ${res.status}` },
-        { status: res.status === 404 ? 404 : 502 }
+        { error: `Bot API returned ${res.status}`, detail: body.slice(0, 500) },
+        { status: 502 },
       );
     }
-    const data = await res.json();
-    return Response.json(data);
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const data = await res.json().catch(() => ({}));
+      return Response.json(data, { status: res.status });
+    }
+    const text = await res.text().catch(() => "");
+    return new Response(text, {
+      status: res.status,
+      headers: contentType ? { "content-type": contentType } : undefined,
+    });
   } catch {
     return Response.json(
       { error: `Bot API at ${base} unreachable (mode=${mode})` },

@@ -6,7 +6,7 @@
  * tenant-aware data route.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../db", () => ({
   db: {
@@ -115,6 +115,13 @@ describe("tenantBotFetch", () => {
     mockedDbSelect.mockReset();
   });
 
+  // Restore globalThis.fetch after the suite so a leaked mock can't
+  // poison subsequent test files (vitest runs files in workers but
+  // node modules can still share per-worker state).
+  afterAll(() => {
+    fetchSpy.mockRestore();
+  });
+
   function chainSelect(rows: Array<typeof tenantBots.$inferSelect>) {
     // Drizzle: db.select().from().where().limit()
     const limit = vi.fn().mockResolvedValue(rows);
@@ -185,24 +192,29 @@ describe("tenantBotFetch", () => {
     expect(body.error).toContain("not started");
   });
 
+  function liveBotRow(mode: "paper" | "testnet" | "mainnet" = "testnet") {
+    return {
+      id: "x",
+      tenantId: "y",
+      mode,
+      containerId: "abc",
+      containerName: `hypertrade-bot-${mode}`,
+      isRunning: true,
+      telegramWebhookSecret: null,
+      createdAt: new Date(),
+      lastStartedAt: new Date(),
+      lastStoppedAt: null,
+    } as never;
+  }
+
   it("proxies to the resolved bot URL on success", async () => {
     mockedRequireTenant.mockResolvedValue(tenant());
-    chainSelect([
-      {
-        id: "x",
-        tenantId: "y",
-        mode: "testnet",
-        containerId: "abc",
-        containerName: "hypertrade-bot-testnet",
-        isRunning: true,
-        telegramWebhookSecret: null,
-        createdAt: new Date(),
-        lastStartedAt: new Date(),
-        lastStoppedAt: null,
-      } as never,
-    ]);
+    chainSelect([liveBotRow("testnet")]);
     fetchSpy.mockResolvedValue(
-      new Response(JSON.stringify({ positions: [] }), { status: 200 }),
+      new Response(JSON.stringify({ positions: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
     );
 
     const res = await tenantBotFetch(
@@ -213,5 +225,61 @@ describe("tenantBotFetch", () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
     const calledUrl = fetchSpy.mock.calls[0][0] as string;
     expect(calledUrl).toBe("http://hypertrade-bot-testnet:8001/api/positions");
+  });
+
+  it("passes through 4xx from the bot with the JSON error body", async () => {
+    // Bot validation/auth/permission errors must reach the dashboard
+    // user verbatim — squashing them to 502 hides actionable info
+    // (e.g. "invalid leverage value", "strategy disabled").
+    mockedRequireTenant.mockResolvedValue(tenant());
+    chainSelect([liveBotRow("testnet")]);
+    fetchSpy.mockResolvedValue(
+      new Response(JSON.stringify({ error: "invalid leverage" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const res = await tenantBotFetch(
+      new Request("https://x/api/control/state?mode=testnet"),
+      "/api/control/state",
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toEqual({ error: "invalid leverage" });
+  });
+
+  it("squashes bot 5xx to 502 with the bot body in `detail`", async () => {
+    mockedRequireTenant.mockResolvedValue(tenant());
+    chainSelect([liveBotRow("testnet")]);
+    fetchSpy.mockResolvedValue(
+      new Response("internal error: redis down", {
+        status: 500,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    const res = await tenantBotFetch(
+      new Request("https://x/api/positions?mode=testnet"),
+      "/api/positions",
+    );
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toContain("500");
+    expect(body.detail).toContain("redis down");
+  });
+
+  it("returns 502 on network failure (fetch throws)", async () => {
+    mockedRequireTenant.mockResolvedValue(tenant());
+    chainSelect([liveBotRow("testnet")]);
+    fetchSpy.mockRejectedValue(new TypeError("fetch failed"));
+
+    const res = await tenantBotFetch(
+      new Request("https://x/api/positions?mode=testnet"),
+      "/api/positions",
+    );
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toContain("unreachable");
   });
 });
