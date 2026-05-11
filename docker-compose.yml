@@ -152,7 +152,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/ || exit 1"]
+      # Probe an unauthenticated endpoint (returns 200) instead of `/`
+      # which redirects to /login when auth is enabled — `curl -sf`
+      # treats 3xx as failure without `-L`, falsely marking the
+      # container unhealthy when auth is on.
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/auth/config || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
