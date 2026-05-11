@@ -44,7 +44,12 @@ regex = '''(SECRET_KEY|API_KEY|PASSWORD|PRIVATE_KEY)[ ]*[:=][ ]*["']?[A-Za-z0-9_
 [[rules]]
 id = "operator-domain"
 description = "Operator-owned personal/company domain in committed code"
-regex = '''(?i)\b[a-zA-Z0-9._%+-]*@?(xuper\.fun|molnkontakt\.se)\b'''
+# `\b` boundary at the start of `xuper` excludes false positives
+# like `xupxuper.fun` (no word-boundary between consecutive word
+# chars) while still catching legit subdomains like
+# `myhost.xuper.fun` (`.` is non-word, so `.x` is a boundary). Go
+# regexp supports \b — same semantics as the local hook's PCRE.
+regex = '''(?i)\b(xuper\.fun|molnkontakt\.se)\b'''
 
 [[rules]]
 id = "operator-service-subdomain"
@@ -78,10 +83,12 @@ regexes = [
   '''0x[a-fA-F0-9]{64}.*example''',
   '''\$DEPLOY_HOST''',
   '''\$YOUR_DOMAIN''',
-  # RFC 2606 reserved-for-documentation TLDs. The new
-  # operator-service-subdomain rule would otherwise fire on
-  # `auth.example.com` / `secrets.example.com` etc, which are
-  # the policy-recommended placeholders in CLAUDE.md.
+  # RFC 2606 reserved-for-documentation TLDs. CLAUDE.md is
+  # already path-allowlisted above (it documents the rule), but
+  # other docs (CLOUDFLARE_TUNNEL.md, INVITE_ONBOARDING.md, plan
+  # docs) legitimately use `auth.example.com` /
+  # `secrets.example.com` as placeholders — these regexes prevent
+  # the new operator-service-subdomain rule from firing on them.
   '''(?i)\b(auth|phase|secrets|console|admin|api)\.example\.(com|org|net)\b''',
   '''(?i)\b(auth|phase|secrets|console|admin|api)\.(example|invalid|localhost|test)\b''',
   # `your-actual-domain.com`, `<your-domain>` style placeholders.

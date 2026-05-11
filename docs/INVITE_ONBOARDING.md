@@ -337,7 +337,7 @@ Before inviting your first non-operator user:
       data leaked.
 - [x] `hypertrade-users` Authentik group exists + has a Group
       Membership policy on the dashboard's OIDC provider —
-      verified by hypertest1 successful OIDC sign-in
+      verified by betauser1 successful OIDC sign-in
 - [x] Dashboard reachable over HTTPS — Caddy + Let's Encrypt for
       LAN; **Cloudflare Tunnel** (see
       [`CLOUDFLARE_TUNNEL.md`](CLOUDFLARE_TUNNEL.md)) for public
@@ -351,7 +351,7 @@ Before inviting your first non-operator user:
 - [ ] Test the invite flow end-to-end with a throwaway Authentik
       account: sign in → set passphrase → add HL testnet key →
       unlock → create paper bot → bot ticks without error
-      (hypertest1 logged in successfully but hasn't completed the
+      (betauser1 logged in successfully but hasn't completed the
       passphrase + bot-create flow yet — first beta tenant will
       exercise this)
 - [ ] Operator headcount sanity: < 5 tenants planned for first
