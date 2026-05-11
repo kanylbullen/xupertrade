@@ -96,17 +96,39 @@ describe("requireOperator", () => {
     expect((thrown as Response).status).toBe(401);
   });
 
-  it("uses === true rather than truthy check (no falsy bypass)", async () => {
-    // Defensive: someone might set isOperator to a truthy non-bool
-    // (e.g. "true" string from a misconfigured backfill). Without an
-    // explicit !== true check, that would silently grant operator
-    // access. requireOperator uses !t.isOperator which treats only
-    // exact `true` as "is operator"; "true" string is still truthy
-    // so this would actually pass — but the goal of this test is to
-    // document the contract: only bool true grants access in the
-    // future if we ever tighten the check.
-    const weird = fakeTenant({ isOperator: false });
+  it("rejects truthy-non-true isOperator with 403 (strict bool check)", async () => {
+    // Defensive contract: only the exact boolean `true` grants
+    // operator access. A truthy non-bool (e.g. the string "true" from
+    // a misconfigured backfill or a future ORM change that
+    // accidentally serializes booleans as strings) must NOT silently
+    // promote to operator. requireOperator uses `!== true` to enforce
+    // this — verify by feeding it a string-typed truthy value.
+    //
+    // We have to cast through `unknown` because the Drizzle row type
+    // declares isOperator as boolean; the runtime check is what we're
+    // exercising here, not the static type.
+    const weird = fakeTenant({
+      isOperator: "true" as unknown as boolean,
+    });
     mockedRequireTenant.mockResolvedValue(weird);
+
+    let thrown: unknown = null;
+    try {
+      await requireOperator(makeReq());
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(Response);
+    expect((thrown as Response).status).toBe(403);
+  });
+
+  it("rejects 1-as-isOperator with 403 (strict bool check, numeric)", async () => {
+    // Same contract, different non-bool truthy value. Postgres
+    // boolean → number coercion is unusual but worth defending against.
+    const numeric = fakeTenant({
+      isOperator: 1 as unknown as boolean,
+    });
+    mockedRequireTenant.mockResolvedValue(numeric);
 
     let thrown: unknown = null;
     try {

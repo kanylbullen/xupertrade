@@ -18,7 +18,13 @@ import { requireTenant, type Tenant } from "./tenant";
  */
 export async function requireOperator(req: Request): Promise<Tenant> {
   const t = await requireTenant(req); // throws 401 if no session
-  if (!t.isOperator) {
+  // Strict `!== true` (not `!t.isOperator`) so any truthy non-boolean
+  // — e.g. the string "true" or 1 from a misconfigured backfill or a
+  // future ORM change — does NOT grant operator access. The Drizzle
+  // column is boolean.notNull().default(false), so production should
+  // always serve a real bool, but the strict check costs nothing and
+  // turns a silent privilege escalation into a clear 403.
+  if (t.isOperator !== true) {
     throw new Response(
       JSON.stringify({ error: "operator only" }),
       {
