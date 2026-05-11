@@ -320,25 +320,40 @@ supported but should be a small change if needed.
 
 Before inviting your first non-operator user:
 
-- [ ] Phase 6 cutover complete (operator now uses tenant 1 with
-      `multi_bot_enabled=true`)
-- [ ] `alembic upgrade head` applied to live Postgres so 0010 RLS
-      is in effect (Phase 5a infrastructure)
-- [ ] `hypertrade-users` Authentik group exists + has a Group
-      Membership policy on the dashboard's OIDC provider
-- [ ] Dashboard reachable over HTTPS — for LAN-only tier 1 deploys
-      this is Caddy + Let's Encrypt; for closed-beta with external
-      users it's **Cloudflare Tunnel** (see
-      [`CLOUDFLARE_TUNNEL.md`](CLOUDFLARE_TUNNEL.md))
-- [ ] Cloudflare Tunnel container running (`docker compose
-      --profile public ps cloudflared` shows `Up`; verify
-      tunnel health in CF Zero Trust dashboard) — closed-beta only
-- [ ] `npm run test:integration` green against an ephemeral
+- [x] Phase 6 cutover complete (operator now uses tenant 1 with
+      `multi_bot_enabled=true`) — done 2026-05-11
+- [x] `alembic upgrade head` applied to live Postgres so 0010 RLS
+      is in effect (Phase 5a infrastructure) — done 2026-05-11
+- [x] `alembic 0011` applied: `tenant_id` backfilled on operator's
+      existing rows + flipped to NOT NULL — done 2026-05-11
+- [x] **Phase 6c** complete: dashboard data routes + server-component
+      pages all gated by `requireTenant`/`requireTenantServer`;
+      bot routing via `tenant_bots` lookup (per-tenant bot URLs
+      replace hardcoded env URLs); SSE locked to operator until
+      bot Event class carries `tenant_id`. End-to-end verified
+      2026-05-11 with `hypertest1@xuper.fun` test account: own
+      tenant row auto-created on first sight, dashboard shows
+      empty data + bot-offline (no `tenant_bots` row), no operator
+      data leaked.
+- [x] `hypertrade-users` Authentik group exists + has a Group
+      Membership policy on the dashboard's OIDC provider —
+      verified by hypertest1 successful OIDC sign-in
+- [x] Dashboard reachable over HTTPS — Caddy + Let's Encrypt for
+      LAN; **Cloudflare Tunnel** (see
+      [`CLOUDFLARE_TUNNEL.md`](CLOUDFLARE_TUNNEL.md)) for public
+      access at `hypertrade.xuper.fun`
+- [x] Cloudflare Tunnel container running (`docker compose
+      --profile public ps cloudflared` shows `Up`); pinned to
+      `cloudflare/cloudflared:2026.3.0`
+- [x] `npm run test:integration` green against an ephemeral
       Postgres (testcontainers) — proves the RLS policies still
       enforce isolation
 - [ ] Test the invite flow end-to-end with a throwaway Authentik
       account: sign in → set passphrase → add HL testnet key →
       unlock → create paper bot → bot ticks without error
+      (hypertest1 logged in successfully but hasn't completed the
+      passphrase + bot-create flow yet — first beta tenant will
+      exercise this)
 - [ ] Operator headcount sanity: < 5 tenants planned for first
       beta wave (no `MAX_TENANTS` enforcement yet — see FAQ
       above)
@@ -346,3 +361,22 @@ Before inviting your first non-operator user:
       working, Authentik group remove documented, manual SQL
       DELETE-from-tenants understood (operator dry-runs the SQL
       against testnet first)
+
+### Known limitations entering closed-beta
+
+- **`/api/events` SSE is operator-only.** Bot Event class doesn't
+  carry `tenant_id` yet, so the Redis channel can't be filtered
+  per-tenant. Beta tenants poll instead of getting live
+  event-stream updates. Follow-up PR will add tenant_id to bot
+  events + either filter or move to per-tenant Redis channels.
+- **`strategy_configs.name` UNIQUE is global, not `(tenant_id,
+  name)`.** Two tenants both inserting a strategy with the same
+  name would collide. Table is empty in prod (0 rows) so risk is
+  theoretical until a beta tenant actually inserts. Follow-up
+  alembic migration will switch to a composite unique.
+- **Per-tenant DB pool not implemented** — dashboard queries use
+  postgres superuser with explicit `WHERE tenant_id` filtering.
+  RLS isn't enforced from the dashboard side (only from the
+  bots, which connect as their tenant role per Phase 5b). The
+  defense-in-depth gain of dashboard-side RLS requires solving
+  per-tenant role-password persistence; deferred until needed.
