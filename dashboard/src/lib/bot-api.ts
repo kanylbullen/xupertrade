@@ -169,14 +169,19 @@ export async function tenantBotFetch(
         eq(tenantBots.tenantId, tenantId),
         eq(tenantBots.mode, mode),
         // Only route to bots whose DB row says is_running=true.
-        // Without this, a stale row (e.g. container manually
-        // `docker rm`'d outside our /stop endpoint, or a host-
-        // reboot that left is_running=true but no container) would
-        // make every poll wait 4s for a connection refused, return
-        // 502, and spam the console. The /stop endpoint clears
-        // both is_running and container_id on a clean stop, so
-        // this filter only excludes truly-broken state — clean
-        // stops + creates are unaffected.
+        // After our /stop endpoint clears is_running, an in-flight
+        // BotStatusIndicator poll would otherwise still resolve
+        // the (now-stale) container_name → connection refused →
+        // 4s timeout → 502. With this filter, the request lands
+        // in the 404 branch instead and the indicator renders
+        // "Offline" cleanly.
+        //
+        // Caveat: this does NOT catch divergence where the DB
+        // row still says is_running=true but the container is
+        // gone (e.g. operator-side `docker rm`, host reboot
+        // before the bot wrote its shutdown state). Those cases
+        // still 502 until the row is reconciled. PR 3d will add
+        // a connection-error → mark-stopped reconcile path.
         eq(tenantBots.isRunning, true),
       ),
     )
