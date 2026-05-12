@@ -40,26 +40,24 @@ export function UnlockClient({ tenantId, tenantLabel }: Props) {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ passphrase: value }),
         });
-        if (res.status === 401) {
-          setError(
-            "Sign in first — open the dashboard, authenticate, then click the unlock link again.",
-          );
-          return;
-        }
-        if (res.status === 403) {
-          // Unlock endpoint succeeded for a different tenant than
-          // this token's subject — happens if a tenant clicks
-          // someone else's link while signed in as themselves.
-          setError(
-            "This link is for a different account. Sign out and back in as the correct tenant.",
-          );
-          return;
-        }
         if (!res.ok) {
+          // /api/tenant/me/unlock uses 401 for BOTH "not
+          // authenticated" (requireTenant) and "wrong passphrase"
+          // — disambiguate via the JSON error body so we don't
+          // tell a tenant who typed the wrong passphrase to "sign
+          // in first".
           const data = await res.json().catch(() => null);
-          setError(
-            (data as { error?: string })?.error ?? `Failed (${res.status})`,
-          );
+          const apiError = (data as { error?: string })?.error;
+          if (
+            res.status === 401 &&
+            apiError === "not authenticated"
+          ) {
+            setError(
+              "Sign in first — open the dashboard, authenticate, then click the unlock link again.",
+            );
+            return;
+          }
+          setError(apiError ?? `Failed (${res.status})`);
           return;
         }
         if (inputRef.current) inputRef.current.value = "";

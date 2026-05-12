@@ -1,6 +1,7 @@
 """HTTP API for dashboard queries (indicator status + runtime control)."""
 
 import hmac
+import html
 import json
 import logging
 import os
@@ -129,12 +130,19 @@ async def send_unlock_link_handler(request: web.Request) -> web.Response:
             {"error": "url (https://) is required"}, status=400
         )
 
+    # HTML-escape the URL — TelegramNotifier.send uses parse_mode=HTML,
+    # so an unescaped quote/`>` in `url` would let a caller inject
+    # arbitrary HTML into the DM (and break the link). The dashboard
+    # only ever sends a /unlock?token=<base64url> URL today, but the
+    # API_KEY is operator-shared — defense-in-depth against a leaked
+    # key or a future caller bug.
+    url_safe = html.escape(url, quote=True)
     text = (
         "🔒 <b>Unlock required</b>\n\n"
         "Click the link below to unlock your bot's credentials. "
         "You'll be asked for your passphrase — the link is "
         "valid for 10 minutes.\n\n"
-        f"<a href=\"{url}\">{url}</a>"
+        f"<a href=\"{url_safe}\">{url_safe}</a>"
     )
     sent = await telegram.send(text, to_chat_id=chat_id)
     if not sent:

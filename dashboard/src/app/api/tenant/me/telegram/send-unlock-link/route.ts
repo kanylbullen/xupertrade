@@ -7,8 +7,9 @@
  *
  * Flow:
  *   1. Require an authenticated tenant.
+
  *   2. Look up the tenant's linked Telegram chat (PR 3a/3b).
- *      404 if none — the tenant must run /link first.
+ *      412 if none — the tenant must run /link first.
  *   3. Find a running tenant-bot to act as the Telegram sender.
  *      We don't need a particular mode; any running tenant-bot
  *      has the same Telegram token (per `tenant_secrets`) and

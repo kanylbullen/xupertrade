@@ -32,6 +32,13 @@ afterEach(() => {
 });
 
 describe("mintUnlockToken", () => {
+  it("throws when session secret is empty (fail-closed)", async () => {
+    mockedSecret.mockResolvedValue("");
+    await expect(mintUnlockToken(TENANT_ID)).rejects.toThrow(
+      /session secret not configured/,
+    );
+  });
+
   it("produces payload.signature shape with non-empty parts", async () => {
     mockedSecret.mockResolvedValue(SECRET_A);
     const tok = await mintUnlockToken(TENANT_ID);
@@ -67,6 +74,33 @@ describe("verifyUnlockToken", () => {
     const payload = await verifyUnlockToken(tok);
     expect(payload).not.toBeNull();
     expect(payload?.sub).toBe(TENANT_ID);
+  });
+
+  it("rejects any token when session secret is empty (fail-closed)", async () => {
+    // Construct a forged token signed with empty secret — without
+    // the fail-closed check, verify would happily compute the
+    // expected sig with the same "" key and pass.
+    mockedSecret.mockResolvedValue("");
+    // Hand-roll: payload.signature with sig over empty secret
+    const { createHmac } = await import("node:crypto");
+    const payloadB64 = Buffer.from(
+      JSON.stringify({ sub: TENANT_ID, exp: Date.now() / 1000 + 60 }),
+    )
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    const sig = createHmac("sha256", "")
+      .update("unlock-token-v1")
+      .update(":")
+      .update(payloadB64)
+      .digest()
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    const forged = `${payloadB64}.${sig}`;
+    expect(await verifyUnlockToken(forged)).toBeNull();
   });
 
   it("rejects a token signed with a different secret", async () => {

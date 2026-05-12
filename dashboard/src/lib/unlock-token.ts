@@ -63,12 +63,19 @@ export async function mintUnlockToken(
   tenantId: string,
   ttlSeconds: number = UNLOCK_TOKEN_TTL_SECONDS,
 ): Promise<string> {
+  const secret = await getSessionSecret();
+  // Fail closed when no secret is configured (bot unreachable, no
+  // basic creds, etc. — getSessionSecret returns "" in those cases).
+  // Signing with "" would produce a HMAC anyone can recompute, and
+  // verifyUnlockToken would later succeed for any forged token.
+  if (!secret) {
+    throw new Error("cannot mint unlock token: session secret not configured");
+  }
   const payload: UnlockTokenPayload = {
     sub: tenantId,
     exp: Math.floor(Date.now() / 1000) + ttlSeconds,
   };
   const payloadB64 = b64url(Buffer.from(JSON.stringify(payload)));
-  const secret = await getSessionSecret();
   const sig = sign(payloadB64, secret);
   return `${payloadB64}.${sig}`;
 }
@@ -93,6 +100,12 @@ export async function verifyUnlockToken(
   } catch {
     return null;
   }
+  // Match mintUnlockToken's fail-closed behavior. Without this an
+  // attacker who knows the deployment is misconfigured (or who
+  // forces a config wipe) could submit any token signed with HMAC-
+  // SHA256(""), since this function would happily compute the
+  // expected sig with the same empty key and pass timingSafeEqual.
+  if (!secret) return null;
   const expectedSig = sign(payloadB64, secret);
   const a = b64urlDecode(providedSig);
   const b = b64urlDecode(expectedSig);

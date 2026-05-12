@@ -1,7 +1,6 @@
-import { redirect } from "next/navigation";
+import { eq } from "drizzle-orm";
 
 import { db, tenants } from "@/lib/db";
-import { eq } from "drizzle-orm";
 import { verifyUnlockToken } from "@/lib/unlock-token";
 
 import { UnlockClient } from "./unlock-client";
