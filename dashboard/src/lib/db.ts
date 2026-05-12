@@ -10,6 +10,7 @@ import {
   customType,
   index,
   uniqueIndex,
+  bigint,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -246,5 +247,40 @@ export const tenantAuditLog = pgTable(
   },
   (t) => ({
     tenantTsIdx: index("idx_tenant_audit_log_tenant_ts").on(t.tenantId, t.ts),
+  }),
+);
+
+// PR 3a — maps a tenant to their linked Telegram chat for unlock
+// notifications. Created via the /link <6-digit-code> command in
+// the Telegram bot (proves chat ownership) after the dashboard
+// minted the code (proves Authentik ownership). 1:1 mapping.
+//
+// `telegram_chat_id` is bigint because Telegram chat IDs are
+// negative for groups (-100xxxxx for supergroups) and exceed INT32
+// for some users post-2024.
+//
+// `telegram_username` is display-only — users can change theirs,
+// so don't use this as an identifier.
+export const tenantTelegramLinks = pgTable(
+  "tenant_telegram_links",
+  {
+    tenantId: uuid("tenant_id")
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    // `mode: "bigint"` keeps full precision: Telegram supergroup
+    // IDs (-100xxxxxxxxx) are within Number.MAX_SAFE_INTEGER today
+    // but the type promise that BIGINT round-trips losslessly is
+    // worth keeping. API responses serialize to string (JSON has
+    // no native bigint, and a JSON number could silently round-trip
+    // through a client's `parseInt`).
+    telegramChatId: bigint("telegram_chat_id", { mode: "bigint" }).notNull(),
+    telegramUsername: varchar("telegram_username", { length: 64 }),
+    linkedAt: timestamp("linked_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastUnlockAt: timestamp("last_unlock_at", { withTimezone: true }),
+  },
+  (t) => ({
+    chatIdx: index("idx_tenant_telegram_links_chat").on(t.telegramChatId),
   }),
 );
