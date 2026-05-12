@@ -343,4 +343,55 @@ describe("tenantBotFetch", () => {
     const body = await res.json();
     expect(body.error).toContain("unreachable");
   });
+
+  it("maps connection errors to stable reason codes (no infra leak)", async () => {
+    // Internal hostnames/IPs/ports in raw error must NOT appear
+    // in the response body — only the stable code.
+    mockedRequireTenant.mockResolvedValue(tenant());
+    chainSelect([liveBotRow("testnet")]);
+    const sensitive =
+      "connect ECONNREFUSED 172.18.0.5:8001 (hypertrade-bot-testnet)";
+    fetchSpy.mockRejectedValue(new Error(sensitive));
+
+    const res = await tenantBotFetch(
+      new Request("https://x/api/positions?mode=testnet"),
+      "/api/positions",
+    );
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.reason).toBe("connection-refused");
+    // Critical: the raw message (with IP + container name) must
+    // not leak into the response.
+    expect(JSON.stringify(body)).not.toContain("172.18.0.5");
+    expect(JSON.stringify(body)).not.toContain("hypertrade-bot");
+    expect(JSON.stringify(body)).not.toContain("ECONNREFUSED");
+  });
+
+  it("maps DNS errors to dns-failed", async () => {
+    mockedRequireTenant.mockResolvedValue(tenant());
+    chainSelect([liveBotRow("testnet")]);
+    fetchSpy.mockRejectedValue(
+      new Error("getaddrinfo ENOTFOUND hypertrade-bot-testnet"),
+    );
+    const res = await tenantBotFetch(
+      new Request("https://x/api/positions?mode=testnet"),
+      "/api/positions",
+    );
+    const body = await res.json();
+    expect(body.reason).toBe("dns-failed");
+  });
+
+  it("maps AbortError to aborted", async () => {
+    mockedRequireTenant.mockResolvedValue(tenant());
+    chainSelect([liveBotRow("testnet")]);
+    const abortErr = new Error("The operation was aborted");
+    abortErr.name = "AbortError";
+    fetchSpy.mockRejectedValue(abortErr);
+    const res = await tenantBotFetch(
+      new Request("https://x/api/positions?mode=testnet"),
+      "/api/positions",
+    );
+    const body = await res.json();
+    expect(body.reason).toBe("aborted");
+  });
 });

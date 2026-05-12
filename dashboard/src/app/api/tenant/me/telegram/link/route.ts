@@ -36,6 +36,7 @@
 import { eq } from "drizzle-orm";
 import { randomInt } from "node:crypto";
 
+import { appendAuditLog } from "@/lib/audit-log";
 import { db, tenantTelegramLinks } from "@/lib/db";
 import { getRedisClient } from "@/lib/redis";
 import { requireTenant } from "@/lib/tenant";
@@ -140,6 +141,8 @@ export async function POST(req: Request): Promise<Response> {
   // handler will delete both keys after successful upsert.
   await redis.set(reversePointerKey, code, "EX", CODE_TTL_SECONDS);
 
+  await appendAuditLog(tenant.id, "tenant", "telegram.link.code-minted");
+
   return Response.json({
     code,
     expiresInSeconds: CODE_TTL_SECONDS,
@@ -159,6 +162,10 @@ export async function DELETE(req: Request): Promise<Response> {
     .delete(tenantTelegramLinks)
     .where(eq(tenantTelegramLinks.tenantId, tenant.id))
     .returning({ tenantId: tenantTelegramLinks.tenantId });
+
+  if (deleted.length > 0) {
+    await appendAuditLog(tenant.id, "tenant", "telegram.unlink");
+  }
 
   return Response.json({
     unlinked: deleted.length > 0,
