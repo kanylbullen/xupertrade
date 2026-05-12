@@ -183,6 +183,16 @@ services:
       # privilege boundary. Read-only would be ideal but dockerode
       # needs write for create/start/stop.
       - /var/run/docker.sock:/var/run/docker.sock
+    # Run as a supplementary group whose gid matches the host's
+    # docker.sock owner (typically gid=105 on Debian/Ubuntu, 999 on
+    # some others — check `stat -c '%g' /var/run/docker.sock`). The
+    # dashboard's Dockerfile runs as the unprivileged `nextjs` user
+    # (uid 1001) which is in `nogroup` only — without this it
+    # cannot read/write the socket and PR 2's bot-spawn fails with
+    # `EACCES /var/run/docker.sock`. Override via DOCKER_GID env if
+    # your host uses a different gid.
+    group_add:
+      - "${DOCKER_GID:-105}"
     depends_on:
       postgres:
         condition: service_healthy
