@@ -281,6 +281,10 @@ export const tenantTelegramLinks = pgTable(
     lastUnlockAt: timestamp("last_unlock_at", { withTimezone: true }),
   },
   (t) => ({
-    chatIdx: index("idx_tenant_telegram_links_chat").on(t.telegramChatId),
+    // UNIQUE — a single Telegram chat must map to at most one
+    // tenant (alembic 0013). Without this, an accidental cross-
+    // tenant chat-id reuse would let get_tenant_id_for_telegram_chat
+    // pick an arbitrary row.
+    chatIdx: uniqueIndex("idx_tenant_telegram_links_chat").on(t.telegramChatId),
   }),
 );

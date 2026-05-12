@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 
 type LinkStatus =
   | { linked: false }
@@ -31,7 +31,10 @@ export function TelegramLinkCard() {
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
-  const refresh = async () => {
+  // Wrapped in useCallback so the useEffect deps below are stable
+  // and we don't re-create the closure on every render (which would
+  // tear down the 10s polling interval each tick).
+  const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/tenant/me/telegram/link", {
         cache: "no-store",
@@ -41,23 +44,27 @@ export function TelegramLinkCard() {
         return;
       }
       setStatus((await r.json()) as LinkStatus);
+      // Clear any prior error on a successful fetch — without this
+      // a transient network blip would leave the error banner up
+      // even after the next poll cleanly succeeded.
+      setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  };
-
-  useEffect(() => {
-    refresh();
-    // Re-fetch every 10s while a code is showing so the UI flips
-    // to "Linked" without manual refresh once the user sends /link
-    // to the bot.
   }, []);
 
   useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
     if (!code) return;
+    // Re-fetch every 10s while a code is showing so the UI flips
+    // to "Linked" without manual refresh once the user sends /link
+    // to the bot.
     const t = setInterval(refresh, 10_000);
     return () => clearInterval(t);
-  }, [code]);
+  }, [code, refresh]);
 
   // If we just minted a code but the tenant already linked,
   // dismiss the code box (would otherwise show stale).

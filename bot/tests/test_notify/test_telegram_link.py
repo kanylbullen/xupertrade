@@ -52,7 +52,7 @@ async def test_link_with_invalid_format_returns_usage():
 @pytest.mark.asyncio
 async def test_link_with_expired_code_returns_error():
     redis_ = MagicMock()
-    redis_.get = AsyncMock(return_value=None)  # key gone (expired or never existed)
+    redis_.getdel = AsyncMock(return_value=None)  # key gone (expired or never existed)
     notif = _notifier(repo=MagicMock(), redis_=redis_)
     msg = await notif._cmd_link(["123456"], chat_id="9999", username="alice")
     assert "invalid" in msg.lower() or "expired" in msg.lower()
@@ -62,7 +62,7 @@ async def test_link_with_expired_code_returns_error():
 async def test_link_with_valid_code_upserts_and_cleans_up():
     tenant_id = uuid.uuid4()
     redis_ = MagicMock()
-    redis_.get = AsyncMock(return_value=str(tenant_id))
+    redis_.getdel = AsyncMock(return_value=str(tenant_id))
     redis_.delete = AsyncMock()
     repo = MagicMock()
     repo.upsert_telegram_link = AsyncMock()
@@ -76,17 +76,17 @@ async def test_link_with_valid_code_upserts_and_cleans_up():
         telegram_chat_id=9999,
         telegram_username="alice",
     )
-    # Both forward + reverse keys deleted on successful link
-    redis_.delete.assert_awaited_once()
-    args = redis_.delete.await_args[0]
-    assert "tg-link:654321" in args
-    assert f"tg-link:tenant:{tenant_id}" in args
+    # Forward key was already consumed atomically by GETDEL
+    # (atomicity invariant — concurrent /link can't double-spend
+    # the code). Only the reverse pointer needs explicit cleanup.
+    redis_.getdel.assert_awaited_once_with("tg-link:654321")
+    redis_.delete.assert_awaited_once_with(f"tg-link:tenant:{tenant_id}")
 
 
 @pytest.mark.asyncio
 async def test_link_with_malformed_tenant_id_in_redis_returns_error():
     redis_ = MagicMock()
-    redis_.get = AsyncMock(return_value="not-a-uuid")
+    redis_.getdel = AsyncMock(return_value="not-a-uuid")
     notif = _notifier(repo=MagicMock(), redis_=redis_)
     msg = await notif._cmd_link(["111222"], chat_id="9999", username="alice")
     assert "Internal error" in msg or "corrupted" in msg.lower()
@@ -112,7 +112,7 @@ async def test_link_continues_when_redis_cleanup_fails():
     the DB upsert already succeeded so we just log and return success."""
     tenant_id = uuid.uuid4()
     redis_ = MagicMock()
-    redis_.get = AsyncMock(return_value=str(tenant_id))
+    redis_.getdel = AsyncMock(return_value=str(tenant_id))
     redis_.delete = AsyncMock(side_effect=RuntimeError("redis down"))
     repo = MagicMock()
     repo.upsert_telegram_link = AsyncMock()

@@ -736,16 +736,22 @@ class TelegramNotifier:
             return (
                 "Usage: <code>/link 123456</code>\n\n"
                 "Get your 6-digit code from the dashboard's "
-                "Settings → Telegram page."
+                "Settings → Credentials page."
             )
         code = args[0]
         key = f"tg-link:{code}"
-        tenant_id_str = await self._redis.get(key)
+        # GETDEL is atomic — read-and-delete in one Redis op. Without
+        # this, two concurrent /link with the same code could both
+        # read tenant_id and both upsert (which the schema's UNIQUE
+        # chat_id catches, but only one survives — the loser sees a
+        # confusing DB error). With GETDEL, the loser sees None and
+        # gets the friendly "code invalid or expired" message.
+        tenant_id_str = await self._redis.getdel(key)
         if not tenant_id_str:
             return (
                 "❌ Code invalid or expired.\n\n"
                 "Generate a fresh code on the dashboard's "
-                "Settings → Telegram page."
+                "Settings → Credentials page."
             )
 
         import uuid as _uuid
@@ -765,13 +771,13 @@ class TelegramNotifier:
             logger.exception("upsert_telegram_link failed for %s", tenant_id)
             return "⚠️ Database error while linking. Please retry."
 
-        # One-shot — delete both forward and reverse pointers so
-        # the same code can't be used twice and a re-mint gives a
-        # fresh number.
+        # Forward key was already consumed by GETDEL above.
+        # Just clean up the reverse pointer so a re-mint gives a
+        # fresh number rather than returning the now-stale code.
         try:
-            await self._redis.delete(key, f"tg-link:tenant:{tenant_id}")
+            await self._redis.delete(f"tg-link:tenant:{tenant_id}")
         except Exception:
-            logger.exception("Failed to clean up tg-link Redis keys")
+            logger.exception("Failed to clean up tg-link reverse pointer")
 
         return (
             "✅ Linked!\n\n"

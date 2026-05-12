@@ -65,10 +65,16 @@ async def test_init_db_creates_legacy_tables(init_db_repo):
 
 @pytest.mark.asyncio
 async def test_alembic_owned_set_matches_actual_mt_tables():
-    """Sanity: the constant lists the four Phase 1 MT tables exactly.
+    """Sanity: the constant lists every alembic-owned MT table exactly.
     If a future phase adds another MT table, this assertion fires and
     the developer adds it to `_ALEMBIC_OWNED_TABLES` too."""
     expected = {
-        "tenants", "tenant_bots", "tenant_secrets", "tenant_audit_log",
+        "tenants",
+        "tenant_bots",
+        "tenant_secrets",
+        "tenant_audit_log",
+        # PR 3a (alembic 0012). Added to the set in PR 3b after
+        # Copilot caught the init_db race.
+        "tenant_telegram_links",
     }
     assert set(_ALEMBIC_OWNED_TABLES) == expected
