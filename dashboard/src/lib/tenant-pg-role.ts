@@ -65,6 +65,14 @@ const TENANT_DATA_TABLES = [
   "manual_onchain_levels",
   "hodl_purchases",
   "user_vault_entries",
+  // PR 3b: bot's /link handler upserts here; get-by-chat lookups
+  // also happen bot-side. RLS policy (alembic 0014) restricts
+  // each role to its own tenant_id rows — without that, a SELECT
+  // by a tenant role would leak every other tenant's chat_id +
+  // username. The PK on tenant_id + UNIQUE on chat_id (alembic
+  // 0013) prevent dupes/spoofing but DO NOT provide isolation;
+  // RLS is the mechanism that does.
+  "tenant_telegram_links",
 ];
 
 /**
@@ -74,11 +82,23 @@ const TENANT_DATA_TABLES = [
  * the public schema (which would include tenant_audit_log_id_seq
  * and other dashboard-only sequences).
  *
- * `user_vault_entries` is excluded — it has a composite PK on
- * (user_address, vault_address), no serial id, no sequence.
+ * Excluded tables:
+ *   - `user_vault_entries`: composite PK on (user_address,
+ *     vault_address), no serial id, no sequence.
+ *   - `tenant_telegram_links`: PK is `tenant_id` (UUID), no
+ *     serial id, no sequence.
+ *
+ * Granting on a non-existent sequence raises "relation does not
+ * exist" and breaks provisionRole() → bot startup fails for new
+ * tenants. The filter list must stay in sync with table-creation
+ * migrations.
  */
+const TABLES_WITHOUT_ID_SEQ = new Set([
+  "user_vault_entries",
+  "tenant_telegram_links",
+]);
 const TENANT_DATA_TABLES_WITH_ID_SEQ = TENANT_DATA_TABLES.filter(
-  (t) => t !== "user_vault_entries",
+  (t) => !TABLES_WITHOUT_ID_SEQ.has(t),
 );
 
 /**
