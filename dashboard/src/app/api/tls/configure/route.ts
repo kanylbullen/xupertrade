@@ -1,5 +1,10 @@
-import { botFetch } from "@/lib/bot-api";
+import { pushTlsConfig } from "@/lib/caddy-admin";
 import { requireOperator } from "@/lib/operator";
+import {
+  getTlsConfig,
+  setTlsConfig,
+  type TlsConfig,
+} from "@/lib/tls-config";
 
 export const dynamic = "force-dynamic";
 
@@ -13,10 +18,41 @@ export async function POST(req: Request) {
     if (e instanceof Response) return e;
     throw e;
   }
-  const body = await req.json().catch(() => ({}));
-  return botFetch(req, "/api/tls/configure", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+
+  const raw = await req.json().catch(() => null);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return Response.json({ error: "body must be a JSON object" }, { status: 400 });
+  }
+  const body = raw as Record<string, unknown>;
+
+  const updates: Partial<TlsConfig> = {};
+  if ("enabled" in body) {
+    updates.enabled = Boolean(body.enabled);
+  }
+  for (const k of ["domain", "email", "cf_token"] as const) {
+    if (k in body) {
+      const v = body[k];
+      if (typeof v !== "string") {
+        return Response.json(
+          { error: `${k} must be a string` },
+          { status: 400 },
+        );
+      }
+      updates[k] = v.trim();
+    }
+  }
+
+  // Mirror bot's behavior: persist first, then read back to pass
+  // a canonical view to Caddy. This way a partial update (e.g.
+  // just toggling enabled) still composes with previously-saved
+  // domain/email/cf_token.
+  await setTlsConfig(updates);
+  const cfg = await getTlsConfig();
+
+  const result = await pushTlsConfig(cfg);
+  if (!result.ok) {
+    const status = result.message.startsWith("missing fields:") ? 400 : 502;
+    return Response.json({ ok: false, error: result.message }, { status });
+  }
+  return Response.json({ ok: true, enabled: cfg.enabled, domain: cfg.domain });
 }

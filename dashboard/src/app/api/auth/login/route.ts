@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { verify as bcryptVerify } from "@node-rs/bcrypt";
+
 import {
   fetchAuthConfig,
   getSessionSecret,
@@ -6,6 +8,7 @@ import {
   newSessionPayload,
   COOKIE_OPTIONS,
 } from "@/lib/auth";
+import { getAuthConfig } from "@/lib/auth-config";
 
 export const dynamic = "force-dynamic";
 
@@ -23,16 +26,16 @@ export async function POST(req: Request) {
 
   const cfg = await fetchAuthConfig(true);
   if (cfg === null) {
-    // Bot unreachable — can't verify auth state. Fail closed rather
-    // than silently allowing login.
+    // Redis unreachable — can't verify auth state. Fail closed
+    // rather than silently allowing login.
     return NextResponse.json(
-      { ok: false, error: "bot-unreachable" },
+      { ok: false, error: "auth-state-unavailable" },
       { status: 503 },
     );
   }
   // Allow basic auth as a fallback even when mode=oidc, as long as a
-  // basic user is configured. This is the path the /login fallback link
-  // uses when OIDC misbehaves.
+  // basic user is configured. This is the path the /login fallback
+  // link uses when OIDC misbehaves.
   if (cfg.mode === "disabled" || !cfg.basic_user_set) {
     return NextResponse.json(
       { ok: false, error: "basic-auth-not-enabled" },
@@ -40,35 +43,48 @@ export async function POST(req: Request) {
     );
   }
 
-  // Proxy verification to the bot
-  const botUrl = process.env.BOT_API_URL_TESTNET || "http://bot-testnet:8001";
-  let verify;
-  try {
-    const res = await fetch(`${botUrl}/api/auth/verify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-      cache: "no-store",
-      signal: AbortSignal.timeout(5000),
-    });
-    verify = (await res.json()) as { ok?: boolean };
-  } catch {
-    return NextResponse.json({ ok: false, error: "bot-unreachable" }, { status: 502 });
+  // PR 4a: bcrypt-compare directly against the stored hash in
+  // Redis. Replaces the proxy to bot's /api/auth/verify which
+  // did the same operation server-side. Constant-time bcrypt
+  // check; same security properties.
+  const raw = await getAuthConfig();
+  const storedUser = raw.basic_user;
+  const storedHash = raw.basic_hash;
+  if (!storedUser || !storedHash) {
+    return NextResponse.json(
+      { ok: false, error: "basic-auth-not-enabled" },
+      { status: 400 },
+    );
   }
-
-  if (!verify.ok) {
-    return NextResponse.json({ ok: false, error: "invalid-credentials" }, { status: 401 });
+  if (username !== storedUser) {
+    return NextResponse.json(
+      { ok: false, error: "invalid-credentials" },
+      { status: 401 },
+    );
+  }
+  let passwordOk = false;
+  try {
+    passwordOk = await bcryptVerify(password, storedHash);
+  } catch {
+    // Malformed hash in Redis — treat as failed auth, never crash.
+    return NextResponse.json(
+      { ok: false, error: "invalid-credentials" },
+      { status: 401 },
+    );
+  }
+  if (!passwordOk) {
+    return NextResponse.json(
+      { ok: false, error: "invalid-credentials" },
+      { status: 401 },
+    );
   }
 
   const secret = await getSessionSecret(true);
   if (!secret) {
-    // No session secret available — bot is unreachable, or the dashboard
-    // doesn't have API_KEY set so it can't authenticate to the bot's
-    // gated /api/auth/session-secret endpoint. Either way the user can't
-    // actually log in until the operator fixes the env. Reuse the
-    // `bot-unreachable` error code since the login UI already maps it.
+    // No session secret available — Redis unreachable. The
+    // operator must fix it before logins can resume.
     return NextResponse.json(
-      { ok: false, error: "bot-unreachable" },
+      { ok: false, error: "auth-state-unavailable" },
       { status: 503 },
     );
   }
