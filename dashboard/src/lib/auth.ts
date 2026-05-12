@@ -11,6 +11,8 @@
 
 import { createHmac, timingSafeEqual } from "crypto";
 
+import { ensureSessionSecret, getAuthConfig } from "./auth-config";
+
 export const SESSION_COOKIE = "hypertrade_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
@@ -30,18 +32,11 @@ export type SessionPayload = {
   exp: number;
 };
 
-function botUrlInternal(): string {
-  // For server-side calls inside the dashboard container, talk to the
-  // testnet bot — it's the canonical owner of auth config (only one bot
-  // instance needs to hold the auth state, all dashboard sessions look
-  // the same regardless of which mode the user is viewing).
-  return process.env.BOT_API_URL_TESTNET || "http://bot-testnet:8001";
-}
-
-/** Fetch (with short timeout) the auth config from the bot.
- *  Falls back to {mode: "disabled"} if the bot is unreachable — degrades
- *  to no-auth rather than locking the user out.
- *  Cached in-process for 30s so the proxy doesn't hammer the bot. */
+/** Fetch the auth config — now reads Redis directly via
+ *  `auth-config.ts:getAuthConfig` (PR 4a) instead of proxying
+ *  through the bot. Same in-process cache + same fail-closed
+ *  semantics (returns null on error so proxy.ts denies).
+ */
 let _cached: { at: number; cfg: AuthConfig } | null = null;
 const CACHE_TTL_MS = 30_000;
 
@@ -51,21 +46,21 @@ export async function fetchAuthConfig(force = false): Promise<AuthConfig | null>
     return _cached.cfg;
   }
   try {
-    const res = await fetch(`${botUrlInternal()}/api/auth/config`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!res.ok) {
-      // SECURITY: do NOT cache a default-disabled config on failure.
-      // proxy.ts uses null as "fail closed" — caching disabled here
-      // would let an attacker who induces a transient bot outage walk
-      // past auth for the entire 30s cache TTL.
-      return null;
-    }
-    const cfg = (await res.json()) as AuthConfig;
+    const raw = await getAuthConfig();
+    const cfg: AuthConfig = {
+      mode: raw.mode,
+      basic_user_set: Boolean(raw.basic_user),
+      oidc_issuer: raw.oidc_issuer,
+      oidc_client_id: raw.oidc_client_id,
+      oidc_scopes: raw.oidc_scopes,
+    };
     _cached = { at: now, cfg };
     return cfg;
   } catch {
+    // SECURITY: do NOT cache a default-disabled config on failure.
+    // proxy.ts uses null as "fail closed" — caching disabled here
+    // would let an attacker who induces a transient Redis outage
+    // walk past auth for the entire 30s cache TTL.
     return null;
   }
 }
@@ -84,16 +79,18 @@ function defaultConfig(): AuthConfig {
   };
 }
 
-/** Fetch the dashboard's session-cookie HMAC secret from the bot.
+/** Fetch the dashboard's session-cookie HMAC secret.
  *
- *  The bot exposes this on an API_KEY-gated endpoint (NOT on the public
- *  /api/auth/config) so an attacker who can hit the bot port can't mint
- *  forged sessions. We cache for 60s in-process — secret rarely changes
- *  and a stale value just invalidates active sessions.
+ *  PR 4a: now reads/initializes the secret directly via Redis
+ *  (`auth-config.ts:ensureSessionSecret`) instead of proxying
+ *  through a bot endpoint. ensureSessionSecret is atomic
+ *  (SET NX) so two dashboard processes that race on first init
+ *  end up with the same value.
  *
- *  Returns "" when the bot is unreachable or API_KEY isn't set on the
- *  dashboard side (in dev / disabled-auth deploys), which causes
- *  signSession/verifySession to refuse to operate — fail-closed. */
+ *  Returns "" only if Redis is unreachable, in which case
+ *  signSession/verifySession refuse to operate (fail-closed).
+ *  Cached 60s — secret rarely changes.
+ */
 let _secretCached: { at: number; value: string } | null = null;
 const SECRET_CACHE_TTL_MS = 60_000;
 
@@ -102,26 +99,8 @@ export async function getSessionSecret(force = false): Promise<string> {
   if (!force && _secretCached && now - _secretCached.at < SECRET_CACHE_TTL_MS) {
     return _secretCached.value;
   }
-  const apiKey = process.env.API_KEY || "";
-  if (!apiKey) {
-    // No API_KEY → can't authenticate to the bot. Don't fall back to
-    // a public fetch: that's the bug we're fixing. Return empty so
-    // signSession/verifySession refuse to operate.
-    _secretCached = { at: now, value: "" };
-    return "";
-  }
   try {
-    const res = await fetch(`${botUrlInternal()}/api/auth/session-secret`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(2000),
-      headers: { "X-Api-Key": apiKey },
-    });
-    if (!res.ok) {
-      _secretCached = { at: now, value: "" };
-      return "";
-    }
-    const j = (await res.json()) as { session_secret?: string };
-    const value = j.session_secret || "";
+    const value = await ensureSessionSecret();
     _secretCached = { at: now, value };
     return value;
   } catch {

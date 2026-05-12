@@ -1,17 +1,28 @@
-import { botFetch } from "@/lib/bot-api";
+import { getCaddyStatus } from "@/lib/caddy-admin";
 import { requireOperator } from "@/lib/operator";
+import { getTlsConfig } from "@/lib/tls-config";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  // Operator-only: bot's tls_get_config is auth-gated and the dashboard
-  // proxy forwards API_KEY. Returning the proxied payload to a
-  // non-operator tenant would leak the configured domain/email.
+  // Operator-only: leaks the configured domain/email otherwise.
   try {
     await requireOperator(req);
   } catch (e) {
     if (e instanceof Response) return e;
     throw e;
   }
-  return botFetch(req, "/api/tls/config");
+
+  const cfg = await getTlsConfig();
+  const caddyStatus = await getCaddyStatus();
+
+  // Same response shape as the bot's tls_get_config — never
+  // returns the Cloudflare API token, just whether it's set.
+  return Response.json({
+    enabled: cfg.enabled,
+    domain: cfg.domain,
+    email: cfg.email,
+    cf_token_set: Boolean(cfg.cf_token),
+    caddy_status: caddyStatus,
+  });
 }
