@@ -20,6 +20,7 @@ from hypertrade.db.models import (
     TenantAuditLog,
     TenantBot,
     TenantSecret,
+    TenantTelegramLink,
     Trade,
     UserVaultEntry,
     Vault,
@@ -42,6 +43,9 @@ _ALEMBIC_OWNED_TABLES = frozenset({
     TenantBot.__tablename__,
     TenantSecret.__tablename__,
     TenantAuditLog.__tablename__,
+    # PR 3a alembic 0012 — create_all() would race-create this
+    # without the indexes + defaults the migration sets up.
+    TenantTelegramLink.__tablename__,
 })
 
 
@@ -1074,6 +1078,79 @@ class Repository:
                 stmt = stmt.where(UserVaultEntry.exited_at.is_(None))
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    # ----- Telegram unlock-link flow (PR 3b) -----
+
+    async def get_tenant_id_for_telegram_chat(
+        self, chat_id: int
+    ) -> uuid.UUID | None:
+        """Lookup the linked tenant for a Telegram chat. Used by
+        future /unlock command (PR 3c+) where we already know the
+        chat but need the tenant. Returns None when unlinked.
+
+        Schema guarantees 1:1 via UNIQUE index (alembic 0013), so
+        this returns either zero or exactly one row — never an
+        arbitrary pick from multiple."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(TenantTelegramLink.tenant_id).where(
+                    TenantTelegramLink.telegram_chat_id == chat_id
+                )
+            )
+            row = result.first()
+            return row[0] if row else None
+
+    async def upsert_telegram_link(
+        self,
+        tenant_id: uuid.UUID,
+        telegram_chat_id: int,
+        telegram_username: str | None,
+    ) -> None:
+        """Insert-or-update the (tenant_id, chat_id) pair. Called by
+        the bot's /link handler after validating the 6-digit code
+        against Redis.
+
+        Semantics:
+        - Re-linking the same tenant to a different chat overwrites
+          their row (single-device beta UX).
+        - Linking a chat already used by another tenant transfers
+          the chat to the new tenant — the old tenant's row gets
+          deleted to satisfy the UNIQUE constraint on chat_id
+          (alembic 0013). This is intentional: if user A switched
+          phones and inherited B's chat id, the most-recent /link
+          wins. Both sides explicitly opted in by generating + using
+          a code, so this isn't a stealth-hijack.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                # If the chat is already linked to a DIFFERENT
+                # tenant, evict that row first so the UNIQUE
+                # constraint on telegram_chat_id doesn't fire on
+                # insert/update below.
+                result = await session.execute(
+                    select(TenantTelegramLink).where(
+                        TenantTelegramLink.telegram_chat_id == telegram_chat_id,
+                        TenantTelegramLink.tenant_id != tenant_id,
+                    )
+                )
+                stale = result.scalars().first()
+                if stale is not None:
+                    await session.delete(stale)
+                    await session.flush()
+
+                existing = await session.get(TenantTelegramLink, tenant_id)
+                if existing is None:
+                    session.add(
+                        TenantTelegramLink(
+                            tenant_id=tenant_id,
+                            telegram_chat_id=telegram_chat_id,
+                            telegram_username=telegram_username,
+                        )
+                    )
+                else:
+                    existing.telegram_chat_id = telegram_chat_id
+                    existing.telegram_username = telegram_username
+                    existing.linked_at = datetime.now(timezone.utc)
 
     async def close(self) -> None:
         await self._engine.dispose()

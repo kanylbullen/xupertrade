@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Column,
     DateTime,
     Float,
@@ -169,6 +170,30 @@ class TenantAuditLog(Base):
         nullable=False,
         index=True,
     )
+
+
+class TenantTelegramLink(Base):
+    """Maps a tenant to their linked Telegram chat (1:1). PR 3a
+    created the table via alembic 0012; this model lets the bot's
+    /link handler upsert + lookup."""
+
+    __tablename__ = "tenant_telegram_links"
+
+    tenant_id = Column(
+        Uuid(),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # BIGINT — Telegram chat IDs are negative for groups and can
+    # exceed INT32 for some user IDs post-2024.
+    telegram_chat_id = Column(BigInteger, nullable=False)
+    telegram_username = Column(String(64))
+    linked_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    last_unlock_at = Column(DateTime(timezone=True))
 
 
 class Trade(Base):

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 
+import { TelegramLinkCard } from "@/components/telegram-link-card";
 import { UnlockModal } from "@/components/unlock-modal";
 
 type Me = {
@@ -258,6 +259,7 @@ function CredentialsList({ onLocked }: { onLocked: () => void }) {
 
   return (
     <div className="space-y-4">
+      <TelegramLinkCard />
       {SLOTS.map((slot) => (
         <SecretSlot
           key={slot.key}

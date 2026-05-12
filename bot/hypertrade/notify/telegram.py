@@ -158,6 +158,7 @@ class TelegramNotifier:
             "/today": (self._cmd_today, "Today's PnL summary (per-strategy, current mode)"),
             "/eval": (self._cmd_eval, "Weekly per-strategy evaluation (7d)"),
             "/kelly": (self._cmd_kelly, "Half-Kelly sizing report (30d, advisory only)"),
+            "/link": (self._cmd_link, "Link this Telegram chat to your tenant account"),
         }
         # Mainnet variants (audit C4). Registered only when wiring is
         # actually in place — otherwise the menu would advertise commands
@@ -309,15 +310,23 @@ class TelegramNotifier:
         if self._redis:
             await self._redis.close()
 
-    async def send(self, text: str) -> bool:
-        if not self.configured or not self._session:
+    async def send(self, text: str, to_chat_id: str | None = None) -> bool:
+        """Send a message to the configured operator chat, or to a
+        specific chat (used by the /link handler in PR 3b to reply
+        to whoever DMed the bot — could be a tenant we haven't seen
+        before, not just the operator)."""
+        # /link replies need a chat_id even when no operator chat is
+        # configured (token alone is enough for sending). Treat
+        # configured-ness as token-only when to_chat_id is supplied.
+        target = to_chat_id if to_chat_id is not None else self._chat_id
+        if not self._token or not self._session or not target:
             return False
         url = f"https://api.telegram.org/bot{self._token}/sendMessage"
         try:
             async with self._session.post(
                 url,
                 json={
-                    "chat_id": self._chat_id,
+                    "chat_id": target,
                     "text": text,
                     "parse_mode": "HTML",
                     "disable_web_page_preview": True,
@@ -391,14 +400,24 @@ class TelegramNotifier:
                     msg = update.get("message")
                     if not msg:
                         continue
-                    chat_id = str(msg.get("chat", {}).get("id", ""))
-                    if chat_id != str(self._chat_id):
-                        # Ignore messages from anyone but the configured chat
-                        continue
+                    chat = msg.get("chat", {})
+                    chat_id = str(chat.get("id", ""))
+                    from_user = msg.get("from", {}) or {}
+                    username = from_user.get("username")
                     text = (msg.get("text") or "").strip()
                     if not text.startswith("/"):
                         continue
-                    await self._handle_command(text)
+                    # Tenant-linking exception (PR 3b): /link from any
+                    # chat is allowed so a new tenant can DM the bot
+                    # before they're known to us. Every other command
+                    # stays gated to the operator's configured chat
+                    # (back-compat). The /link handler itself is the
+                    # auth boundary — it validates the code against
+                    # Redis-stored tenant_id before doing anything.
+                    is_link_cmd = text.split()[0].split("@")[0].lower() == "/link"
+                    if not is_link_cmd and chat_id != str(self._chat_id):
+                        continue
+                    await self._handle_command(text, chat_id=chat_id, username=username)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -406,7 +425,13 @@ class TelegramNotifier:
                 await asyncio.sleep(min(backoff, 30))
                 backoff *= 2
 
-    async def _handle_command(self, text: str) -> None:
+    async def _handle_command(
+        self,
+        text: str,
+        *,
+        chat_id: str | None = None,
+        username: str | None = None,
+    ) -> None:
         import time as _time
         # Strip @botname suffix from /command@botname
         parts = text.split()
@@ -421,16 +446,30 @@ class TelegramNotifier:
 
         handler_entry = self._commands.get(cmd)
         if not handler_entry:
-            await self.send(f"Unknown command: <code>{cmd}</code>\n\nTry /help")
+            await self.send(
+                f"Unknown command: <code>{cmd}</code>\n\nTry /help",
+                to_chat_id=chat_id,
+            )
             return
         handler, _ = handler_entry
         try:
-            reply = await handler(args)
+            # /link needs the message's chat_id + username to do
+            # its job (storing them in tenant_telegram_links). All
+            # other handlers ignore the kwargs — Python's
+            # accept-but-ignore via **_ would work but we pass
+            # explicitly so type signatures stay honest. The
+            # `cmd == "/link"` branch is the only special path.
+            if cmd == "/link":
+                reply = await handler(args, chat_id=chat_id, username=username)
+            else:
+                reply = await handler(args)
         except Exception as e:
             logger.exception("Command handler failed: %s", cmd)
             reply = f"⚠️ Command failed: <code>{e}</code>"
         if reply:
-            await self.send(reply)
+            # Reply in the originating chat (operator default OR
+            # tenant for /link).
+            await self.send(reply, to_chat_id=chat_id)
 
     # ----- daily summary -----
 
@@ -671,6 +710,80 @@ class TelegramNotifier:
         names = [s.name for s in self._strategies]
         stats = await evaluate(self._repo, names, days=days)
         return format_kelly_report(stats, days=days, html=True)
+
+    async def _cmd_link(
+        self,
+        args: list[str],
+        *,
+        chat_id: str | None = None,
+        username: str | None = None,
+    ) -> str:
+        """`/link <6-digit-code>` — pair this Telegram chat with a
+        tenant account. Code comes from POST
+        /api/tenant/me/telegram/link on the dashboard side (PR 3a)
+        and lives in Redis with a 10-min TTL.
+
+        Auth: the code IS the auth — only the tenant who minted it
+        knows the value, and consumption is one-shot. Re-link
+        attempts for the same tenant just overwrite, so a user
+        switching devices doesn't get stuck.
+        """
+        if self._repo is None or self._redis is None:
+            return "⚠️ Linking unavailable (DB or Redis not configured)"
+        if chat_id is None:
+            return "⚠️ Internal error: missing chat context"
+        if not args or len(args) != 1 or not args[0].isdigit() or len(args[0]) != 6:
+            return (
+                "Usage: <code>/link 123456</code>\n\n"
+                "Get your 6-digit code from the dashboard's "
+                "Settings → Credentials page."
+            )
+        code = args[0]
+        key = f"tg-link:{code}"
+        # GETDEL is atomic — read-and-delete in one Redis op. Without
+        # this, two concurrent /link with the same code could both
+        # read tenant_id and both upsert (which the schema's UNIQUE
+        # chat_id catches, but only one survives — the loser sees a
+        # confusing DB error). With GETDEL, the loser sees None and
+        # gets the friendly "code invalid or expired" message.
+        tenant_id_str = await self._redis.getdel(key)
+        if not tenant_id_str:
+            return (
+                "❌ Code invalid or expired.\n\n"
+                "Generate a fresh code on the dashboard's "
+                "Settings → Credentials page."
+            )
+
+        import uuid as _uuid
+        try:
+            tenant_id = _uuid.UUID(tenant_id_str)
+        except ValueError:
+            logger.error("Malformed tenant_id in Redis under %s: %r", key, tenant_id_str)
+            return "⚠️ Internal error: linking state corrupted, please retry"
+
+        try:
+            await self._repo.upsert_telegram_link(
+                tenant_id=tenant_id,
+                telegram_chat_id=int(chat_id),
+                telegram_username=username,
+            )
+        except Exception:
+            logger.exception("upsert_telegram_link failed for %s", tenant_id)
+            return "⚠️ Database error while linking. Please retry."
+
+        # Forward key was already consumed by GETDEL above.
+        # Just clean up the reverse pointer so a re-mint gives a
+        # fresh number rather than returning the now-stale code.
+        try:
+            await self._redis.delete(f"tg-link:tenant:{tenant_id}")
+        except Exception:
+            logger.exception("Failed to clean up tg-link reverse pointer")
+
+        return (
+            "✅ Linked!\n\n"
+            "You'll get unlock notifications here when your bot needs "
+            "your passphrase after a restart."
+        )
 
     async def _cmd_flat(self, args: list[str]) -> str:
         if not self._control:
