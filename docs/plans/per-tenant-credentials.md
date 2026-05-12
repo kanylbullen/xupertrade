@@ -80,13 +80,29 @@ the wizard during PR 1 won't see effects until PR 2 ships.
 
 ### PR 2 — Per-tenant bot spawning
 
-- `POST /api/tenant/me/bots/[mode]/start` — calls `requireUnlockedKey`,
-  fetches all `tenant_secrets`, decrypts to a dict, calls
-  `startBot({tenantId, mode, decryptedSecrets})`. 401 if locked.
-- `POST /api/tenant/me/bots/[mode]/stop` — straight stop, no decrypt.
-- `/settings/bots` page with start/stop buttons per mode + status.
-- Validation: refuse to start if required slots missing for mode (e.g.
-  testnet/mainnet need `HYPERLIQUID_*`).
+The orchestration substrate already exists (Phase 3a):
+- `POST /api/tenant/me/bots` already creates a row + decrypts +
+  starts a container. Used by tests; no UI yet.
+- `DELETE /api/tenant/me/bots/[id]` stops the container and removes
+  the row.
+- `bot-orchestrator.ts` exposes `startBot`, `stopBot`, `statusBot`
+  with full env-precedence rules, RLS-role provisioning, password
+  rotation, and compensation logic.
+
+PR 2 just adds:
+- `POST /api/tenant/me/bots/[id]/stop` — stop the container but
+  keep the DB row (`isRunning=false`, clear `containerId`, set
+  `lastStoppedAt`). For temporary pause without losing the slot.
+- `POST /api/tenant/me/bots/[id]/start` — for a stopped row,
+  re-decrypt secrets and start a new container; update row with
+  fresh `containerId`. Required for "stop overnight, restart in
+  morning" UX.
+- `/settings/bots` page with one card per mode showing:
+  - Mode badge (paper/testnet/mainnet)
+  - Live status (running / stopped / not-created)
+  - Start / Stop / Delete buttons
+  - Container ID + last-started/stopped timestamps
+- Mounts `<UnlockModal>` when a start action returns 401.
 
 Operator's compose-bots run in parallel during this phase. Tenants
 get their own.
