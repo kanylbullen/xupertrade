@@ -25,10 +25,15 @@
 
 import { and, eq } from "drizzle-orm";
 
+import { appendAuditLog } from "@/lib/audit-log";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { db, tenantBots, tenantTelegramLinks } from "@/lib/db";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { requireTenant } from "@/lib/tenant";
 import { mintUnlockToken } from "@/lib/unlock-token";
+
+const RATE_LIMIT_MAX = 5;          // 5 unlock-link DMs
+const RATE_LIMIT_WINDOW_SEC = 900; // per 15 minutes
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +53,29 @@ export async function POST(req: Request): Promise<Response> {
   } catch (err) {
     if (err instanceof Response) return err;
     throw err;
+  }
+
+  // 0. Rate-limit before any work. Even an authed tenant could
+  //    spam this endpoint and noise up their own Telegram chat;
+  //    cap at 5/15min/tenant. Audit the denial so operator can
+  //    spot a misbehaving caller.
+  const rl = await checkRateLimit(
+    "unlock-link-send",
+    tenant.id,
+    RATE_LIMIT_MAX,
+    RATE_LIMIT_WINDOW_SEC,
+  );
+  if (!rl.allowed) {
+    await appendAuditLog(tenant.id, "tenant", "telegram.unlock-link.rate-limited", {
+      reset_in_seconds: rl.resetInSeconds,
+    });
+    return Response.json(
+      {
+        error: `rate limit: max ${RATE_LIMIT_MAX} unlock links per ${RATE_LIMIT_WINDOW_SEC / 60} min`,
+        retryAfterSeconds: rl.resetInSeconds,
+      },
+      { status: 429, headers: { "Retry-After": String(rl.resetInSeconds) } },
+    );
   }
 
   // 1. Telegram linked?
@@ -129,6 +157,10 @@ export async function POST(req: Request): Promise<Response> {
       signal: AbortSignal.timeout(10_000),
     });
   } catch (e) {
+    await appendAuditLog(tenant.id, "tenant", "telegram.unlock-link.failed", {
+      reason: "bot-unreachable",
+      bot_mode: bot.mode,
+    });
     return Response.json(
       {
         error: `failed to reach bot: ${e instanceof Error ? e.message : String(e)}`,
@@ -138,10 +170,18 @@ export async function POST(req: Request): Promise<Response> {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    await appendAuditLog(tenant.id, "tenant", "telegram.unlock-link.failed", {
+      reason: "bot-rejected",
+      status: res.status,
+      bot_mode: bot.mode,
+    });
     return Response.json(
       { error: `bot rejected send: ${res.status} ${text}` },
       { status: 502 },
     );
   }
+  await appendAuditLog(tenant.id, "tenant", "telegram.unlock-link.sent", {
+    bot_mode: bot.mode,
+  });
   return Response.json({ sent: true });
 }

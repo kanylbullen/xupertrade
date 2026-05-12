@@ -21,6 +21,12 @@ vi.mock("@/lib/unlock-token", () => ({
 vi.mock("@/lib/bot-api", () => ({
   getBotApiUrl: vi.fn(),
 }));
+vi.mock("@/lib/rate-limit", () => ({
+  checkRateLimit: vi.fn(),
+}));
+vi.mock("@/lib/audit-log", () => ({
+  appendAuditLog: vi.fn().mockResolvedValue(undefined),
+}));
 
 const selectChain = {
   from: vi.fn().mockReturnThis(),
@@ -42,6 +48,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { getBotApiUrl } from "@/lib/bot-api";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { requireTenant } from "@/lib/tenant";
 import { mintUnlockToken } from "@/lib/unlock-token";
 
@@ -50,6 +57,7 @@ import { POST } from "../route";
 const mockedRequireTenant = vi.mocked(requireTenant);
 const mockedGetBotApiUrl = vi.mocked(getBotApiUrl);
 const mockedMintToken = vi.mocked(mintUnlockToken);
+const mockedRateLimit = vi.mocked(checkRateLimit);
 
 const TENANT_ID = "11111111-2222-3333-4444-555555555555";
 const ORIG_ENV = { ...process.env };
@@ -76,6 +84,12 @@ beforeEach(() => {
   mockedRequireTenant.mockResolvedValue(tenant());
   mockedMintToken.mockResolvedValue("signed-token-abc");
   mockedGetBotApiUrl.mockReturnValue("http://bot:8000");
+  // Default: rate-limit allows. Tests that exercise denial override.
+  mockedRateLimit.mockResolvedValue({
+    allowed: true,
+    remaining: 4,
+    resetInSeconds: 900,
+  });
   process.env.PUBLIC_URL = "https://example.com";
   process.env.API_KEY = "test-key";
 });
@@ -175,6 +189,26 @@ describe("POST /api/tenant/me/telegram/send-unlock-link", () => {
     expect(sentBody.chat_id).toBe("1234567890");
     expect(sentBody.url).toContain("https://example.com/unlock?token=");
     expect(sentBody.url).toContain("signed-token-abc");
+    vi.unstubAllGlobals();
+  });
+
+  it("returns 429 when rate-limited before doing any work", async () => {
+    mockedRateLimit.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetInSeconds: 600,
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await POST(req());
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("600");
+    const body = await res.json();
+    expect(body.retryAfterSeconds).toBe(600);
+    // DB lookup + bot fetch must NOT have happened.
+    expect(selectChain.limit).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 });

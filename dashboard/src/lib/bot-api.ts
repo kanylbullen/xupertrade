@@ -116,10 +116,23 @@ async function _doBotFetch(
       status: res.status,
       headers: contentType ? { "content-type": contentType } : undefined,
     });
-  } catch {
+  } catch (err) {
+    // Connection-refused / DNS-fail / abort. The DB might still
+    // say is_running=true while the container is actually gone
+    // (operator-side `docker rm`, host reboot before /stop ran).
+    // We don't auto-mark-stopped here because a single transient
+    // network glitch shouldn't nuke the row — auto-reconcile is
+    // a separate PR with proper N-strikes counting + container
+    // inspection. For now, include the error reason in the
+    // response so the UI can show something more actionable than
+    // a bare "unreachable".
+    const reason = err instanceof Error ? err.message : "unknown";
     return Response.json(
-      { error: `Bot API at ${base} unreachable (mode=${mode})` },
-      { status: 502 }
+      {
+        error: `Bot API at ${base} unreachable (mode=${mode})`,
+        reason,
+      },
+      { status: 502 },
     );
   }
 }

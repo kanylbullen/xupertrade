@@ -10,6 +10,7 @@
 
 import { eq } from "drizzle-orm";
 
+import { appendAuditLog } from "@/lib/audit-log";
 import {
   cacheKey,
   clearKey,
@@ -76,6 +77,7 @@ export async function POST(req: Request): Promise<Response> {
     .update(tenants)
     .set({ lastLoginAt: new Date() })
     .where(eq(tenants.id, tenant.id));
+  await appendAuditLog(tenant.id, "tenant", "passphrase.unlock");
 
   return Response.json({ unlocked: true });
 }
@@ -96,5 +98,6 @@ export async function DELETE(req: Request): Promise<Response> {
   if (sessionId !== null) {
     await clearKey(tenant.id, sessionId);
   }
+  await appendAuditLog(tenant.id, "tenant", "passphrase.lock");
   return Response.json({ locked: true });
 }
