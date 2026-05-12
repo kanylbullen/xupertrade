@@ -95,17 +95,21 @@ const SHARED_TABLES = [
 ];
 
 /**
- * Subset of TENANT_DATA_TABLES that have a `serial id` column and
- * therefore an auto-generated `<table>_id_seq` sequence. Used to
- * scope sequence grants instead of granting on every sequence in
- * the public schema (which would include tenant_audit_log_id_seq
- * and other dashboard-only sequences).
+ * Tables (from BOTH TENANT_DATA_TABLES and SHARED_TABLES) that have
+ * a `serial id` column and therefore an auto-generated
+ * `<table>_id_seq` sequence. Used to scope sequence grants instead
+ * of granting on every sequence in the public schema (which would
+ * include tenant_audit_log_id_seq and other dashboard-only
+ * sequences).
  *
  * Excluded tables:
  *   - `user_vault_entries`: composite PK on (user_address,
  *     vault_address), no serial id, no sequence.
  *   - `tenant_telegram_links`: PK is `tenant_id` (UUID), no
  *     serial id, no sequence.
+ *   - `vaults`: PK is `address` (String), no sequence.
+ *   - `vault_nav_history`: composite PK (vault_address, timestamp),
+ *     no sequence.
  *
  * Granting on a non-existent sequence raises "relation does not
  * exist" and breaks provisionRole() → bot startup fails for new
@@ -115,13 +119,10 @@ const SHARED_TABLES = [
 const TABLES_WITHOUT_ID_SEQ = new Set([
   "user_vault_entries",
   "tenant_telegram_links",
-  // Shared vault tables: `vaults` has String PK on address;
-  // `vault_nav_history` has composite PK (address, timestamp).
-  // Neither has a serial id sequence.
   "vaults",
   "vault_nav_history",
 ]);
-const TENANT_DATA_TABLES_WITH_ID_SEQ = [
+const TABLES_WITH_ID_SEQ = [
   ...TENANT_DATA_TABLES,
   ...SHARED_TABLES,
 ].filter((t) => !TABLES_WITHOUT_ID_SEQ.has(t));
@@ -152,11 +153,8 @@ export async function provisionRole(
   // password. Since we generate base64url ourselves there shouldn't
   // be any, but defense-in-depth.
   const pwLiteral = password.replace(/'/g, "''");
-  // Grant DML on both tenant-scoped (RLS-isolated) tables AND
-  // shared tables (vault scanner data, no isolation). The SQL
-  // shape is the same; the isolation difference lives at the
-  // RLS-policy layer (per alembic 0010 + 0014).
-  const tablesList = [...TENANT_DATA_TABLES, ...SHARED_TABLES].join(", ");
+  const tenantTablesList = TENANT_DATA_TABLES.join(", ");
+  const sharedTablesList = SHARED_TABLES.join(", ");
 
   // CREATE-OR-ALTER pattern (race-safe). The naive `IF NOT EXISTS`
   // check has a TOCTOU race: two concurrent provisionRole() calls
@@ -174,15 +172,26 @@ export async function provisionRole(
   `));
   // Grants are idempotent — re-running them is safe.
   await db.execute(sql.raw(`GRANT USAGE ON SCHEMA public TO ${roleName};`));
+  // Per-tenant data tables: full DML. RLS (alembic 0010 + 0014)
+  // restricts each role to its own tenant_id rows, so DELETE here
+  // only nukes the tenant's own data.
   await db.execute(sql.raw(
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON ${tablesList} TO ${roleName};`,
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ${tenantTablesList} TO ${roleName};`,
+  ));
+  // Shared tables (vault scanner data): NO DELETE. Vault data is
+  // global; a tenant role with DELETE could wipe all tenants'
+  // vault history. The scanner only needs upsert (INSERT/UPDATE)
+  // semantics, so omitting DELETE costs us nothing and prevents
+  // a compromised tenant credential from doing collateral damage.
+  await db.execute(sql.raw(
+    `GRANT SELECT, INSERT, UPDATE ON ${sharedTablesList} TO ${roleName};`,
   ));
   // Sequence grants must be per-table — `ALL SEQUENCES IN SCHEMA
   // public` would also grant the dashboard-only tables' sequences
   // (tenant_audit_log etc), which we DON'T want tenants to touch.
   // Postgres names auto-generated sequences `<table>_<col>_seq`;
-  // each per-tenant table has exactly one for its `id` column.
-  for (const table of TENANT_DATA_TABLES_WITH_ID_SEQ) {
+  // each granted table with an autoincrement id has exactly one.
+  for (const table of TABLES_WITH_ID_SEQ) {
     await db.execute(sql.raw(
       `GRANT USAGE, SELECT ON SEQUENCE ${table}_id_seq TO ${roleName};`,
     ));
