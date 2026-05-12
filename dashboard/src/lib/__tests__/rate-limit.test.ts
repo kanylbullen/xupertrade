@@ -93,6 +93,44 @@ describe("checkRateLimit", () => {
     expect(r.allowed).toBe(true);
   });
 
+  it("fails open when a per-command error appears in results", async () => {
+    // INCR succeeded but TTL command errored. Without per-cmd
+    // validation we'd cast the Error to a number and resetInSeconds
+    // would be NaN. Should fall back to windowSeconds default.
+    const { client } = makeRedisStub([
+      [null, 3],
+      [null, 1],
+      [new Error("EXECABORT"), null],
+    ]);
+    const r = await checkRateLimit("test", "tenant-1", 5, 300, client);
+    expect(r.allowed).toBe(true);
+    expect(r.resetInSeconds).toBe(300);
+    expect(Number.isFinite(r.resetInSeconds)).toBe(true);
+  });
+
+  it("clamps negative TTL to windowSeconds (Retry-After must be non-negative)", async () => {
+    // TTL -2 = key vanished between INCR and TTL. Returning -2
+    // as Retry-After is meaningless to the client.
+    const { client } = makeRedisStub([
+      [null, 6], // denied
+      [null, 0],
+      [null, -2],
+    ]);
+    const r = await checkRateLimit("test", "tenant-1", 5, 300, client);
+    expect(r.allowed).toBe(false);
+    expect(r.resetInSeconds).toBe(300);
+  });
+
+  it("clamps TTL of 0 to windowSeconds", async () => {
+    const { client } = makeRedisStub([
+      [null, 6],
+      [null, 0],
+      [null, 0],
+    ]);
+    const r = await checkRateLimit("test", "tenant-1", 5, 300, client);
+    expect(r.resetInSeconds).toBe(300);
+  });
+
   it("namespaces scope + bucket distinctly", async () => {
     const { client, pipeline } = makeRedisStub([
       [null, 1],

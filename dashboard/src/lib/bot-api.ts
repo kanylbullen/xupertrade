@@ -120,21 +120,54 @@ async function _doBotFetch(
     // Connection-refused / DNS-fail / abort. The DB might still
     // say is_running=true while the container is actually gone
     // (operator-side `docker rm`, host reboot before /stop ran).
-    // We don't auto-mark-stopped here because a single transient
-    // network glitch shouldn't nuke the row — auto-reconcile is
-    // a separate PR with proper N-strikes counting + container
-    // inspection. For now, include the error reason in the
-    // response so the UI can show something more actionable than
-    // a bare "unreachable".
-    const reason = err instanceof Error ? err.message : "unknown";
+    // Auto-reconcile is deferred.
+    //
+    // The full error (which may include internal hostnames, IPs,
+    // and ports — Copilot review feedback on PR #85) is logged
+    // server-side only. The response carries a stable reason code
+    // so the UI can render friendly text without leaking infra.
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    console.warn(
+      "[bot-api] connection failed",
+      { mode, base, error: rawMessage },
+    );
+    const reason = classifyConnectionError(err);
     return Response.json(
       {
-        error: `Bot API at ${base} unreachable (mode=${mode})`,
+        error: `bot unreachable (mode=${mode})`,
         reason,
       },
       { status: 502 },
     );
   }
+}
+
+/**
+ * Map an unknown thrown error from `fetch` to a small set of
+ * stable, public-safe reason codes. Internal details (hostnames,
+ * IPs, port numbers, exact OS error text) stay server-side; the
+ * client gets a code it can render as friendly UI text.
+ */
+function classifyConnectionError(err: unknown): string {
+  if (!(err instanceof Error)) return "unknown";
+  const name = err.name;
+  const msg = err.message.toLowerCase();
+  if (name === "TimeoutError" || msg.includes("timeout")) return "timeout";
+  if (name === "AbortError" || msg.includes("aborted")) return "aborted";
+  if (
+    msg.includes("getaddrinfo") ||
+    msg.includes("enotfound") ||
+    msg.includes("dns")
+  ) {
+    return "dns-failed";
+  }
+  if (msg.includes("econnrefused") || msg.includes("refused")) {
+    return "connection-refused";
+  }
+  if (msg.includes("econnreset") || msg.includes("reset")) {
+    return "connection-reset";
+  }
+  return "network-error";
 }
 
 /**

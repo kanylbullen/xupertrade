@@ -53,8 +53,26 @@ export async function checkRateLimit(
     // the caller's responsibility if they care.
     return { allowed: true, remaining: max, resetInSeconds: windowSeconds };
   }
-  const count = (results[0]?.[1] as number) ?? 0;
-  const ttl = (results[2]?.[1] as number) ?? windowSeconds;
+
+  // pipeline.exec() returns [err, value] tuples per command. A
+  // single command can fail (Redis cluster slot bounce, OOM
+  // eviction race, etc.) while others succeed. Validate that
+  // both the INCR result + the TTL result are real numbers; if
+  // anything's off, fail open with sane defaults.
+  function asNumber(entry: unknown, fallback: number): number {
+    if (!Array.isArray(entry)) return fallback;
+    const [err, val] = entry;
+    if (err !== null) return fallback;
+    return typeof val === "number" && Number.isFinite(val) ? val : fallback;
+  }
+  const count = asNumber(results[0], 0);
+  const rawTtl = asNumber(results[2], windowSeconds);
+  // TTL can be -1 (key has no expiry — shouldn't happen via INCR
+  // + EXPIRE NX, but defense) or -2 (key vanished between INCR
+  // and TTL, also shouldn't happen but Redis docs say it can).
+  // Clamp to windowSeconds in those cases so Retry-After stays
+  // useful and non-negative.
+  const ttl = rawTtl > 0 ? rawTtl : windowSeconds;
   const remaining = Math.max(0, max - count);
   if (count > max) {
     return { allowed: false, remaining: 0, resetInSeconds: ttl };
