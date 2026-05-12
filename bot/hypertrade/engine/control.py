@@ -251,7 +251,8 @@ class BotControl:
     # `dashboard:tls:*`) used to be read/written here and exposed via
     # bot HTTP routes (`/api/auth/config`, `/api/tls/configure`, …).
     # The dashboard now owns those keys directly via
-    # `dashboard/src/lib/auth-config.ts` + `tls-config.ts` (PR 4a) —
+    # `dashboard/src/lib/auth-config.ts` +
+    # `dashboard/src/lib/tls-config.ts` (PR 4a) —
     # the bot has no need to read or mutate them, so the methods are
     # gone. The Redis keys themselves still exist and are managed
     # solely by the dashboard.

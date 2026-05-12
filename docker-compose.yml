@@ -17,8 +17,8 @@ services:
     profiles: [build]
     build: ./bot
     image: hypertrade-bot:latest
-    # No command / restart — this entry exists only so compose knows
-    # how to build the image. Starting it would just exit.
+    # No-op command + restart=no — this entry exists only so compose
+    # knows how to build the image; running it just exits cleanly.
     command: ["true"]
     restart: "no"
 

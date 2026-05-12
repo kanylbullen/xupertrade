@@ -118,7 +118,7 @@ export function containerName(tenantId: string, mode: BotMode): string {
  *     `decryptedSecrets`, not system-managed.
  *   - AUTH_MODE, OIDC_*, TLS_* — owned exclusively by the dashboard
  *     (read directly from Redis via `lib/auth-config.ts` +
- *     `tls-config.ts`). Bots have nothing to do with auth/TLS config.
+ *     `lib/tls-config.ts`). Bots have nothing to do with auth/TLS config.
  */
 export function getOrchestratorSystemEnv(): Record<string, string> {
   return {
