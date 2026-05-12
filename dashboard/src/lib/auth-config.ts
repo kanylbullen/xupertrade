@@ -15,6 +15,12 @@
  * — kept in lockstep until PR 4c removes the bot-side handler.
  */
 
+// Server-only — getAuthConfig returns OIDC client_secret +
+// basic_hash + session_secret. Importing this from a Client
+// Component would bundle those secrets into the browser build.
+// `server-only` causes a build error if that happens.
+import "server-only";
+
 import type { Redis } from "ioredis";
 import { randomBytes } from "node:crypto";
 

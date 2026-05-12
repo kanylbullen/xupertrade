@@ -29,7 +29,7 @@ export async function POST(req: Request) {
     // Redis unreachable — can't verify auth state. Fail closed
     // rather than silently allowing login.
     return NextResponse.json(
-      { ok: false, error: "auth-state-unavailable" },
+      { ok: false, error: "bot-unreachable" },
       { status: 503 },
     );
   }
@@ -84,7 +84,7 @@ export async function POST(req: Request) {
     // No session secret available — Redis unreachable. The
     // operator must fix it before logins can resume.
     return NextResponse.json(
-      { ok: false, error: "auth-state-unavailable" },
+      { ok: false, error: "bot-unreachable" },
       { status: 503 },
     );
   }

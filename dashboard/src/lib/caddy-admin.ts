@@ -15,6 +15,13 @@
  * `CADDY_ADMIN_URL` for non-default deploys.
  */
 
+// Server-only — the Caddy admin API at caddy:2019 is only
+// reachable from inside the docker network, but `server-only`
+// also prevents this module from being accidentally imported
+// into a Client Component (where the fetch would target the
+// browser's network and 404).
+import "server-only";
+
 const CADDY_ADMIN_URL =
   process.env.CADDY_ADMIN_URL || "http://caddy:2019";
 

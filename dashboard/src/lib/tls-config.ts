@@ -10,6 +10,11 @@
  * — kept in lockstep until PR 4c removes the bot-side handler.
  */
 
+// Server-only — getTlsConfig returns the Cloudflare API token.
+// Importing this from a Client Component would bundle it into
+// the browser build; `server-only` causes a build error if so.
+import "server-only";
+
 import type { Redis } from "ioredis";
 
 import { getRedisClient } from "./redis";

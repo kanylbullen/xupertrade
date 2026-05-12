@@ -199,7 +199,7 @@ ssh root@192.168.12.228 \
    phase run -- docker compose build --no-cache --pull dashboard && \
    phase run -- docker compose up -d --force-recreate dashboard"
 
-# 4. Verify tenant-bots still tradering
+# 4. Verify tenant-bots still trading
 ssh root@192.168.12.228 \
   'docker ps --filter "label=hypertrade.tenant_id" --format "table {{.Names}}\t{{.Status}}"'
 

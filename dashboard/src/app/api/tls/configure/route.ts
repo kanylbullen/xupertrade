@@ -27,7 +27,18 @@ export async function POST(req: Request) {
 
   const updates: Partial<TlsConfig> = {};
   if ("enabled" in body) {
-    updates.enabled = Boolean(body.enabled);
+    const v = body.enabled;
+    // Strict: enabled must be a real boolean. Boolean(v) would
+    // treat the string "false" or the number 0 as truthy, which
+    // could silently flip TLS on. Match the strictness used for
+    // the string-field validation below.
+    if (typeof v !== "boolean") {
+      return Response.json(
+        { error: "enabled must be a boolean" },
+        { status: 400 },
+      );
+    }
+    updates.enabled = v;
   }
   for (const k of ["domain", "email", "cf_token"] as const) {
     if (k in body) {

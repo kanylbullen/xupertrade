@@ -5,6 +5,14 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // `server-only` exports a single throw-on-import line that
+      // fires when imported into a Client Component bundle. Under
+      // vitest there's no client/server distinction, so the import
+      // throws unconditionally. Alias to an empty module — the
+      // import statement becomes a no-op for test purposes; the
+      // build-time guarantee still applies in the actual Next
+      // production build.
+      "server-only": path.resolve(__dirname, "./src/test/server-only-stub.ts"),
     },
   },
   test: {
