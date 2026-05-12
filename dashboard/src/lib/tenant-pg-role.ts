@@ -65,6 +65,11 @@ const TENANT_DATA_TABLES = [
   "manual_onchain_levels",
   "hodl_purchases",
   "user_vault_entries",
+  // PR 3b: bot's /link handler upserts here; get-by-chat lookups
+  // also happen bot-side. tenant_id is the PK + UNIQUE on chat_id
+  // (alembic 0013) prevents cross-tenant smuggling at the schema
+  // layer, so SELECT/INSERT/UPDATE/DELETE is safe to grant.
+  "tenant_telegram_links",
 ];
 
 /**
