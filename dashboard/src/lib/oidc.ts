@@ -1,8 +1,11 @@
 /**
  * OIDC (OpenID Connect) authorization-code flow with PKCE + state.
  *
- * Config (issuer, client_id, client_secret, scopes) is fetched from the
- * bot — same Redis-backed config the basic-auth path uses.
+ * Config (issuer, client_id, client_secret, scopes) is read
+ * directly from Redis via lib/auth-config.ts — env-first override,
+ * then dashboard:auth:oidc:* keys. The client_secret never leaves
+ * the dashboard process; the public /api/auth/config endpoint
+ * strips it from its response.
  *
  * Flow:
  *   /login (mode=oidc) → click → /api/auth/oidc/start
@@ -15,6 +18,7 @@
 
 import * as client from "openid-client";
 import { fetchAuthConfig, type AuthConfig } from "@/lib/auth";
+import { getAuthConfig } from "@/lib/auth-config";
 
 export const STATE_COOKIE = "hypertrade_oidc_state";
 const STATE_TTL_SECONDS = 600; // 10 min — enough for the round trip
@@ -66,9 +70,10 @@ export async function getOidcConfig(): Promise<{
   if (!cfg) return null;
   if (!cfg.oidc_issuer || !cfg.oidc_client_id) return null;
 
-  // The public /api/auth/config endpoint deliberately strips client_secret
-  // (and session_secret too — both are fetched via API_KEY-gated bot
-  // endpoints so they never appear in publicly-readable responses).
+  // The public /api/auth/config endpoint deliberately strips
+  // client_secret (and session_secret too). Here we read it from
+  // Redis directly via lib/auth-config — server-side only, never
+  // leaves the dashboard process.
   const secret = await fetchOidcSecret();
   if (!secret) return null;
 
@@ -88,23 +93,15 @@ export async function getOidcConfig(): Promise<{
   return { config, cfg };
 }
 
-/** Internal — fetch the OIDC client secret from the bot. Requires API_KEY
- *  on the dashboard side (set via env var). The bot's /api/auth/secret
- *  endpoint returns it only when API_KEY matches. */
+/** Internal — fetch the OIDC client secret. PR 4b: now reads
+ *  Redis directly via lib/auth-config.ts (env-first override
+ *  → Redis → empty default). Replaces the previous bot-proxied
+ *  /api/auth/oidc-secret call. Same data, one fewer hop.
+ */
 async function fetchOidcSecret(): Promise<string | null> {
-  const botUrl =
-    process.env.BOT_API_URL_TESTNET || "http://bot-testnet:8001";
-  const apiKey = process.env.API_KEY || "";
   try {
-    const res = await fetch(`${botUrl}/api/auth/oidc-secret`, {
-      method: "GET",
-      headers: apiKey ? { "X-Api-Key": apiKey } : undefined,
-      cache: "no-store",
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { secret?: string };
-    return data.secret || null;
+    const cfg = await getAuthConfig();
+    return cfg.oidc_client_secret || null;
   } catch {
     return null;
   }

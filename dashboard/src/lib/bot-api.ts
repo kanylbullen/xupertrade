@@ -6,30 +6,18 @@ import { requireTenant } from "./tenant";
 
 export type Mode = BotMode;
 
-const URLS: Record<Mode, string> = {
-  paper: process.env.BOT_API_URL_PAPER || "http://localhost:8000",
-  testnet: process.env.BOT_API_URL_TESTNET || "http://localhost:8001",
-  mainnet: process.env.BOT_API_URL_MAINNET || "http://localhost:8002",
-};
-
-export function botUrl(mode: Mode): string {
-  return URLS[mode];
-}
-
-export const BOT_API_URL = URLS.testnet; // back-compat for older imports
-
 /**
- * Build the dashboard→bot HTTP URL from a `tenant_bots` row. Replaces
- * the env-driven `botUrl(mode)` for tenant-aware routes (Phase 6c
- * PR ε will wire the existing routes to use this).
+ * Build the dashboard→bot HTTP URL from a `tenant_bots` row.
+ * Sole source of truth for bot routing.
  *
  * Convention:
  *   - host = container_name (docker DNS resolves it inside the
- *     compose network for both operator's compose-defined bots and
- *     orchestrator-spawned tenant bots)
+ *     compose network — works for both compose-defined bot
+ *     services and orchestrator-spawned tenant bots, as long as
+ *     the row's container_name matches the actual container name)
  *   - port = API_PORT_BY_MODE[mode] (single source of truth in
  *     bot-orchestrator.ts; orchestrator injects API_PORT for new
- *     tenant bots so they match operator's compose convention)
+ *     tenant bots so they match the routing convention)
  *
  * Returns `null` if the row has no `containerName` (bot is provisioned
  * in DB but the orchestrator hasn't actually started a container yet
@@ -54,8 +42,7 @@ function parseMode(req: Request): Mode {
 
 /**
  * Internal: do the actual fetch with API_KEY forwarding + standard
- * error mapping. Shared by `botFetch` (env-URL legacy path) and
- * `tenantBotFetch` (tenant_bots-lookup path).
+ * error mapping. Used by `tenantBotFetch`.
  */
 async function _doBotFetch(
   base: string,
@@ -168,17 +155,6 @@ function classifyConnectionError(err: unknown): string {
     return "connection-reset";
   }
   return "network-error";
-}
-
-/**
- * Legacy env-URL proxy. Used by routes that haven't been migrated to
- * `tenantBotFetch` yet. After Phase 6c PR ε this is only retained for
- * back-compat — no production code path should depend on it.
- */
-export async function botFetch(req: Request, path: string, init?: RequestInit) {
-  const mode = parseMode(req);
-  const base = botUrl(mode);
-  return _doBotFetch(base, path, mode, init);
 }
 
 /**
