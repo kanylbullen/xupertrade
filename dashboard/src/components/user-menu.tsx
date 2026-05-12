@@ -112,6 +112,13 @@ export function UserMenu({ suffix }: { suffix: string }) {
             )}
           </div>
           <Link
+            href="/settings/credentials"
+            className="block px-4 py-2 text-sm hover:bg-muted transition-colors"
+            onClick={() => setOpen(false)}
+          >
+            Credentials
+          </Link>
+          <Link
             href={`/options${suffix}`}
             className="block px-4 py-2 text-sm hover:bg-muted transition-colors"
             onClick={() => setOpen(false)}
