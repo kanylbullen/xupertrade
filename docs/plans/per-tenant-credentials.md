@@ -40,9 +40,9 @@ Secret-key regex: `/^[A-Z0-9_]{1,64}$/`. We'll use these slot names:
 
 ## Decisions made (chat 2026-05-12)
 
-1. **Path A** (operator = vanlig tenant). No env-injection survives
+1. **Path A** (operator = normal tenant). No env-injection survives
    in the final state; every credential goes through `tenant_secrets`.
-2. **Unlock UX**: webb modal at session expiry; telegram
+2. **Unlock UX**: web modal at session expiry; Telegram
    notification + signed deeplink to `$DEPLOY_HOST/unlock?token=...` for headless
    bot restarts. Passphrase never travels through Telegram.
 3. **Onboarding**: walkthrough wizard on first visit (set passphrase →

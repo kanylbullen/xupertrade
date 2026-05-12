@@ -99,7 +99,7 @@ export function CredentialsClient() {
       </>
     );
   }
-  return <CredentialsList />;
+  return <CredentialsList onLocked={refresh} />;
 }
 
 function SetPassphrase({ onDone }: { onDone: () => void }) {
@@ -122,40 +122,48 @@ function SetPassphrase({ onDone }: { onDone: () => void }) {
     }
     setError(null);
     startTransition(async () => {
-      // 1. Set the passphrase (creates salt + verifier on tenant row).
-      const setRes = await fetch("/api/tenant/me/passphrase", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ passphrase: a }),
-      });
-      if (!setRes.ok) {
-        const data = await setRes.json().catch(() => null);
+      try {
+        // 1. Set the passphrase (creates salt + verifier on tenant row).
+        const setRes = await fetch("/api/tenant/me/passphrase", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ passphrase: a }),
+        });
+        if (!setRes.ok) {
+          const data = await setRes.json().catch(() => null);
+          setError(
+            (data as { error?: string })?.error ??
+              `Failed (${setRes.status})`,
+          );
+          return;
+        }
+        // 2. Unlock immediately so the user lands on the credentials
+        // form without an extra prompt — they just typed the passphrase
+        // twice, asking again would be hostile.
+        const unlockRes = await fetch("/api/tenant/me/unlock", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ passphrase: a }),
+        });
+        if (!unlockRes.ok) {
+          const data = await unlockRes.json().catch(() => null);
+          setError(
+            (data as { error?: string })?.error ??
+              `Set succeeded but unlock failed (${unlockRes.status})`,
+          );
+          return;
+        }
+        // Clear DOM values before re-render dismounts the form.
+        if (ref1.current) ref1.current.value = "";
+        if (ref2.current) ref2.current.value = "";
+        onDone();
+      } catch (err) {
         setError(
-          (data as { error?: string })?.error ??
-            `Failed (${setRes.status})`,
+          err instanceof Error
+            ? `Network error: ${err.message}`
+            : "Network error — check your connection and try again.",
         );
-        return;
       }
-      // 2. Unlock immediately so the user lands on the credentials
-      // form without an extra prompt — they just typed the passphrase
-      // twice, asking again would be hostile.
-      const unlockRes = await fetch("/api/tenant/me/unlock", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ passphrase: a }),
-      });
-      if (!unlockRes.ok) {
-        const data = await unlockRes.json().catch(() => null);
-        setError(
-          (data as { error?: string })?.error ??
-            `Set succeeded but unlock failed (${unlockRes.status})`,
-        );
-        return;
-      }
-      // Clear DOM values before re-render dismounts the form.
-      if (ref1.current) ref1.current.value = "";
-      if (ref2.current) ref2.current.value = "";
-      onDone();
     });
   }
 
@@ -190,7 +198,7 @@ function SetPassphrase({ onDone }: { onDone: () => void }) {
           ref={ref2}
           id="pp2"
           type="password"
-          name="new-passphrase"
+          name="new-passphrase-confirm"
           autoComplete="new-password"
           className="mt-1 w-full rounded border bg-background px-3 py-2 text-sm"
           disabled={isPending}
@@ -212,7 +220,7 @@ function SetPassphrase({ onDone }: { onDone: () => void }) {
   );
 }
 
-function CredentialsList() {
+function CredentialsList({ onLocked }: { onLocked: () => void }) {
   const [secrets, setSecrets] = useState<SecretRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -257,6 +265,7 @@ function CredentialsList() {
           isSet={setKeys.has(slot.key)}
           updatedAt={updatedAtMap.get(slot.key)}
           onChange={refresh}
+          onLocked={onLocked}
         />
       ))}
     </div>
@@ -268,11 +277,17 @@ function SecretSlot({
   isSet,
   updatedAt,
   onChange,
+  onLocked,
 }: {
   slot: { key: string; label: string; hint: string };
   isSet: boolean;
   updatedAt: string | undefined;
   onChange: () => void;
+  /** Called when a write returns 401 — tenant got locked between the
+   *  page load and this action (K-cache expired, user locked in
+   *  another tab, etc.). Bubble up so the parent re-renders the
+   *  unlock prompt instead of leaving the user stuck on an error. */
+  onLocked: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -288,24 +303,43 @@ function SecretSlot({
     }
     setError(null);
     startTransition(async () => {
-      const res = await fetch(
-        `/api/tenant/me/secrets/${encodeURIComponent(slot.key)}`,
-        {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ value }),
-        },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        setError(
-          (data as { error?: string })?.error ?? `Failed (${res.status})`,
+      try {
+        const res = await fetch(
+          `/api/tenant/me/secrets/${encodeURIComponent(slot.key)}`,
+          {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ value }),
+          },
         );
-        return;
+        if (res.status === 401) {
+          // K-cache expired since page load. Pop the unlock prompt
+          // instead of dead-ending the user. Their pasted value is
+          // lost; that's acceptable — they're about to type a
+          // passphrase and we don't want to keep secret material
+          // around longer than necessary.
+          if (ref.current) ref.current.value = "";
+          setEditing(false);
+          onLocked();
+          return;
+        }
+        if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          setError(
+            (data as { error?: string })?.error ?? `Failed (${res.status})`,
+          );
+          return;
+        }
+        if (ref.current) ref.current.value = "";
+        setEditing(false);
+        onChange();
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Network error: ${err.message}`
+            : "Network error — check your connection and try again.",
+        );
       }
-      if (ref.current) ref.current.value = "";
-      setEditing(false);
-      onChange();
     });
   }
 
@@ -313,18 +347,26 @@ function SecretSlot({
     if (!confirm(`Delete ${slot.label}? This cannot be undone.`)) return;
     setError(null);
     startTransition(async () => {
-      const res = await fetch(
-        `/api/tenant/me/secrets/${encodeURIComponent(slot.key)}`,
-        { method: "DELETE" },
-      );
-      if (!res.ok && res.status !== 404) {
-        const data = await res.json().catch(() => null);
-        setError(
-          (data as { error?: string })?.error ?? `Failed (${res.status})`,
+      try {
+        const res = await fetch(
+          `/api/tenant/me/secrets/${encodeURIComponent(slot.key)}`,
+          { method: "DELETE" },
         );
-        return;
+        if (!res.ok && res.status !== 404) {
+          const data = await res.json().catch(() => null);
+          setError(
+            (data as { error?: string })?.error ?? `Failed (${res.status})`,
+          );
+          return;
+        }
+        onChange();
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Network error: ${err.message}`
+            : "Network error — check your connection and try again.",
+        );
       }
-      onChange();
     });
   }
 
