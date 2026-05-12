@@ -86,6 +86,34 @@ export function containerName(tenantId: string, mode: BotMode): string {
   return `hypertrade-bot-${short}-${mode}`;
 }
 
+/**
+ * Compose-defined env vars the bot needs but the orchestrator's
+ * caller doesn't supply per-tenant. Mirrors x-bot-env in
+ * docker-compose.yml — without these the bot crashes at startup
+ * (e.g. tries to connect to localhost:6379 instead of the in-network
+ * `redis:6379`, then docker `restart: unless-stopped` retries
+ * forever, spamming any configured Telegram with `Xupertrade
+ * started` messages on each retry).
+ *
+ * Override via process.env on the dashboard service for non-default
+ * deployments — but for this single-host setup the defaults match
+ * compose 1:1, so callers don't need to touch them.
+ */
+export function getOrchestratorSystemEnv(): Record<string, string> {
+  return {
+    REDIS_URL: process.env.HYPERTRADE_BOT_REDIS_URL ?? "redis://redis:6379/0",
+    PAPER_INITIAL_BALANCE:
+      process.env.HYPERTRADE_BOT_PAPER_INITIAL_BALANCE ?? "10000",
+    POLL_INTERVAL_SECONDS:
+      process.env.HYPERTRADE_BOT_POLL_INTERVAL_SECONDS ?? "60",
+    MAX_POSITION_SIZE_USD:
+      process.env.HYPERTRADE_BOT_MAX_POSITION_SIZE_USD ?? "200",
+    MAX_DAILY_LOSS_USD:
+      process.env.HYPERTRADE_BOT_MAX_DAILY_LOSS_USD ?? "100",
+    KILL_SWITCH: process.env.HYPERTRADE_BOT_KILL_SWITCH ?? "false",
+  };
+}
+
 /** Required secret keys per mode. Used to validate the bot has all
  *  it needs BEFORE we try to start the container (cleaner UX than
  *  crashing the bot at HL-init time). */

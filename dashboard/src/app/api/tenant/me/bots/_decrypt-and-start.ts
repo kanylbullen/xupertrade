@@ -23,6 +23,7 @@ import { decryptSecret } from "@/lib/crypto/secrets";
 import { db, tenantBots, tenantSecrets } from "@/lib/db";
 import {
   type BotMode,
+  getOrchestratorSystemEnv,
   startBot,
   stopBot,
 } from "@/lib/bot-orchestrator";
@@ -103,7 +104,10 @@ export async function decryptAndStart(args: Args): Promise<Result> {
       tenantId: tenant.id,
       mode,
       decryptedSecrets,
-      systemEnv: { DATABASE_URL: tenantDbUrl },
+      systemEnv: {
+        ...getOrchestratorSystemEnv(),
+        DATABASE_URL: tenantDbUrl,
+      },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown docker error";
