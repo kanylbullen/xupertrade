@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "HyperTrade Dashboard",
+  title: "Xupertrade Dashboard",
   description: "Trading bot monitoring dashboard",
 };
 

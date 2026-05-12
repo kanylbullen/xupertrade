@@ -37,7 +37,7 @@ export function Nav() {
             href={`/${suffix}`}
             className="flex items-center gap-2 text-lg font-bold tracking-tight"
           >
-            HyperTrade
+            Xupertrade
             <BotStatusIndicator />
           </Link>
           <div className="flex items-center gap-3">
