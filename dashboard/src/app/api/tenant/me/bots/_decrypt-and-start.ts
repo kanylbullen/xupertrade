@@ -168,7 +168,9 @@ export async function decryptAndStart(args: Args): Promise<Result> {
     return {
       kind: "response",
       response: Response.json(
-        { error: `started container but DB update failed (rolled back): ${message}` },
+        {
+          error: `started container but DB update failed (container stopped to avoid orphan): ${message}`,
+        },
         { status: 500 },
       ),
     };
