@@ -221,65 +221,6 @@ class EngineRunner:
                 restored, len(positions),
             )
 
-        self._kick_caddy_tls_restore()
-
-    def _kick_caddy_tls_restore(self) -> None:
-        """Fire-and-forget re-push of the persisted Caddy TLS config.
-
-        Caddy boots from the Caddyfile mount with `tls internal` (self-signed),
-        because the LE config is held in Redis on the bot side and pushed
-        dynamically. Without this, every redeploy reverts the dashboard to
-        the self-signed bootstrap cert until somebody clicks Save on
-        Options → TLS.
-
-        Run as a background task so a slow / unreachable Caddy can't
-        delay engine startup. Gated to the testnet bot so paper / mainnet
-        don't race to push the same config three times.
-        """
-        # Only the testnet bot owns operational tasks (Telegram, vault
-        # scanner, TLS re-apply). Other modes share the same Postgres/Redis
-        # but stay out of side-effecting orchestration.
-        if settings.exchange_mode != "testnet":
-            return
-        if self.control is None:
-            return
-
-        async def _restore() -> None:
-            from hypertrade.notify import caddy_admin
-            ok, msg = await caddy_admin.push_persisted_config(self.control)
-            if ok:
-                logger.info("TLS restore: re-pushed Caddy config (%s)", msg)
-            else:
-                # Includes "missing fields: ..." when state is incomplete
-                # and "HTTP 5xx: ..." or "ConnectionError: ..." otherwise.
-                logger.warning("TLS restore: skipped — %s", msg)
-
-        # asyncio.create_task: fires immediately, doesn't block startup.
-        # The runner's tick loop keeps the event loop alive long enough
-        # for the task to complete.
-        import asyncio
-        try:
-            task = asyncio.create_task(_restore())
-            # Done-callback so an unhandled exception inside _restore
-            # surfaces in logs immediately, not only at GC. Audit L6.
-            def _on_done(t: asyncio.Task) -> None:
-                if t.cancelled():
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    # exc_info needs an info-tuple; bare exception loses
-                    # the traceback (audit-bundle-4 review fix).
-                    logger.error(
-                        "TLS restore task died with unhandled exception: %s",
-                        exc,
-                        exc_info=(type(exc), exc, exc.__traceback__),
-                    )
-            task.add_done_callback(_on_done)
-        except RuntimeError:
-            # No running event loop (shouldn't happen — startup is async),
-            # but keep startup robust against weird call paths.
-            logger.exception("TLS restore: could not schedule background task")
-
     def _reset_strategy_state(self, strategy_name: str) -> None:
         """Called by reconcile when it closes a DB position outside the
         normal signal path. Without this, the strategy keeps _in_position=True

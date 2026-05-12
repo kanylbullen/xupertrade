@@ -1,73 +1,27 @@
-x-bot-base: &bot-base
-  build: ./bot
-  # Explicit image tag so all three compose-defined bot services share
-  # one built image instead of getting three identical per-service
-  # images (`hypertrade-bot-paper`, `-testnet`, `-mainnet`). The
-  # dashboard's bot-orchestrator (PR 2) launches per-tenant bots from
-  # this same `hypertrade-bot:latest` tag — overridable via
-  # HYPERTRADE_BOT_IMAGE on the dashboard service. Without this line,
-  # `docker compose build` produces per-service images and orchestrator
-  # bot-spawn fails with `no such image: hypertrade-bot:latest`.
-  image: hypertrade-bot:latest
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-  restart: unless-stopped
-  healthcheck:
-    test: ["CMD-SHELL", "curl -sf http://localhost:${API_PORT:-8000}/health || exit 1"]
-    interval: 30s
-    timeout: 10s
-    retries: 3
-  volumes:
-    # Local extracted Roots data for HODL signals. Read-only — files are
-    # written by scripts/import_roots_har.py on the host (or rsync'd from
-    # a workstation) and never modified by the container. Gitignored on
-    # both sides — this is paid/personal data.
-    - ./bot/data/private:/app/data/private:ro
-
-x-bot-env: &bot-env
-  PAPER_INITIAL_BALANCE: "10000"
-  DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/hypertrade
-  REDIS_URL: redis://redis:6379/0
-  POLL_INTERVAL_SECONDS: "60"
-  MAX_POSITION_SIZE_USD: "200"
-  MAX_DAILY_LOSS_USD: "100"
-  KILL_SWITCH: "false"
-  API_KEY: "${API_KEY:-}"
-  DASHBOARD_URL: "${DASHBOARD_URL:-http://localhost:3000}"
-  # Operator's tenant UUID (set by Phase 6b backfill). Required so the
-  # bot's Repository tags every INSERT with a non-NULL tenant_id —
-  # alembic 0011 flips the tenant_id column to NOT NULL, and without
-  # this env the operator's existing 3 bots would crash on the first
-  # write after the migration. Per-tenant bots (Phase 3a, started by
-  # the dashboard orchestrator) get their own TENANT_ID injected at
-  # container-create time.
-  TENANT_ID: "${TENANT_ID:-00000000-0000-0000-0000-000000000001}"
-
-  # Env-first override of dashboard auth + TLS config (Phase 6c
-  # followup PR #67). When these are set in Phase, the bot's
-  # `/api/auth/config`, `/api/auth/oidc-secret`, and `/api/tls/*`
-  # endpoints return the env values instead of Redis. Empty (default)
-  # = fall back to Redis for back-compat with deploys that still have
-  # UI-written values there.
-  #
-  # IMPORTANT: these MUST be in `x-bot-env` (not just on the dashboard
-  # service) because the BOT is what reads them — the dashboard proxies
-  # the auth/tls config endpoints to the bot. Without these here, the
-  # env-first override silently falls back to Redis.
-  AUTH_MODE: "${AUTH_MODE:-}"
-  OIDC_ISSUER: "${OIDC_ISSUER:-}"
-  OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:-}"
-  OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
-  OIDC_SCOPES: "${OIDC_SCOPES:-}"
-  TLS_ENABLED_ENV: "${TLS_ENABLED_ENV:-}"
-  TLS_DOMAIN: "${TLS_DOMAIN:-}"
-  TLS_EMAIL: "${TLS_EMAIL:-}"
-  TLS_CF_API_TOKEN: "${TLS_CF_API_TOKEN:-}"
-
 services:
+  # Build-only service. Produces the `hypertrade-bot:latest` image that
+  # the dashboard's bot-orchestrator (lib/bot-orchestrator.ts) spawns
+  # per-tenant bot containers from. The image tag is overridable via
+  # HYPERTRADE_BOT_IMAGE on the dashboard service.
+  #
+  # Profile-gated so `docker compose up -d` (no profile) never tries
+  # to start it as a long-running service — it has no command, no
+  # depends_on, and isn't meant to run. Build it explicitly with:
+  #
+  #   docker compose --profile build build --no-cache --pull bot-image
+  #
+  # or alongside dashboard rebuilds:
+  #
+  #   docker compose --profile build build --no-cache --pull bot-image dashboard
+  bot-image:
+    profiles: [build]
+    build: ./bot
+    image: hypertrade-bot:latest
+    # No command / restart — this entry exists only so compose knows
+    # how to build the image. Starting it would just exit.
+    command: ["true"]
+    restart: "no"
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -95,63 +49,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  bot-paper:
-    <<: *bot-base
-    container_name: hypertrade-bot-paper
-    ports:
-      - "8000:8000"
-    environment:
-      <<: *bot-env
-      EXCHANGE_MODE: paper
-      API_PORT: "8000"
-      TELEGRAM_ENABLED: "false"
-
-  bot-testnet:
-    <<: *bot-base
-    container_name: hypertrade-bot-testnet
-    ports:
-      - "8001:8001"
-    environment:
-      <<: *bot-env
-      EXCHANGE_MODE: testnet
-      API_PORT: "8001"
-      HYPERLIQUID_PRIVATE_KEY: "${HYPERLIQUID_PRIVATE_KEY:-}"
-      HYPERLIQUID_ACCOUNT_ADDRESS: "${HYPERLIQUID_ACCOUNT_ADDRESS:-}"
-      # Telegram lives on the testnet bot — it subscribes to all 3 modes'
-      # event channels and routes commands per-mode internally.
-      TELEGRAM_ENABLED: "${TELEGRAM_ENABLED:-true}"
-      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
-      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
-      TELEGRAM_EVENTS: "${TELEGRAM_EVENTS:-trade.executed,position.closed,error,vault.qualified,vault.disqualified}"
-      VAULT_TRACKING_ADDRESS: "${VAULT_TRACKING_ADDRESS:-}"
-
-  bot-mainnet:
-    <<: *bot-base
-    container_name: hypertrade-bot-mainnet
-    profiles: [mainnet]   # only starts when --profile mainnet is given
-    ports:
-      - "8002:8002"
-    environment:
-      <<: *bot-env
-      EXCHANGE_MODE: mainnet
-      API_PORT: "8002"
-      HYPERLIQUID_PRIVATE_KEY: "${HYPERLIQUID_MAINNET_PRIVATE_KEY:-}"
-      HYPERLIQUID_ACCOUNT_ADDRESS: "${HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS:-}"
-      TELEGRAM_ENABLED: "false"
-      # Audit C3 allowlist. EMPTY = no strategies trade on mainnet (the bot
-      # boots and serves API but won't open any new positions). Set in
-      # the secrets manager (Phase) to a comma-separated list to enable
-      # specific strategies, e.g. `MAINNET_ENABLED_STRATEGIES=bb_short`.
-      # No default — fail-closed by design.
-      MAINNET_ENABLED_STRATEGIES: "${MAINNET_ENABLED_STRATEGIES:-}"
-      # First-week tiny rollout per audit recommendation. Hardcoded
-      # rather than env-overridden so the operator can't accidentally
-      # pick up the *bot-env defaults ($200 max position / $100 daily
-      # loss — see x-bot-env above) on the first mainnet deploy. Bump
-      # these via PR after first successful trades.
-      MAX_POSITION_SIZE_USD: "20"
-      MAX_DAILY_LOSS_USD: "20"
 
   dashboard:
     build: ./dashboard

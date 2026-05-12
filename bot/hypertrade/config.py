@@ -152,30 +152,6 @@ class Settings(BaseSettings):
     # API authentication
     api_key: str = ""  # if set, all POST endpoints require X-Api-Key header
 
-    # Dashboard auth config (Phase 6c followup — env-backed override
-    # of the Redis values written by the now-removed Settings UI).
-    # Behavior: env-first, Redis-fallback. When any of these is set
-    # in env (Phase-injected), the bot's `/api/auth/config` +
-    # `/api/auth/oidc-secret` endpoints return that env value. Empty
-    # env value falls back to the corresponding Redis key (back-compat
-    # with deployments that still have UI-written secrets there) —
-    # eventually the Redis path will be retired once all deploys are
-    # env-managed.
-    auth_mode: str = ""               # "" | "disabled" | "basic" | "oidc"
-    oidc_issuer: str = ""             # e.g. https://auth.example.com/application/o/your-app/
-    oidc_client_id: str = ""
-    oidc_client_secret: str = ""      # SECRET — set in Phase; Redis fallback on empty
-    oidc_scopes: str = ""             # default "openid profile email" if both empty
-
-    # TLS / Caddy config (same pattern as auth: env-first, Redis-fallback).
-    # cf_api_token is the secret that the Settings UI previously stored
-    # in Redis; Phase is the new source of truth, Redis kept as
-    # back-compat fallback until all deploys migrate.
-    tls_enabled_env: str = ""         # "1" or "0"; empty = Redis fallback
-    tls_domain: str = ""
-    tls_email: str = ""
-    tls_cf_api_token: str = ""        # SECRET — set in Phase; Redis fallback on empty
-
     # Telegram notifications (optional). Only enable on ONE bot instance
     # in multi-mode setups — that single notifier subscribes to all 3 modes'
     # event channels and routes commands per-mode internally.

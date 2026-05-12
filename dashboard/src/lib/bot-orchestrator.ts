@@ -116,12 +116,9 @@ export function containerName(tenantId: string, mode: BotMode): string {
  *     `buildSpec` directly (stable per-bot identifiers).
  *   - HYPERLIQUID_*, TELEGRAM_* — per-tenant secrets via
  *     `decryptedSecrets`, not system-managed.
- *   - AUTH_MODE, OIDC_*, TLS_* — only the dashboard reads these
- *     (compose puts them on x-bot-env so the bot's `/api/auth/config`
- *     proxy endpoint can return env-first values, but bots
- *     orchestrator-spawned by the dashboard don't serve those
- *     endpoints — they're operator-only). PR 4 will retire that
- *     proxy entirely.
+ *   - AUTH_MODE, OIDC_*, TLS_* — owned exclusively by the dashboard
+ *     (read directly from Redis via `lib/auth-config.ts` +
+ *     `tls-config.ts`). Bots have nothing to do with auth/TLS config.
  */
 export function getOrchestratorSystemEnv(): Record<string, string> {
   return {
