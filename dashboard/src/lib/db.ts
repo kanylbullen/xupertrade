@@ -267,7 +267,13 @@ export const tenantTelegramLinks = pgTable(
     tenantId: uuid("tenant_id")
       .primaryKey()
       .references(() => tenants.id, { onDelete: "cascade" }),
-    telegramChatId: bigint("telegram_chat_id", { mode: "number" }).notNull(),
+    // `mode: "bigint"` keeps full precision: Telegram supergroup
+    // IDs (-100xxxxxxxxx) are within Number.MAX_SAFE_INTEGER today
+    // but the type promise that BIGINT round-trips losslessly is
+    // worth keeping. API responses serialize to string (JSON has
+    // no native bigint, and a JSON number could silently round-trip
+    // through a client's `parseInt`).
+    telegramChatId: bigint("telegram_chat_id", { mode: "bigint" }).notNull(),
     telegramUsername: varchar("telegram_username", { length: 64 }),
     linkedAt: timestamp("linked_at", { withTimezone: true })
       .notNull()

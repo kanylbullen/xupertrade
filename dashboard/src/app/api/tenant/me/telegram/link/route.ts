@@ -1,21 +1,36 @@
 /**
  * Tenant ↔ Telegram link lifecycle (PR 3a).
  *
- *   GET    /api/tenant/me/telegram/link  → { linked, chatId?, username?, linkedAt? }
- *   POST   /api/tenant/me/telegram/link  → { code: string }   creates a 6-digit
- *                                                              code valid 10 min;
- *                                                              tenant sends
- *                                                              `/link <code>` to
- *                                                              the bot to complete.
- *   DELETE /api/tenant/me/telegram/link  → { unlinked: true }  removes the link.
+ *   GET    /api/tenant/me/telegram/link
+ *     → { linked: false } when no link exists, or
+ *       { linked: true, chatId: string, username: string|null,
+ *         linkedAt: ISO8601, lastUnlockAt: ISO8601|null }
+ *     chatId is a string because Telegram chat IDs are BIGINT in
+ *     the DB and JSON has no native bigint type.
+ *
+ *   POST   /api/tenant/me/telegram/link
+ *     → { code: string, expiresInSeconds: number }
+ *     Mints a 6-digit code (or returns the existing one if a
+ *     non-expired code already exists for this tenant — prevents a
+ *     malicious authenticated user from churning Redis keys by
+ *     spamming the endpoint). Tenant then sends `/link <code>` to
+ *     the bot to complete the pair.
+ *
+ *   DELETE /api/tenant/me/telegram/link
+ *     → { unlinked: boolean }
+ *     true when a row was actually removed, false when no link
+ *     existed (still 200 — idempotent so the UI can blindly POST
+ *     without checking state first).
  *
  * No passphrase/unlock needed for any of these — linking metadata
  * lives outside the encrypted secret material. The bot enforces
  * the second proof (chat-ownership) when consuming the code.
  *
  * Codes live in Redis under `tg-link:<code>` → tenantId with a
- * 10-min TTL. One-shot: bot's `/link` handler deletes the key
- * after successful upsert.
+ * 10-min TTL. A reverse pointer `tg-link:tenant:<tenantId>` ->
+ * code is kept in sync so we can return an existing active code
+ * instead of churning. One-shot: bot's `/link` handler deletes
+ * both keys after a successful upsert.
  */
 
 import { eq } from "drizzle-orm";
@@ -33,7 +48,7 @@ const MAX_CODE_GENERATION_ATTEMPTS = 5;
 function makeCode(): string {
   // 6-digit, zero-padded. randomInt is CSPRNG-backed; uniformly
   // distributed across 0..999_999. Leading zeros preserved because
-  // we type-it-yourself in Telegram and the bot parses as a string.
+  // the user types it into Telegram and the bot parses as a string.
   return String(randomInt(0, 1_000_000)).padStart(6, "0");
 }
 
@@ -57,7 +72,8 @@ export async function GET(req: Request): Promise<Response> {
   }
   return Response.json({
     linked: true,
-    chatId: link.telegramChatId,
+    // bigint → string for JSON (no native bigint in JSON).
+    chatId: link.telegramChatId.toString(),
     username: link.telegramUsername,
     linkedAt: link.linkedAt,
     lastUnlockAt: link.lastUnlockAt,
@@ -74,6 +90,23 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const redis = getRedisClient();
+  const reversePointerKey = `tg-link:tenant:${tenant.id}`;
+
+  // If this tenant already has an active code, return it as-is
+  // along with the remaining TTL — prevents a spam-POST from
+  // churning Redis keys and gives the UI an idempotent feel.
+  const existingCode = await redis.get(reversePointerKey);
+  if (existingCode !== null) {
+    const ttl = await redis.ttl(reversePointerKey);
+    if (ttl > 0) {
+      return Response.json({
+        code: existingCode,
+        expiresInSeconds: ttl,
+      });
+    }
+    // ttl ≤ 0 means the key is expiring at this moment (race) —
+    // fall through to mint a fresh code.
+  }
 
   // Retry on collision (probability ~ 1e-6 per attempt). Use
   // SET NX so a parallel POST for a different tenant can't
@@ -101,6 +134,11 @@ export async function POST(req: Request): Promise<Response> {
       { status: 500 },
     );
   }
+
+  // Set the reverse pointer with matching TTL so future POSTs from
+  // this tenant can short-circuit to the same code. Bot's /link
+  // handler will delete both keys after successful upsert.
+  await redis.set(reversePointerKey, code, "EX", CODE_TTL_SECONDS);
 
   return Response.json({
     code,
