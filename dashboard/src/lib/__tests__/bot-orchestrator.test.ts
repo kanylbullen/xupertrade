@@ -270,6 +270,8 @@ describe("getOrchestratorSystemEnv", () => {
     delete process.env.HYPERTRADE_BOT_MAX_POSITION_SIZE_USD;
     delete process.env.HYPERTRADE_BOT_MAX_DAILY_LOSS_USD;
     delete process.env.HYPERTRADE_BOT_KILL_SWITCH;
+    delete process.env.DASHBOARD_URL;
+    delete process.env.API_KEY;
 
     const env = getOrchestratorSystemEnv();
     expect(env.REDIS_URL).toBe("redis://redis:6379/0");
@@ -278,6 +280,8 @@ describe("getOrchestratorSystemEnv", () => {
     expect(env.MAX_POSITION_SIZE_USD).toBe("200");
     expect(env.MAX_DAILY_LOSS_USD).toBe("100");
     expect(env.KILL_SWITCH).toBe("false");
+    expect(env.DASHBOARD_URL).toBe("http://localhost:3000");
+    expect(env.API_KEY).toBe("");
   });
 
   it("respects HYPERTRADE_BOT_* env overrides", () => {
@@ -288,5 +292,31 @@ describe("getOrchestratorSystemEnv", () => {
     expect(env.PAPER_INITIAL_BALANCE).toBe("50000");
     // Unspecified fields keep their defaults.
     expect(env.POLL_INTERVAL_SECONDS).toBe("60");
+  });
+
+  it("forwards dashboard's API_KEY + DASHBOARD_URL to tenant bots", () => {
+    const sysKey = "test-key-abc";
+    process.env.API_KEY = sysKey;
+    process.env.DASHBOARD_URL = "https://example.com";
+    const env = getOrchestratorSystemEnv();
+    expect(env.API_KEY).toBe(sysKey);
+    expect(env.DASHBOARD_URL).toBe("https://example.com");
+  });
+
+  it("buildSpec puts systemEnv AFTER decryptedSecrets — tenant can't override API_KEY", () => {
+    const sysKey = "real-sys-key";
+    const spoofKey = "spoof-key";
+    process.env.API_KEY = sysKey;
+    const spec = buildSpec({
+      botId: BOT_ID,
+      tenantId: TENANT_ID,
+      mode: "paper",
+      decryptedSecrets: { API_KEY: spoofKey },
+      systemEnv: getOrchestratorSystemEnv(),
+    });
+    // Find all API_KEY entries; envMap dedupes so there should be
+    // exactly one — the system one wins.
+    const apiKeyEntries = spec.env.filter((e) => e.startsWith("API_KEY="));
+    expect(apiKeyEntries).toEqual([`API_KEY=${sysKey}`]);
   });
 });

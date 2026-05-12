@@ -88,16 +88,40 @@ export function containerName(tenantId: string, mode: BotMode): string {
 
 /**
  * Compose-defined env vars the bot needs but the orchestrator's
- * caller doesn't supply per-tenant. Mirrors x-bot-env in
+ * caller doesn't supply per-tenant. Mirrors `x-bot-env` in
  * docker-compose.yml — without these the bot crashes at startup
  * (e.g. tries to connect to localhost:6379 instead of the in-network
  * `redis:6379`, then docker `restart: unless-stopped` retries
  * forever, spamming any configured Telegram with `Xupertrade
  * started` messages on each retry).
  *
- * Override via process.env on the dashboard service for non-default
- * deployments — but for this single-host setup the defaults match
- * compose 1:1, so callers don't need to touch them.
+ * Defaults match compose 1:1 for the single-host operator
+ * deployment. Override via `HYPERTRADE_BOT_*` env on the dashboard
+ * service for non-default deployments.
+ *
+ * **API_KEY is critical**: it gates the bot's `/strategies` and
+ * other auth-required endpoints. We inject the dashboard's own
+ * `API_KEY` (the same one the dashboard forwards as `X-Api-Key`
+ * when proxying to the bot) so bot↔dashboard auth round-trips
+ * work. Because `buildSpec`'s envMap puts `systemEnv` AFTER
+ * `decryptedSecrets`, this also prevents a malicious tenant from
+ * setting a bogus `API_KEY` via the secret CRUD API to escape the
+ * dashboard's auth gate.
+ *
+ * **What's intentionally NOT here**:
+ *   - DATABASE_URL — caller-supplied per-tenant (`tenantDbUrl`)
+ *     so each tenant connects under its own Postgres role for
+ *     RLS isolation (Phase 5b).
+ *   - TENANT_ID, BOT_ID, EXCHANGE_MODE, API_PORT — set by
+ *     `buildSpec` directly (stable per-bot identifiers).
+ *   - HYPERLIQUID_*, TELEGRAM_* — per-tenant secrets via
+ *     `decryptedSecrets`, not system-managed.
+ *   - AUTH_MODE, OIDC_*, TLS_* — only the dashboard reads these
+ *     (compose puts them on x-bot-env so the bot's `/api/auth/config`
+ *     proxy endpoint can return env-first values, but bots
+ *     orchestrator-spawned by the dashboard don't serve those
+ *     endpoints — they're operator-only). PR 4 will retire that
+ *     proxy entirely.
  */
 export function getOrchestratorSystemEnv(): Record<string, string> {
   return {
@@ -111,6 +135,14 @@ export function getOrchestratorSystemEnv(): Record<string, string> {
     MAX_DAILY_LOSS_USD:
       process.env.HYPERTRADE_BOT_MAX_DAILY_LOSS_USD ?? "100",
     KILL_SWITCH: process.env.HYPERTRADE_BOT_KILL_SWITCH ?? "false",
+    DASHBOARD_URL:
+      process.env.DASHBOARD_URL ?? "http://localhost:3000",
+    // API_KEY is shared bot↔dashboard secret. Empty when not set
+    // → bot endpoints are unauthenticated (current operator
+    // default for this hobby deployment). buildSpec puts systemEnv
+    // AFTER decryptedSecrets so a tenant can't smuggle their own
+    // API_KEY in via secret CRUD to bypass auth.
+    API_KEY: process.env.API_KEY ?? "",
   };
 }
 
