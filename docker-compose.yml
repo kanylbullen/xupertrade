@@ -1,5 +1,14 @@
 x-bot-base: &bot-base
   build: ./bot
+  # Explicit image tag so all three compose-defined bot services share
+  # one built image instead of getting three identical per-service
+  # images (`hypertrade-bot-paper`, `-testnet`, `-mainnet`). The
+  # dashboard's bot-orchestrator (PR 2) launches per-tenant bots from
+  # this same `hypertrade-bot:latest` tag — overridable via
+  # HYPERTRADE_BOT_IMAGE on the dashboard service. Without this line,
+  # `docker compose build` produces per-service images and orchestrator
+  # bot-spawn fails with `no such image: hypertrade-bot:latest`.
+  image: hypertrade-bot:latest
   depends_on:
     postgres:
       condition: service_healthy
