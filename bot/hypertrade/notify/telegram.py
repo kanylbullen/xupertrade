@@ -558,7 +558,7 @@ class TelegramNotifier:
     # ----- command handlers -----
 
     async def _cmd_start(self, _args: list[str]) -> str:
-        lines = [f"{_mode_prefix()} <b>HyperTrade bot — commands</b>"]
+        lines = [f"{_mode_prefix()} <b>Xupertrade bot — commands</b>"]
         seen = set()
         for cmd, (_, desc) in self._commands.items():
             if desc in seen:
