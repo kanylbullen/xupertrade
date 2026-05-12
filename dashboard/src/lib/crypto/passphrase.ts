@@ -80,7 +80,22 @@ export async function deriveKey(
  * passphrase and check `verify(K, stored_verifier)` to decide whether
  * the user typed the right passphrase — without ever decrypting any
  * actual secret (the decrypt would fail too, but with much worse UX).
+ *
+ * The HMAC's input here is K (a 32-byte Argon2id-derived key), NOT a
+ * user-entered passphrase. Argon2id already paid the expensive
+ * password-stretching cost upstream (64 MiB / 3 iters / 4 parallelism,
+ * see KDF_PARAMS). HMAC-SHA-256 of a high-entropy key is the correct
+ * primitive for a commitment/verifier; using a slow KDF here would
+ * just slow login down without buying any extra brute-force resistance
+ * (an attacker would still need to brute-force the passphrase through
+ * Argon2id, not through HMAC).
+ *
+ * CodeQL `js/insufficient-password-hash` flags this as a false-positive
+ * — the input is a key, not a password. See
+ * https://github.com/kanylbullen/xupertrade/security/code-scanning/1
+ * for the dismissal context.
  */
+// codeql[js/insufficient-password-hash]
 export function makeVerifier(key: Buffer): Buffer {
   if (key.length !== KEY_BYTES) {
     throw new RangeError(
