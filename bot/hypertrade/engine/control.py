@@ -247,144 +247,15 @@ class BotControl:
             return None
 
     # --- Dashboard authentication config (NOT mode-scoped — global to bot)
-    # Keys:
-    #   dashboard:auth:mode       — "disabled" | "basic" | "oidc"
-    #   dashboard:auth:basic:user
-    #   dashboard:auth:basic:hash — bcrypt hash of password
-    #   dashboard:auth:session_secret  — random string used to sign cookies
-    #   dashboard:auth:oidc:* (issuer, client_id, client_secret, scopes)
-
-    async def get_auth_config(self) -> dict:
-        if self._redis is None:
-            return {"mode": "disabled"}
-        keys = [
-            "dashboard:auth:mode",
-            "dashboard:auth:basic:user",
-            "dashboard:auth:basic:hash",
-            "dashboard:auth:session_secret",
-            "dashboard:auth:oidc:issuer",
-            "dashboard:auth:oidc:client_id",
-            "dashboard:auth:oidc:client_secret",
-            "dashboard:auth:oidc:scopes",
-        ]
-        vals = await self._redis.mget(*keys)
-        # Env-first override (Phase 6c followup). When the operator
-        # sets these in Phase, env wins over Redis so the dashboard
-        # gets the env-managed value and the Redis row is irrelevant.
-        # Empty env value = fall back to Redis (back-compat with the
-        # old Settings UI).
-        from hypertrade.config import settings
-        return {
-            "mode": settings.auth_mode or vals[0] or "disabled",
-            "basic_user": vals[1] or "",
-            "basic_hash": vals[2] or "",
-            "session_secret": vals[3] or "",
-            "oidc_issuer": settings.oidc_issuer or vals[4] or "",
-            "oidc_client_id": settings.oidc_client_id or vals[5] or "",
-            "oidc_client_secret": settings.oidc_client_secret or vals[6] or "",
-            "oidc_scopes": (
-                settings.oidc_scopes or vals[7] or "openid profile email"
-            ),
-        }
-
-    async def set_auth_config(self, **kwargs: str) -> None:
-        if self._redis is None:
-            return
-        mapping = {
-            "mode": "dashboard:auth:mode",
-            "basic_user": "dashboard:auth:basic:user",
-            "basic_hash": "dashboard:auth:basic:hash",
-            "session_secret": "dashboard:auth:session_secret",
-            "oidc_issuer": "dashboard:auth:oidc:issuer",
-            "oidc_client_id": "dashboard:auth:oidc:client_id",
-            "oidc_client_secret": "dashboard:auth:oidc:client_secret",
-            "oidc_scopes": "dashboard:auth:oidc:scopes",
-        }
-        pipe = self._redis.pipeline()
-        for arg, key in mapping.items():
-            if arg in kwargs:
-                val = kwargs[arg]
-                if val is None or val == "":
-                    pipe.delete(key)
-                else:
-                    pipe.set(key, val)
-        await pipe.execute()
-
-    # --- TLS / HTTPS configuration (Caddy reverse proxy)
-    # Keys:
-    #   dashboard:tls:enabled    — "0" or "1"
-    #   dashboard:tls:domain     — e.g. "mybot.example.com"
-    #   dashboard:tls:email      — for Let's Encrypt notifications
-    #   dashboard:tls:cf_token   — Cloudflare API token (Zone:Read + Zone DNS:Edit)
-
-    async def get_tls_config(self) -> dict:
-        # Env-first override (Phase 6c followup). When the operator
-        # sets these in Phase, env wins over Redis. Empty env values
-        # fall back to Redis to keep back-compat with the old UI.
-        from hypertrade.config import settings
-        if self._redis is None:
-            vals = [None, None, None, None]
-        else:
-            keys = [
-                "dashboard:tls:enabled",
-                "dashboard:tls:domain",
-                "dashboard:tls:email",
-                "dashboard:tls:cf_token",
-            ]
-            vals = await self._redis.mget(*keys)
-        env_enabled = settings.tls_enabled_env  # "1" / "0" / ""
-        enabled = (
-            env_enabled == "1" if env_enabled else (vals[0] == "1")
-        )
-        return {
-            "enabled": enabled,
-            "domain": settings.tls_domain or vals[1] or "",
-            "email": settings.tls_email or vals[2] or "",
-            "cf_token": settings.tls_cf_api_token or vals[3] or "",
-        }
-
-    async def set_tls_config(self, **kwargs: str) -> None:
-        if self._redis is None:
-            return
-        mapping = {
-            "enabled": "dashboard:tls:enabled",
-            "domain": "dashboard:tls:domain",
-            "email": "dashboard:tls:email",
-            "cf_token": "dashboard:tls:cf_token",
-        }
-        pipe = self._redis.pipeline()
-        for arg, key in mapping.items():
-            if arg in kwargs:
-                val = kwargs[arg]
-                if arg == "enabled":
-                    pipe.set(key, "1" if val else "0")
-                elif val is None or val == "":
-                    pipe.delete(key)
-                else:
-                    pipe.set(key, val)
-        await pipe.execute()
-
-    async def ensure_session_secret(self) -> str:
-        """Generate session_secret if missing. Returns the current secret.
-
-        Uses SET NX (atomic set-if-not-exists) so two concurrent callers
-        racing on first-init don't each generate a different secret and
-        clobber each other's signed sessions. Audit M3.
-        """
-        if self._redis is None:
-            return ""
-        key = "dashboard:auth:session_secret"
-        cur = await self._redis.get(key)
-        if cur:
-            return cur
-        import secrets
-        candidate = secrets.token_urlsafe(48)
-        # `nx=True` → only set if key didn't exist. Returns truthy when
-        # we won the race; falsy when another caller beat us. Either way
-        # we re-read to get the canonical winner.
-        await self._redis.set(key, candidate, nx=True)
-        winner = await self._redis.get(key)
-        return winner or candidate
+    # NOTE: dashboard auth + TLS config (`dashboard:auth:*`,
+    # `dashboard:tls:*`) used to be read/written here and exposed via
+    # bot HTTP routes (`/api/auth/config`, `/api/tls/configure`, …).
+    # The dashboard now owns those keys directly via
+    # `dashboard/src/lib/auth-config.ts` +
+    # `dashboard/src/lib/tls-config.ts` (PR 4a) —
+    # the bot has no need to read or mutate them, so the methods are
+    # gone. The Redis keys themselves still exist and are managed
+    # solely by the dashboard.
 
     # --- Per-strategy state snapshot (audit M6 fix completion).
     # The position-table state_json only persists state during in-position
