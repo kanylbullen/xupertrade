@@ -37,6 +37,27 @@ x-bot-env: &bot-env
   # container-create time.
   TENANT_ID: "${TENANT_ID:-00000000-0000-0000-0000-000000000001}"
 
+  # Env-first override of dashboard auth + TLS config (Phase 6c
+  # followup PR #67). When these are set in Phase, the bot's
+  # `/api/auth/config`, `/api/auth/oidc-secret`, and `/api/tls/*`
+  # endpoints return the env values instead of Redis. Empty (default)
+  # = fall back to Redis for back-compat with deploys that still have
+  # UI-written values there.
+  #
+  # IMPORTANT: these MUST be in `x-bot-env` (not just on the dashboard
+  # service) because the BOT is what reads them — the dashboard proxies
+  # the auth/tls config endpoints to the bot. Without these here, the
+  # env-first override silently falls back to Redis.
+  AUTH_MODE: "${AUTH_MODE:-}"
+  OIDC_ISSUER: "${OIDC_ISSUER:-}"
+  OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:-}"
+  OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
+  OIDC_SCOPES: "${OIDC_SCOPES:-}"
+  TLS_ENABLED_ENV: "${TLS_ENABLED_ENV:-}"
+  TLS_DOMAIN: "${TLS_DOMAIN:-}"
+  TLS_EMAIL: "${TLS_EMAIL:-}"
+  TLS_CF_API_TOKEN: "${TLS_CF_API_TOKEN:-}"
+
 services:
   postgres:
     image: postgres:16-alpine
