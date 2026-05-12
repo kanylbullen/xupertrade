@@ -18,6 +18,11 @@ const PUBLIC_PATHS = new Set([
   // the auth gate doesn't 307 it to /login (which would make the probe
   // succeed-but-with-redirect, an ambiguous signal).
   "/api/healthz",
+  // PR 3c unlock-deeplink landing page. The page itself validates
+  // the signed token server-side; the passphrase POST it triggers
+  // still requires an authenticated session, so the page is "public
+  // landing, authenticated action" rather than a real auth bypass.
+  "/unlock",
 ]);
 
 function isPublic(pathname: string): boolean {

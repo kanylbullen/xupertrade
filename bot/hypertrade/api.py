@@ -1,6 +1,7 @@
 """HTTP API for dashboard queries (indicator status + runtime control)."""
 
 import hmac
+import html
 import json
 import logging
 import os
@@ -88,6 +89,65 @@ async def hyperliquid_diagnostic(request: web.Request) -> web.Response:
     except Exception as e:
         logger.exception("HyperLiquid diagnostic failed")
         return _cors({"ok": False, "error": str(e)}, status=500)
+
+
+async def send_unlock_link_handler(request: web.Request) -> web.Response:
+    """POST /api/internal/send-unlock-link
+    body: {chat_id: str, url: str}
+
+    Dashboard-only: when a tenant's bot is locked and we want to
+    DM them an unlock deeplink, the dashboard mints a signed token
+    + URL and calls this endpoint to actually deliver the message
+    (the dashboard doesn't hold a Telegram bot token; the bot does).
+
+    Auth: X-Api-Key required. The same API_KEY the dashboard
+    forwards on every proxy call — operator-shared secret, not
+    per-tenant. A leaked key would let an attacker DM unlock URLs
+    to any chat, but they'd still need the passphrase on the
+    landing page to actually unlock.
+    """
+    if (err := _require_auth(request)) is not None:
+        return err
+
+    telegram = request.app.get("telegram")
+    if telegram is None or not getattr(telegram, "_token", None):
+        return _cors(
+            {"error": "telegram not configured on this bot"},
+            status=503,
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _cors({"error": "body must be valid JSON"}, status=400)
+
+    chat_id = body.get("chat_id")
+    url = body.get("url")
+    if not isinstance(chat_id, str) or not chat_id:
+        return _cors({"error": "chat_id (string) is required"}, status=400)
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return _cors(
+            {"error": "url (https://) is required"}, status=400
+        )
+
+    # HTML-escape the URL — TelegramNotifier.send uses parse_mode=HTML,
+    # so an unescaped quote/`>` in `url` would let a caller inject
+    # arbitrary HTML into the DM (and break the link). The dashboard
+    # only ever sends a /unlock?token=<base64url> URL today, but the
+    # API_KEY is operator-shared — defense-in-depth against a leaked
+    # key or a future caller bug.
+    url_safe = html.escape(url, quote=True)
+    text = (
+        "🔒 <b>Unlock required</b>\n\n"
+        "Click the link below to unlock your bot's credentials. "
+        "You'll be asked for your passphrase — the link is "
+        "valid for 10 minutes.\n\n"
+        f"<a href=\"{url_safe}\">{url_safe}</a>"
+    )
+    sent = await telegram.send(text, to_chat_id=chat_id)
+    if not sent:
+        return _cors({"error": "failed to send Telegram message"}, status=502)
+    return _cors({"sent": True})
 
 
 async def positions_handler(request: web.Request) -> web.Response:
@@ -826,16 +886,21 @@ def create_app(
     exchange: Exchange | None = None,
     strategies: list[Strategy] | None = None,
     repo: Repository | None = None,
+    telegram=None,  # TelegramNotifier | None — avoid circular import
 ) -> web.Application:
     app = web.Application()
     app["repo"] = repo
     app["exchange"] = exchange
     app["strategies"] = strategies or []
+    app["telegram"] = telegram
     app.router.add_get("/health", health)
     app.router.add_get("/strategies", list_strategies_handler)
     app.router.add_get("/api/positions", positions_handler)
     app.router.add_get("/api/indicator-status", indicator_status)
     app.router.add_get("/api/hyperliquid/diagnostic", hyperliquid_diagnostic)
+    app.router.add_post(
+        "/api/internal/send-unlock-link", send_unlock_link_handler
+    )
     if control is not None and exchange is not None:
         _control_routes(app, control, exchange, strategies or [])
     return app
@@ -847,9 +912,14 @@ async def start_api_server(
     exchange: Exchange | None = None,
     strategies: list[Strategy] | None = None,
     repo: Repository | None = None,
+    telegram=None,
 ) -> web.AppRunner:
     app = create_app(
-        control=control, exchange=exchange, strategies=strategies, repo=repo
+        control=control,
+        exchange=exchange,
+        strategies=strategies,
+        repo=repo,
+        telegram=telegram,
     )
     runner = web.AppRunner(app)
     await runner.setup()

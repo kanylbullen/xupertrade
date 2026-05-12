@@ -75,6 +75,7 @@ export function BotsClient() {
           onCancel={() => setShowUnlock(false)}
         />
       )}
+      <SendUnlockLinkButton />
       <p className="text-xs text-muted-foreground">
         Need to set credentials first?{" "}
         <Link
@@ -84,6 +85,85 @@ export function BotsClient() {
           Go to credentials
         </Link>
       </p>
+    </div>
+  );
+}
+
+/**
+ * Triggers the bot to DM the tenant a signed unlock-deeplink.
+ * Useful when the tenant left the dashboard, K-cache expired, but
+ * they want to start their bot from mobile via the Telegram-link.
+ * Requires Telegram to be linked AND at least one bot running.
+ */
+function SendUnlockLinkButton() {
+  const [pending, setPending] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(
+    null,
+  );
+
+  async function send() {
+    setPending(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/tenant/me/telegram/send-unlock-link", {
+        method: "POST",
+      });
+      if (res.ok) {
+        setMsg({ kind: "ok", text: "Unlock link sent — check your Telegram." });
+      } else {
+        const data = await res.json().catch(() => null);
+        setMsg({
+          kind: "err",
+          text:
+            (data as { error?: string })?.error ?? `Failed (${res.status})`,
+        });
+      }
+    } catch (e) {
+      setMsg({
+        kind: "err",
+        text:
+          e instanceof Error
+            ? `Network error: ${e.message}`
+            : "Network error — check your connection and try again.",
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border p-4">
+      <h3 className="text-sm font-medium">Trouble unlocking?</h3>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Send yourself a Telegram deeplink that lets you unlock from any
+        device without re-opening the dashboard. Requires Telegram to be
+        linked under{" "}
+        <Link
+          href="/settings/credentials"
+          className="underline hover:text-foreground"
+        >
+          Credentials
+        </Link>{" "}
+        and at least one running bot.
+      </p>
+      <button
+        type="button"
+        onClick={send}
+        disabled={pending}
+        className="mt-3 rounded border px-3 py-1 text-xs hover:bg-muted disabled:opacity-50"
+      >
+        {pending ? "Sending…" : "Send unlock link to Telegram"}
+      </button>
+      {msg && (
+        <p
+          className={`mt-2 text-xs ${
+            msg.kind === "ok" ? "text-green-500" : "text-red-500"
+          }`}
+          role={msg.kind === "err" ? "alert" : undefined}
+        >
+          {msg.text}
+        </p>
+      )}
     </div>
   );
 }
