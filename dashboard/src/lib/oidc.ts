@@ -1,8 +1,11 @@
 /**
  * OIDC (OpenID Connect) authorization-code flow with PKCE + state.
  *
- * Config (issuer, client_id, client_secret, scopes) is fetched from the
- * bot — same Redis-backed config the basic-auth path uses.
+ * Config (issuer, client_id, client_secret, scopes) is read
+ * directly from Redis via lib/auth-config.ts — env-first override,
+ * then dashboard:auth:oidc:* keys. The client_secret never leaves
+ * the dashboard process; the public /api/auth/config endpoint
+ * strips it from its response.
  *
  * Flow:
  *   /login (mode=oidc) → click → /api/auth/oidc/start
@@ -67,9 +70,10 @@ export async function getOidcConfig(): Promise<{
   if (!cfg) return null;
   if (!cfg.oidc_issuer || !cfg.oidc_client_id) return null;
 
-  // The public /api/auth/config endpoint deliberately strips client_secret
-  // (and session_secret too — both are fetched via API_KEY-gated bot
-  // endpoints so they never appear in publicly-readable responses).
+  // The public /api/auth/config endpoint deliberately strips
+  // client_secret (and session_secret too). Here we read it from
+  // Redis directly via lib/auth-config — server-side only, never
+  // leaves the dashboard process.
   const secret = await fetchOidcSecret();
   if (!secret) return null;
 

@@ -8,12 +8,13 @@ export type Mode = BotMode;
 
 /**
  * Build the dashboard→bot HTTP URL from a `tenant_bots` row.
- * Sole source of truth for bot routing after PR 4b (the legacy
- * env-driven `botUrl` is gone).
+ * Sole source of truth for bot routing.
  *
  * Convention:
  *   - host = container_name (docker DNS resolves it inside the
- *     compose network for orchestrator-spawned tenant bots)
+ *     compose network — works for both compose-defined bot
+ *     services and orchestrator-spawned tenant bots, as long as
+ *     the row's container_name matches the actual container name)
  *   - port = API_PORT_BY_MODE[mode] (single source of truth in
  *     bot-orchestrator.ts; orchestrator injects API_PORT for new
  *     tenant bots so they match the routing convention)

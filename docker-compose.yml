@@ -169,10 +169,10 @@ services:
       HOSTNAME: "0.0.0.0"
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hypertrade
       REDIS_URL: redis://redis:6379/0
-      # PR 4b retired BOT_API_URL_{PAPER,TESTNET,MAINNET}: dashboard
-      # now routes to per-tenant bots via tenant_bots.container_name
-      # (lib/bot-api.ts:tenantBotFetch) and reads auth/tls config
-      # directly from Redis (lib/auth-config.ts, lib/tls-config.ts).
+      # Dashboard routes to bots via the `tenant_bots` table
+      # (container_name + mode), not via per-mode URL env vars.
+      # Auth + TLS config is read straight from Redis, not via a
+      # bot proxy.
       DASHBOARD_URL: "${DASHBOARD_URL:-http://localhost:3000}"
       # Used as base for OIDC redirect_uri. If unset, falls back to
       # DASHBOARD_URL, then to the request's origin (which inside Docker
