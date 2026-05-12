@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, useTransition } from "react";
+import Link from "next/link";
 
 type LinkStatus =
   | { linked: false }
@@ -178,7 +179,16 @@ export function TelegramLinkCard() {
       )}
 
       {status?.linked === false && !code && (
-        <div className="mt-3">
+        <div className="mt-3 space-y-2">
+          <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            ⚠️ Linking requires a running bot (paper / testnet / mainnet) —
+            it&apos;s the bot that receives your <code>/link</code> command
+            in Telegram. Start one at{" "}
+            <Link href="/settings/bots" className="underline">
+              Settings → Bots
+            </Link>
+            {" "}first.
+          </p>
           <button
             type="button"
             onClick={generate}
