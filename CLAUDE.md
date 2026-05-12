@@ -88,7 +88,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 ## 2. Repo layout (the parts that matter)
 
 ```
-/home/xup/hypertrade/
+~/hypertrade/
 ├── bot/
 │   ├── hypertrade/
 │   │   ├── main.py                  # entry point — auto-instantiates every registered strategy
@@ -151,7 +151,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 
 ## 3. Operating environment
 
-- **Local working tree:** `/home/xup/hypertrade/` (Linux, x86_64).
+- **Local working tree:** `~/hypertrade/` (Linux, x86_64).
 - **Remote server:** `root@$DEPLOY_HOST` at `$DEPLOY_IP`, code at `/opt/hypertrade/`. SSH key: `~/.ssh/hypertrade`. Always log in as `root`. Concrete values for the maintainer's deployment are in their local `~/.bashrc` / SSH config — **never commit them here**.
 - **Git remote:** `https://github.com/kanylbullen/hypertrade.git`, branch `master`.
 - **Postgres:** runs in compose, exposed on `:5432`.
@@ -312,7 +312,7 @@ Subagents start cold. Always include:
 3. Any constraints (don't deploy, don't write to DB, etc.).
 4. The expected output format (bullet points, table, diff).
 
-Bad: `"check the strategies"`. Good: `"Audit /home/xup/hypertrade/bot/hypertrade/strategies/*.py against the TradingView source linked in each strategy's docstring. Report any logic divergences with file:line and the source line. Do not edit anything."`
+Bad: `"check the strategies"`. Good: `"Audit ~/hypertrade/bot/hypertrade/strategies/*.py against the TradingView source linked in each strategy's docstring. Report any logic divergences with file:line and the source line. Do not edit anything."`
 
 ---
 

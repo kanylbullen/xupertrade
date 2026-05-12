@@ -162,7 +162,7 @@ class Settings(BaseSettings):
     # eventually the Redis path will be retired once all deploys are
     # env-managed.
     auth_mode: str = ""               # "" | "disabled" | "basic" | "oidc"
-    oidc_issuer: str = ""             # e.g. https://auth.xuper.fun/application/o/hypertrade/
+    oidc_issuer: str = ""             # e.g. https://auth.example.com/application/o/your-app/
     oidc_client_id: str = ""
     oidc_client_secret: str = ""      # SECRET — set in Phase; Redis fallback on empty
     oidc_scopes: str = ""             # default "openid profile email" if both empty

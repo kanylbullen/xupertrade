@@ -14,8 +14,8 @@ straight to operator's `bot-paper`, `bot-testnet`, `bot-mainnet` containers
 and SELECT from data tables without a `tenant_id` filter. So any signed-in
 user (operator OR beta tenant) sees operator's bot data.
 
-Smoke-tested 2026-05-11 with `hypertest1@xuper.fun`: logged in via OIDC,
-landed on operator's overview / trades / positions. No `hypertest1` row
+Smoke-tested 2026-05-11 with `betauser1@example.com`: logged in via OIDC,
+landed on operator's overview / trades / positions. No `betauser1` row
 in `tenants` — `getCurrentTenant` was never called because no route
 required tenant context.
 
@@ -290,19 +290,19 @@ Audit findings → PR-E.
 
 After all PRs merged + deployed:
 - [ ] Operator login → sees same data as before, no behavior change
-- [ ] hypertest1 fresh login (incognito):
+- [ ] betauser1 fresh login (incognito):
   - Auto-creates tenant row via `getCurrentTenant`
   - `/positions` returns 404 "no bot for mode" (no bots yet)
   - `/trades` returns empty list
   - `/options` shows passphrase setup flow (Phase 2d)
   - Cannot see operator's data anywhere
-- [ ] hypertest1 sets passphrase, creates a paper bot via Options:
+- [ ] betauser1 sets passphrase, creates a paper bot via Options:
   - New container `hypertrade-tenant-<sub32>-paper` starts
   - `tenant_bots` row created
   - `/positions` now hits THEIR bot, returns empty (fresh bot)
-- [ ] hypertest1's bot does a paper trade:
-  - Trade row inserted with `tenant_id = hypertest1's UUID`
-  - hypertest1 sees the trade in `/trades`
+- [ ] betauser1's bot does a paper trade:
+  - Trade row inserted with `tenant_id = betauser1's UUID`
+  - betauser1 sees the trade in `/trades`
   - operator does NOT see it (RLS enforces)
 
 ## Risks
@@ -311,7 +311,7 @@ After all PRs merged + deployed:
   Postgres default `max_connections = 100`. Need to bump to 300 in
   postgres compose env or reduce per-pool max to 2.
 - **First-login race**: `getCurrentTenant` auto-creates on first sight.
-  If hypertest1 lands on `/` and that page server-renders 4 parallel
+  If betauser1 lands on `/` and that page server-renders 4 parallel
   data fetches, we'd race 4× INSERT. Already handled by
   `onConflictDoNothing` in Phase 2c.
 - **Operator's existing data** — backfill assumes ALL existing rows are

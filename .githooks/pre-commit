@@ -98,6 +98,39 @@ soft_warn() {
     fi
 }
 
+# PCRE variants of block / soft_warn for patterns that need word
+# boundaries (\b), lookaround, or other Perl-only features. POSIX ERE
+# (grep -E) doesn't define \b — GNU grep extends it but inconsistently
+# (works around word chars, fails before /). Patterns added 2026-05-11
+# after the security audit use these so they actually fire.
+block_pcre() {
+    local label="$1"
+    local pattern="$2"
+    local matches
+    matches=$(printf '%s\n' "$CONTENT" | grep -P -- "$pattern" || true)
+    if [[ -n "$matches" ]]; then
+        echo "❌ pre-commit: blocked — $label"
+        echo "   Pattern: $pattern"
+        echo "   Matched lines:"
+        printf '%s\n' "$matches" | head -5 | sed 's/^/     /'
+        echo
+        violations=$((violations + 1))
+    fi
+}
+
+soft_warn_pcre() {
+    local label="$1"
+    local pattern="$2"
+    local matches
+    matches=$(printf '%s\n' "$CONTENT" | grep -P -- "$pattern" || true)
+    if [[ -n "$matches" ]]; then
+        echo "⚠️  pre-commit: heads-up — $label"
+        printf '%s\n' "$matches" | head -3 | sed 's/^/     /'
+        echo "   (commit allowed, but verify it's intentional)"
+        echo
+    fi
+}
+
 # Private LAN IPs (192.168.x, 10.x). Often deployment-specific.
 soft_warn "private LAN IP" \
     '\b(192\.168|10\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]+\.[0-9]+\b'
@@ -105,6 +138,31 @@ soft_warn "private LAN IP" \
 # Personal email
 soft_warn "personal email address" \
     '[a-zA-Z0-9._%+-]+@(gmail|outlook|hotmail|protonmail|yahoo|icloud)\.com'
+
+# Operator-owned domains. The repo is public — every appearance of
+# these in committed code/docs leaks operator identity. Added after
+# the 2026-05-11 security audit found 8+ leaks across config + docs.
+# Soft-warn (not block) because CLAUDE.md § 0 documents the policy
+# itself — when this fires on a CLAUDE.md edit, verify it's docs,
+# not a real value.
+soft_warn_pcre "operator-owned personal/company domain" \
+    '\b(xuper\.fun|molnkontakt\.se)\b'
+
+# Operator-specific service subdomains (auth/phase/secrets/console
+# prefixes commonly map to the operator's IdP, secret-manager, or
+# admin URL). Use placeholders ($PHASE_URL, auth.example.com, etc).
+soft_warn_pcre "operator-specific service subdomain (auth/phase/secrets/console.*)" \
+    '\b(auth|phase|secrets|console|admin|api)\.[a-z0-9-]+\.(fun|com|net|org|io|dev|se|app)\b'
+
+# Absolute /home/<user>/ paths reveal the operator's local OS user
+# in any committed shell snapshot, generated doc, or accidentally
+# pasted log. CLAUDE.md is path-allowlisted in .gitleaks.toml since
+# it documents the rule itself; this hook doesn't filter by file
+# but a CLAUDE.md edit that mentions /home/ as documentation will
+# block here — add the path to the allowlist below if intentional.
+# (PCRE because POSIX ERE \b doesn't match before non-word /.)
+block_pcre "absolute /home/<user>/ path (use ~/path or relative)" \
+    '(?<![a-zA-Z0-9])/home/[a-z][a-z0-9_-]{1,30}/'
 
 if [[ $violations -gt 0 ]]; then
     echo "Blocked $violations secret pattern(s) — refusing commit."

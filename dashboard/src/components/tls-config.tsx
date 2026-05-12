@@ -61,7 +61,7 @@ export function TlsConfig() {
     setError(null);
 
     // Normalize domain: strip scheme, trailing slash, paths, ports.
-    // Caddy expects a bare hostname like "hypertrade.xuper.fun".
+    // Caddy expects a bare hostname like "mybot.example.com".
     let domainVal = (domainRef.current?.value ?? "").trim();
     domainVal = domainVal.replace(/^https?:\/\//i, "");
     domainVal = domainVal.replace(/\/.*$/, "");  // strip path
