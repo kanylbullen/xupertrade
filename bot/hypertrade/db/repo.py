@@ -20,6 +20,7 @@ from hypertrade.db.models import (
     TenantAuditLog,
     TenantBot,
     TenantSecret,
+    TenantTelegramLink,
     Trade,
     UserVaultEntry,
     Vault,
@@ -1074,6 +1075,50 @@ class Repository:
                 stmt = stmt.where(UserVaultEntry.exited_at.is_(None))
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    # ----- Telegram unlock-link flow (PR 3b) -----
+
+    async def get_tenant_id_for_telegram_chat(
+        self, chat_id: int
+    ) -> uuid.UUID | None:
+        """Lookup the linked tenant for a Telegram chat. Used by
+        future /unlock command (PR 3c+) where we already know the
+        chat but need the tenant. Returns None when unlinked."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(TenantTelegramLink.tenant_id).where(
+                    TenantTelegramLink.telegram_chat_id == chat_id
+                )
+            )
+            row = result.first()
+            return row[0] if row else None
+
+    async def upsert_telegram_link(
+        self,
+        tenant_id: uuid.UUID,
+        telegram_chat_id: int,
+        telegram_username: str | None,
+    ) -> None:
+        """Insert-or-update the (tenant_id, chat_id) pair. Called by
+        the bot's /link handler after validating the 6-digit code
+        against Redis. Idempotent — re-linking the same chat is fine,
+        and re-linking a different chat for the same tenant
+        overwrites (single-device beta UX)."""
+        async with self._session_factory() as session:
+            existing = await session.get(TenantTelegramLink, tenant_id)
+            if existing is None:
+                session.add(
+                    TenantTelegramLink(
+                        tenant_id=tenant_id,
+                        telegram_chat_id=telegram_chat_id,
+                        telegram_username=telegram_username,
+                    )
+                )
+            else:
+                existing.telegram_chat_id = telegram_chat_id
+                existing.telegram_username = telegram_username
+                existing.linked_at = datetime.now(timezone.utc)
+            await session.commit()
 
     async def close(self) -> None:
         await self._engine.dispose()
