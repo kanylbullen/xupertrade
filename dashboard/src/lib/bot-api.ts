@@ -164,11 +164,26 @@ export async function tenantBotFetch(
   const rows = await db
     .select()
     .from(tenantBots)
-    .where(and(eq(tenantBots.tenantId, tenantId), eq(tenantBots.mode, mode)))
+    .where(
+      and(
+        eq(tenantBots.tenantId, tenantId),
+        eq(tenantBots.mode, mode),
+        // Only route to bots whose DB row says is_running=true.
+        // Without this, a stale row (e.g. container manually
+        // `docker rm`'d outside our /stop endpoint, or a host-
+        // reboot that left is_running=true but no container) would
+        // make every poll wait 4s for a connection refused, return
+        // 502, and spam the console. The /stop endpoint clears
+        // both is_running and container_id on a clean stop, so
+        // this filter only excludes truly-broken state — clean
+        // stops + creates are unaffected.
+        eq(tenantBots.isRunning, true),
+      ),
+    )
     .limit(1);
   if (rows.length === 0) {
     return Response.json(
-      { error: `no ${mode} bot for tenant`, mode },
+      { error: `no running ${mode} bot for tenant`, mode },
       { status: 404 },
     );
   }

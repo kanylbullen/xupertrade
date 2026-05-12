@@ -162,7 +162,26 @@ describe("tenantBotFetch", () => {
     );
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body).toEqual({ error: "no paper bot for tenant", mode: "paper" });
+    expect(body).toEqual({
+      error: "no running paper bot for tenant",
+      mode: "paper",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when tenant has a stopped bot row (is_running=false)", async () => {
+    // Defensive: even if a row exists for (tenant, mode), if it's
+    // not running we treat it as no bot — avoids 502 spam when DB
+    // state diverges from docker state (e.g. operator-side
+    // `docker rm`). Added in fix for stale-row 502 storms.
+    mockedRequireTenant.mockResolvedValue(tenant());
+    chainSelect([]);  // .where filters out is_running=false rows, so chain returns []
+
+    const res = await tenantBotFetch(
+      new Request("https://x/api/positions?mode=paper"),
+      "/api/positions",
+    );
+    expect(res.status).toBe(404);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
