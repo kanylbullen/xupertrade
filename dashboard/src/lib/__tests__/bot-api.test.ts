@@ -8,11 +8,15 @@
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Drizzle column refs are passed through `eq()` — we mock them as
+// distinct objects so the production code's `eq(tenantBots.X, val)`
+// doesn't trip on undefined. Add new columns here whenever the
+// tenantBotFetch query touches a new one.
 vi.mock("../db", () => ({
   db: {
     select: vi.fn(),
   },
-  tenantBots: { tenantId: {}, mode: {} },
+  tenantBots: { tenantId: {}, mode: {}, isRunning: {} },
 }));
 
 vi.mock("../tenant", () => ({
@@ -21,10 +25,12 @@ vi.mock("../tenant", () => ({
 
 import { API_PORT_BY_MODE } from "../bot-orchestrator";
 import { getBotApiUrl, tenantBotFetch } from "../bot-api";
-import { db, type tenantBots } from "../db";
+import { db, tenantBots } from "../db";
+
+type TenantBotsTable = typeof tenantBots;
 import { requireTenant } from "../tenant";
 
-type TenantBotRow = typeof tenantBots.$inferSelect;
+type TenantBotRow = TenantBotsTable["$inferSelect"];
 
 function fakeRow(overrides: Partial<TenantBotRow> = {}): TenantBotRow {
   return {
@@ -162,8 +168,63 @@ describe("tenantBotFetch", () => {
     );
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body).toEqual({ error: "no paper bot for tenant", mode: "paper" });
+    expect(body).toEqual({
+      error: "no running paper bot for tenant",
+      mode: "paper",
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("filters the DB query on is_running=true (stopped rows fall to 404)", async () => {
+    // The actual stopped-row filtering happens at the SQL layer
+    // (where Drizzle's eq() adds an is_running=true predicate).
+    // Mocked DB returns whatever rows the .where filter would
+    // produce — but to make this test FAIL if someone removes
+    // the `eq(tenantBots.isRunning, true)` line from production
+    // code, we assert that `where` was called with an `and(...)`
+    // whose chunks reference tenantBots.isRunning.
+    //
+    // Drizzle's eq()/and() return opaque AST objects; we can't
+    // introspect them directly. Instead: spy on `where` and
+    // search its argument's serialized form for the
+    // tenantBots.isRunning column ref. The mock in vi.mock above
+    // gives that column ref a stable identity.
+    mockedRequireTenant.mockResolvedValue(tenant());
+    const { where } = chainSelect([]);
+
+    const res = await tenantBotFetch(
+      new Request("https://x/api/positions?mode=paper"),
+      "/api/positions",
+    );
+    expect(res.status).toBe(404);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Inspect the `where` call. We can't introspect Drizzle's AST
+    // cleanly, but we can serialize the call args and grep for
+    // the column refs the production code touched — at minimum,
+    // the and() AST will reference all three column objects.
+    expect(where).toHaveBeenCalledTimes(1);
+    const whereArg = where.mock.calls[0][0];
+    // Drizzle's and() returns an AST with the chunks somewhere
+    // under its enumerable props; JSON.stringify can choke on
+    // circular refs so dig via a recursive walk.
+    function visit(node: unknown, seen = new Set<unknown>()): unknown[] {
+      if (node === null || typeof node !== "object") return [];
+      if (seen.has(node)) return [];
+      seen.add(node);
+      const refs: unknown[] = [node];
+      for (const v of Object.values(node as Record<string, unknown>)) {
+        refs.push(...visit(v, seen));
+      }
+      return refs;
+    }
+    const allRefs = visit(whereArg);
+    // The mocked tenantBots.isRunning is an empty object `{}`
+    // imported from `../db`. It should be reachable from the
+    // and() AST if production code includes the filter.
+    // The mocked tenantBots.isRunning is reachable here by
+    // identity (same `vi.mock` module instance).
+    expect(allRefs).toContain(tenantBots.isRunning);
   });
 
   it("returns 404 when tenant_bots row exists but containerName is null", async () => {

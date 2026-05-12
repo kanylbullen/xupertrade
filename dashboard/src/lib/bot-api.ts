@@ -164,11 +164,31 @@ export async function tenantBotFetch(
   const rows = await db
     .select()
     .from(tenantBots)
-    .where(and(eq(tenantBots.tenantId, tenantId), eq(tenantBots.mode, mode)))
+    .where(
+      and(
+        eq(tenantBots.tenantId, tenantId),
+        eq(tenantBots.mode, mode),
+        // Only route to bots whose DB row says is_running=true.
+        // After our /stop endpoint clears is_running, an in-flight
+        // BotStatusIndicator poll would otherwise still resolve
+        // the (now-stale) container_name → connection refused →
+        // 4s timeout → 502. With this filter, the request lands
+        // in the 404 branch instead and the indicator renders
+        // "Offline" cleanly.
+        //
+        // Caveat: this does NOT catch divergence where the DB
+        // row still says is_running=true but the container is
+        // gone (e.g. operator-side `docker rm`, host reboot
+        // before the bot wrote its shutdown state). Those cases
+        // still 502 until the row is reconciled. PR 3d will add
+        // a connection-error → mark-stopped reconcile path.
+        eq(tenantBots.isRunning, true),
+      ),
+    )
     .limit(1);
   if (rows.length === 0) {
     return Response.json(
-      { error: `no ${mode} bot for tenant`, mode },
+      { error: `no running ${mode} bot for tenant`, mode },
       { status: 404 },
     );
   }
