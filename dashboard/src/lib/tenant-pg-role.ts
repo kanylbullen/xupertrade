@@ -76,6 +76,25 @@ const TENANT_DATA_TABLES = [
 ];
 
 /**
+ * Tables that are global (no tenant_id column, no RLS) but the
+ * bot still needs read+write access to. Vault data is shared:
+ * all tenants see the same HyperLiquid public vaults; the daily
+ * scanner upserts metadata + snapshots + NAV history regardless
+ * of which tenant happens to be polling. No isolation needed
+ * (it's public chain data); the bot just needs the grant.
+ *
+ * Without this list the tenant role hits
+ * `permission denied for table vaults` whenever the vault
+ * scanner ticks (every 30 min for the testnet bot per the
+ * vault-scanner Phase 1 plan).
+ */
+const SHARED_TABLES = [
+  "vaults",
+  "vault_snapshots",
+  "vault_nav_history",
+];
+
+/**
  * Subset of TENANT_DATA_TABLES that have a `serial id` column and
  * therefore an auto-generated `<table>_id_seq` sequence. Used to
  * scope sequence grants instead of granting on every sequence in
@@ -96,10 +115,16 @@ const TENANT_DATA_TABLES = [
 const TABLES_WITHOUT_ID_SEQ = new Set([
   "user_vault_entries",
   "tenant_telegram_links",
+  // Shared vault tables: `vaults` has String PK on address;
+  // `vault_nav_history` has composite PK (address, timestamp).
+  // Neither has a serial id sequence.
+  "vaults",
+  "vault_nav_history",
 ]);
-const TENANT_DATA_TABLES_WITH_ID_SEQ = TENANT_DATA_TABLES.filter(
-  (t) => !TABLES_WITHOUT_ID_SEQ.has(t),
-);
+const TENANT_DATA_TABLES_WITH_ID_SEQ = [
+  ...TENANT_DATA_TABLES,
+  ...SHARED_TABLES,
+].filter((t) => !TABLES_WITHOUT_ID_SEQ.has(t));
 
 /**
  * Idempotent: creates the role if missing, otherwise rotates its
@@ -127,7 +152,11 @@ export async function provisionRole(
   // password. Since we generate base64url ourselves there shouldn't
   // be any, but defense-in-depth.
   const pwLiteral = password.replace(/'/g, "''");
-  const tablesList = TENANT_DATA_TABLES.join(", ");
+  // Grant DML on both tenant-scoped (RLS-isolated) tables AND
+  // shared tables (vault scanner data, no isolation). The SQL
+  // shape is the same; the isolation difference lives at the
+  // RLS-policy layer (per alembic 0010 + 0014).
+  const tablesList = [...TENANT_DATA_TABLES, ...SHARED_TABLES].join(", ");
 
   // CREATE-OR-ALTER pattern (race-safe). The naive `IF NOT EXISTS`
   // check has a TOCTOU race: two concurrent provisionRole() calls
