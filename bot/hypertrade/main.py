@@ -224,6 +224,7 @@ async def main() -> None:
         exchange=exchange,
         strategies=strategies,
         repo=repo,
+        telegram=telegram,
     )
 
     # Create runner
