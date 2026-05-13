@@ -53,8 +53,11 @@ export default async function UnlockPage({
   // Pure crypto check — does NOT touch the DB. Either the token's
   // signature + expiry are valid (continue) or they aren't (generic
   // error; intentionally indistinguishable from "tenant unknown").
-  const payload = await verifyUnlockToken(token);
-  if (payload === null) {
+  // `_payload` not used — keeping the call so the page distinguishes
+  // valid-but-stale-token from missing-token, then returning a generic
+  // error either way (see PII-leak fix above).
+  const _payload = await verifyUnlockToken(token);
+  if (_payload === null) {
     return (
       <ErrorCard
         title="Link expired or invalid"
