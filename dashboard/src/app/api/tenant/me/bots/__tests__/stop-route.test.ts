@@ -79,7 +79,7 @@ describe("POST /api/tenant/me/bots/[id]/stop", () => {
     expect(mockedStopBot).not.toHaveBeenCalled();
   });
 
-  it("returns 200 + skips docker when already stopped", async () => {
+  it("returns 200 + skips docker when already stopped (clean row)", async () => {
     mockedRequireTenant.mockResolvedValueOnce(makeTenant());
     selectChain.limit.mockResolvedValueOnce([
       {
@@ -88,12 +88,50 @@ describe("POST /api/tenant/me/bots/[id]/stop", () => {
         mode: "paper",
         isRunning: false,
         containerId: null,
+        containerName: null,
       },
     ]);
 
     const res = await POST(makeReq(), makeCtx());
     expect(res.status).toBe(200);
     expect(mockedStopBot).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a stopped row with a stale containerName (Copilot fix on PR #101)", async () => {
+    // Pre-fix incident: a row with isRunning=false + containerId=null
+    // could still hold a stale containerName from before the
+    // persist-on-stop fix. The early-return skipped the UPDATE and
+    // /stop became a no-op forever.
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    selectChain.limit.mockResolvedValueOnce([
+      {
+        id: BOT_ID,
+        tenantId: TENANT_ID,
+        mode: "paper",
+        isRunning: false,
+        containerId: null,
+        containerName: "hypertrade-bot-stale-paper",
+      },
+    ]);
+    updateChain.returning.mockResolvedValueOnce([
+      {
+        id: BOT_ID,
+        tenantId: TENANT_ID,
+        mode: "paper",
+        isRunning: false,
+        containerId: null,
+        containerName: null,
+      },
+    ]);
+
+    const res = await POST(makeReq(), makeCtx());
+    expect(res.status).toBe(200);
+    // Docker NOT called (no containerId to act on), but UPDATE DID
+    // run to clear the stale name.
+    expect(mockedStopBot).not.toHaveBeenCalled();
+    expect(updateChain.set).toHaveBeenCalledWith(
+      expect.objectContaining({ containerName: null }),
+    );
   });
 
   it("calls stopBot + reconciles row when running", async () => {
