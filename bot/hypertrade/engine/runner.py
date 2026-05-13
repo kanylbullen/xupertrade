@@ -17,6 +17,7 @@ from hypertrade.events.bus import EventBus
 from hypertrade.events.types import (
     BotHeartbeat,
     ErrorOccurred,
+    HodlVerdictChanged,
     LogEntry,
     SignalGenerated,
     TickCompleted,
@@ -60,6 +61,32 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     if name in ("ConnectionError", "ConnectTimeout", "ReadTimeout"):
         return True
     return False
+
+
+_TRANSIENT_VERDICT_SUBSTRINGS = (
+    "evaluation failed",
+    "no data",
+)
+
+
+def _is_transient_unknown_verdict(verdict: str | None) -> bool:
+    """Return True if `verdict` looks like a transient sentinel produced
+    by hodl.base.Signal.evaluate() when an upstream fetch raised or
+    returned no data. Used to suppress recovery-noise notifications:
+    if we never pinged the user about the failure, we shouldn't ping
+    them about the recovery either.
+
+    Copilot review fix on PR #98: previous predicate was
+    `startswith("unknown")` which would also suppress legitimate
+    Unknown-shaped verdicts like "Unknown — manual disabled" or
+    "Unknown — unsupported asset". Narrow to the specific transient
+    sentinels emitted by the fetch-failure / no-data paths.
+    """
+    if not verdict:
+        return False
+    v = verdict.lower()
+    return any(s in v for s in _TRANSIENT_VERDICT_SUBSTRINGS)
+
 
 _start_time = time.time()
 
@@ -1209,16 +1236,37 @@ class EngineRunner:
             if prev is None or prev == state.verdict:
                 continue
 
-            # Verdict changed → emit event so Telegram forwards it
+            # Recovery / inter-transient noise filter (Copilot review fix
+            # on PR #98): suppress when prev was a transient sentinel
+            # AND the new verdict is either normal (recovery — symmetrical
+            # to the never-notified failure) or another transient (e.g.
+            # "Unknown — evaluation failed" → "Unknown — no data" — still
+            # broken, just a different shape, no point pinging twice).
+            #
+            # Failure transitions in the OTHER direction (normal → transient)
+            # still publish below — the user wants to know when something
+            # newly breaks.
+            if _is_transient_unknown_verdict(prev):
+                logger.info(
+                    "[hodl/%s] verdict transition from transient "
+                    "(suppressed notify): %r → %r (score %.2f)",
+                    sig.name, prev, state.verdict, state.score,
+                )
+                continue
+
+            # Verdict changed → emit info event so Telegram forwards it
+            # without an ⚠️ ERROR prefix. A new Unknown-shaped verdict
+            # IS published — the user wants to know when something just
+            # broke (the prev==Unknown short-circuit above prevents
+            # double-publishing on consecutive failures).
             if self.event_bus:
                 try:
                     await self.event_bus.publish(
-                        ErrorOccurred(
+                        HodlVerdictChanged(
                             strategy=f"hodl/{sig.name}",
-                            message=(
-                                f"HODL verdict changed for {sig.asset}: "
-                                f"{prev} → {state.verdict}"
-                            ),
+                            asset=sig.asset,
+                            prev_verdict=prev,
+                            new_verdict=state.verdict,
                         )
                     )
                 except Exception:

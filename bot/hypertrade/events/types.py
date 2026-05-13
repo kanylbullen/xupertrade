@@ -110,6 +110,24 @@ class VaultQualified(Event):
 
 
 @dataclass
+class HodlVerdictChanged(Event):
+    """A HODL signal's verdict changed since the last evaluation.
+
+    Informational state transition — not an error. Telegram renders this
+    without an error prefix. Recovery transitions (where the previous
+    verdict was a transient "Unknown — evaluation failed") are filtered
+    upstream in the runner so the user isn't pinged for a recovery they
+    were never pinged about the failure of.
+    """
+
+    type: str = "hodl.verdict_changed"
+    strategy: str = ""
+    asset: str = ""
+    prev_verdict: str = ""
+    new_verdict: str = ""
+
+
+@dataclass
 class VaultDisqualified(Event):
     """A previously qualified vault failed at least one filter."""
 

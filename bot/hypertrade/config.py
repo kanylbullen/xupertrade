@@ -164,7 +164,8 @@ class Settings(BaseSettings):
     # carries the reason and only fires when an order is actually placed.
     telegram_events: str = (
         "trade.executed,position.closed,error,"
-        "vault.qualified,vault.disqualified"
+        "vault.qualified,vault.disqualified,"
+        "hodl.verdict_changed"
     )
 
 

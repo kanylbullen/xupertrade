@@ -82,6 +82,15 @@ def _format_event(event: dict) -> Optional[str]:
     if etype == "error":
         msg = html.escape(str(event.get("message") or ""))
         return f"{prefix}⚠️ <b>ERROR</b> {event.get('strategy')}: {msg}"
+    if etype == "hodl.verdict_changed":
+        asset = html.escape(str(event.get("asset") or ""))
+        prev = html.escape(str(event.get("prev_verdict") or ""))
+        new = html.escape(str(event.get("new_verdict") or ""))
+        strat = html.escape(str(event.get("strategy") or ""))
+        return (
+            f"{prefix}📊 <b>HODL</b> {strat} ({asset})\n"
+            f"<i>{prev} → {new}</i>"
+        )
     if etype == "vault.qualified":
         name = html.escape(str(event.get("name") or ""))
         addr = str(event.get("address") or "")
