@@ -23,8 +23,18 @@ import { getRedisClient } from "../redis";
 
 import { KEY_BYTES } from "./secrets";
 
-/** TTL aligned with dashboard sessions (7 days in lib/auth.ts). */
-const DEFAULT_TTL_SECONDS = 60 * 60 * 24 * 7;
+/**
+ * Default K-cache TTL — 24 hours.
+ *
+ * Lowered from 7 days per security audit H-3: 7 days was excessive
+ * for a decryption key. Anyone who exfiltrates a session cookie
+ * resolves the cached K immediately (cookie is the K-cache lookup
+ * input via tenant_id+sessionId), so a long TTL multiplies the
+ * blast-radius of a stolen cookie. 24h forces a daily passphrase
+ * re-prompt, which is a normal trade-off for a trading system that
+ * holds long-lived credentials.
+ */
+export const DEFAULT_TTL_SECONDS = 60 * 60 * 24;
 
 function redisKey(tenantId: string, sessionId: string): string {
   return `dashboard:k-cache:${tenantId}:${sessionId}`;
