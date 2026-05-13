@@ -2,6 +2,9 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Nav } from "@/components/nav";
+import { AppSidebar } from "@/components/app-sidebar";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -29,13 +32,23 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} dark h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">
-        <Suspense>
-          <Nav />
-        </Suspense>
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
-          {children}
-        </main>
+      <body className="min-h-full">
+        <TooltipProvider>
+          <SidebarProvider>
+            <Suspense>
+              <AppSidebar />
+            </Suspense>
+            <SidebarInset className="flex min-h-screen flex-col">
+              {/* TODO PR C: remove Nav after sidebar cutover */}
+              <Suspense>
+                <Nav />
+              </Suspense>
+              <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+                {children}
+              </main>
+            </SidebarInset>
+          </SidebarProvider>
+        </TooltipProvider>
       </body>
     </html>
   );
