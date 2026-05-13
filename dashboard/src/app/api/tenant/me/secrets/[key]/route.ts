@@ -25,8 +25,45 @@ export const dynamic = "force-dynamic";
 const KEY_PATTERN = /^[A-Z0-9_]{1,64}$/;
 const MAX_VALUE_BYTES = 4096; // 4KB plenty for HL keys, tokens, addresses
 
+/**
+ * Allowlist of env-var names a tenant is permitted to set via PUT.
+ *
+ * Security audit C-1 (2026-05-12): without an allowlist, a tenant
+ * could PUT arbitrary `[A-Z0-9_]{1,64}` keys and have them injected
+ * into their bot container's env. The orchestrator's `systemEnv`
+ * only enumerated 8 keys, so a tenant could clobber operator
+ * policy env vars (mainnet allowlist, exposure cap, fee rate,
+ * trade-rate alarm, HL timeouts, etc.).
+ *
+ * Defence in depth: getOrchestratorSystemEnv() now explicitly sets
+ * those policy vars too (systemEnv wins on collision in buildSpec),
+ * but we still gate at the write boundary so the DB never holds
+ * tenant-set values for policy keys.
+ *
+ * DELETE is intentionally not gated by this set — tenants who wrote
+ * non-allowlisted keys before this fix landed must be able to clean
+ * them up without an operator-side migration.
+ */
+const TENANT_ALLOWED_SECRETS = new Set([
+  "HYPERLIQUID_PRIVATE_KEY",
+  "HYPERLIQUID_ACCOUNT_ADDRESS",
+  // Optional separate mainnet wallet — the credentials UI
+  // (settings/credentials) writes these regardless of whether the
+  // orchestrator currently injects them. TODO(orchestrator): pick
+  // MAINNET_* over the testnet keys when EXCHANGE_MODE=mainnet.
+  "HYPERLIQUID_MAINNET_PRIVATE_KEY",
+  "HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS",
+  "TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_CHAT_ID",
+  "VAULT_TRACKING_ADDRESS",
+]);
+
 function validKey(key: unknown): key is string {
   return typeof key === "string" && KEY_PATTERN.test(key);
+}
+
+function isAllowedForPut(key: string): boolean {
+  return TENANT_ALLOWED_SECRETS.has(key);
 }
 
 type Params = { params: Promise<{ key: string }> };
@@ -44,6 +81,16 @@ export async function PUT(req: Request, ctx: Params): Promise<Response> {
   if (!validKey(key)) {
     return Response.json(
       { error: "key must match [A-Z0-9_]{1,64}" },
+      { status: 400 },
+    );
+  }
+  if (!isAllowedForPut(key)) {
+    return Response.json(
+      {
+        error:
+          `key '${key}' is not a tenant-settable secret. ` +
+          `Allowed: ${[...TENANT_ALLOWED_SECRETS].sort().join(", ")}`,
+      },
       { status: 400 },
     );
   }
