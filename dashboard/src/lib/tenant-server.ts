@@ -88,7 +88,7 @@ export async function requireTenantServer(): Promise<Tenant> {
     // WHERE — a filtered query would mask a disabled row as "missing"
     // and silently re-create it via the autoCreate path below. Detect
     // in JS, redirect to /login with a clear error message instead.
-    if (existing[0].isActive !== true) redirect("/login?error=disabled");
+    if (existing[0].isActive !== true) redirect("/login?error=tenant-disabled");
     return existing[0];
   }
 
@@ -114,6 +114,6 @@ export async function requireTenantServer(): Promise<Tenant> {
   }
   // M-2 belt-and-braces: pre-existing disabled row could have won the
   // onConflictDoNothing race.
-  if (created[0].isActive !== true) redirect("/login?error=disabled");
+  if (created[0].isActive !== true) redirect("/login?error=tenant-disabled");
   return created[0];
 }

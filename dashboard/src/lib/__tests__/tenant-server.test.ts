@@ -169,6 +169,65 @@ describe("requireTenantServer", () => {
     );
   });
 
+  it("redirects to /login?error=tenant-disabled when existing row has isActive=false", async () => {
+    // Copilot review fix on PR #93 — pin the new behavior so a
+    // future regression doesn't silently let disabled tenants in.
+    authEnabled();
+    setCookie("good.cookie");
+    mockedGetSecret.mockResolvedValue("secret");
+    mockedVerify.mockReturnValue({
+      sub: "disabled@example.com",
+      iat: 1,
+      exp: 9999999999,
+    });
+    chainSelectReturning([{
+      id: "33333333-4444-5555-6666-777777777777",
+      authentikSub: "disabled@example.com",
+      isOperator: false,
+      isActive: false,
+    }]);
+
+    await expect(requireTenantServer()).rejects.toThrow(
+      /NEXT_REDIRECT;\/login\?error=tenant-disabled/,
+    );
+  });
+
+  it("redirects to /login?error=tenant-disabled when post-insert re-select returns isActive=false", async () => {
+    // Race: first select returns empty (looks brand-new), insert with
+    // onConflictDoNothing succeeds, second select hits the row that
+    // ANOTHER request created with isActive already flipped to false.
+    // Should still 403-redirect, not return the disabled row.
+    authEnabled();
+    setCookie("good.cookie");
+    mockedGetSecret.mockResolvedValue("secret");
+    mockedVerify.mockReturnValue({
+      sub: "race@example.com",
+      iat: 1,
+      exp: 9999999999,
+    });
+    const reselectedRow = {
+      id: "44444444-5555-6666-7777-888888888888",
+      authentikSub: "race@example.com",
+      isOperator: false,
+      isActive: false,
+    };
+    let selectCalls = 0;
+    mockedSelect.mockImplementation(() => {
+      selectCalls += 1;
+      const limit = vi.fn().mockResolvedValue(selectCalls === 1 ? [] : [reselectedRow]);
+      const where = vi.fn().mockReturnValue({ limit });
+      const from = vi.fn().mockReturnValue({ where });
+      return { from } as never;
+    });
+    const onConflict = vi.fn().mockResolvedValue(undefined);
+    const values = vi.fn().mockReturnValue({ onConflictDoNothing: onConflict });
+    mockedInsert.mockReturnValue({ values } as never);
+
+    await expect(requireTenantServer()).rejects.toThrow(
+      /NEXT_REDIRECT;\/login\?error=tenant-disabled/,
+    );
+  });
+
   it("returns operator tenant in disabled-auth mode (no cookie required)", async () => {
     // proxy.ts lets all requests through when cfg.mode === "disabled".
     // requireTenantServer must mirror that — resolving the operator

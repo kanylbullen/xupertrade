@@ -31,24 +31,44 @@ import {
 export async function requireOperator(req: Request): Promise<Tenant> {
   const row = await getTenantRowBypassActive(req);
 
-  if (row !== null && row.isOperator === true) {
+  if (row !== null) {
     // Strict `=== true` (not just truthy) so any non-boolean — e.g. the
     // string "true" or 1 from a misconfigured backfill or a future ORM
     // change — does NOT grant operator access. The Drizzle column is
     // boolean.notNull().default(false), so production should always
     // serve a real bool, but the strict check costs nothing and turns a
     // silent privilege escalation into a clear 403.
-    return row;
+    if (row.isOperator === true) {
+      // Operator: bypasses `is_active` so a fat-fingered disable on the
+      // operator row can't lock recovery routes out.
+      return row;
+    }
+    // Non-operator tenant. Distinguish disabled (clearer error message)
+    // from active-but-not-operator. Both 403, different error codes.
+    // Avoids re-running requireTenant entirely (Copilot review fix on
+    // PR #93 — was double-fetching session + tenant row).
+    if (row.isActive !== true) {
+      throw new Response(
+        JSON.stringify({ error: "tenant-disabled" }),
+        {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+    throw new Response(
+      JSON.stringify({ error: "operator only" }),
+      {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      },
+    );
   }
 
-  // Either no session, no tenant row yet, or row exists but isn't the
-  // operator. Defer to requireTenant which will:
-  //  - throw 401 if there's no session
-  //  - throw 403 (`tenant-disabled`) if the row exists but is_active=false
-  //  - auto-create on first sight (which would yield a non-operator row)
-  //  - return an active non-operator tenant
-  // In the auto-create / active-non-operator cases we still need to
-  // throw 403 (`operator only`) below.
+  // No session OR no tenant row yet (first-sight). Defer to
+  // requireTenant which will throw 401 (no session) or auto-create.
+  // Auto-created rows are never operators, so we always end up
+  // throwing 403 below.
   const t = await requireTenant(req);
   if (t.isOperator !== true) {
     throw new Response(
