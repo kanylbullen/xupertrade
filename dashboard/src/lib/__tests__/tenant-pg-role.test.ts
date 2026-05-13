@@ -7,26 +7,33 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// In-memory Redis fake for getOrCreatePgRolePassword tests. Defined
-// before the import below so the vi.mock factory can hand it back to
-// the module under test without a hoisting hazard.
-const fakeRedis = (() => {
+// In-memory Redis fake for getOrCreatePgRolePassword tests.
+//
+// Wrapped in `vi.hoisted()` (Copilot review fix on PR #107): vitest
+// hoists `vi.mock` factories above any top-level `const` declarations,
+// so a `const fakeRedis` defined here would be in the TDZ when the
+// factory closure runs. `vi.hoisted` is the documented escape hatch
+// — its callback runs at hoist time so the value is ready when the
+// mock factory needs it.
+const { fakeRedis } = vi.hoisted(() => {
   let store: Map<string, string> = new Map();
   return {
-    reset: () => { store = new Map(); },
-    get: vi.fn(async (k: string) => store.get(k) ?? null),
-    set: vi.fn(async (k: string, v: string, mode?: string) => {
-      if (mode === "NX") {
-        if (store.has(k)) return null;
+    fakeRedis: {
+      reset: () => { store = new Map(); },
+      get: vi.fn(async (k: string) => store.get(k) ?? null),
+      set: vi.fn(async (k: string, v: string, mode?: string) => {
+        if (mode === "NX") {
+          if (store.has(k)) return null;
+          store.set(k, v);
+          return "OK";
+        }
         store.set(k, v);
         return "OK";
-      }
-      store.set(k, v);
-      return "OK";
-    }),
-    del: vi.fn(async (k: string) => (store.delete(k) ? 1 : 0)),
+      }),
+      del: vi.fn(async (k: string) => (store.delete(k) ? 1 : 0)),
+    },
   };
-})();
+});
 
 vi.mock("../redis", () => ({
   getRedisClient: () => fakeRedis,

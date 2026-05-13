@@ -29,6 +29,16 @@ from hypertrade.strategies.base import Strategy
 logger = logging.getLogger(__name__)
 
 
+class TradeDbDivergence(Exception):
+    """Raised when an order has been placed on the exchange but the
+    matching DB write failed. The handler in `_execute_signal` already
+    logged details, paused the bot, and published an ErrorOccurred
+    event — `_run_strategy`'s catch-all should detect this type and
+    skip its generic "Strategy tick failed" handling to avoid
+    double-logging / double-publishing the same incident.
+    """
+
+
 # Errors that indicate transient HL/network issues — bot recovers
 # automatically on next tick, so we don't want to spam Telegram with
 # a separate alert per strategy per failed tick (22 strategies × 1/min
@@ -386,6 +396,14 @@ class EngineRunner:
             for strategy in active:
                 try:
                     await self._run_strategy(strategy)
+                except TradeDbDivergence:
+                    # Already handled at source: bot paused, detailed
+                    # ErrorOccurred event published, full traceback
+                    # logged via logger.exception. Skip the generic
+                    # "Strategy tick failed" branch so we don't
+                    # double-publish + double-log the same incident
+                    # (Copilot review fix on PR #107).
+                    continue
                 except Exception as e:
                     logger.exception("Error running strategy %s", strategy.name)
                     # Skip Telegram alert for transient HL/network errors
@@ -1018,8 +1036,14 @@ class EngineRunner:
                         )
                     except Exception:
                         logger.exception("Failed to publish divergence event")
-                # Re-raise so _run_strategy logs the full traceback for forensics.
-                raise
+                # Re-raise as a sentinel so `_run_strategy`'s catch-all
+                # recognises this incident is already handled (paused +
+                # published) and skips its generic "Strategy tick failed"
+                # event/log. Copilot review fix on PR #107 — was a plain
+                # `raise` which double-logged + double-published.
+                raise TradeDbDivergence(
+                    f"order {order.id} placed but DB write failed"
+                ) from db_exc
 
         # Snapshot post-signal strategy state to Redis. Covers the
         # cooldown-after-close gap (audit M6 / PR #19 review): position

@@ -100,34 +100,49 @@ export async function getOrCreatePgRolePassword(
   if (existing && existing.length > 0) {
     return existing;
   }
-  const fresh = generateRolePassword();
-  // SETNX so a concurrent caller's value wins atomically. If we lose
-  // the race, GET retrieves the winner; we throw away our fresh value
-  // and use theirs. This keeps the DB role password consistent across
-  // all parallel bot-starts.
-  const won = await redis.set(key, fresh, "NX");
-  if (won === "OK") {
-    return fresh;
+  // SETNX-then-GET loop — never overwrite unconditionally (Copilot
+  // review fix on PR #107). The previous fallback `redis.set(key, fresh)`
+  // could clobber a concurrent caller's freshly-written password,
+  // re-introducing the very divergence this helper exists to prevent.
+  // Pathological cases (SETNX races + Redis eviction in the same
+  // millisecond) just loop until either we win SETNX or someone else's
+  // value is readable. Bounded retry to avoid infinite loops on
+  // misconfigured Redis.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const fresh = generateRolePassword();
+    const won = await redis.set(key, fresh, "NX");
+    if (won === "OK") {
+      return fresh;
+    }
+    const winner = await redis.get(key);
+    if (winner && winner.length > 0) {
+      return winner;
+    }
+    // Both SETNX lost AND GET sees nothing → eviction happened between
+    // calls. Loop and try SETNX again.
   }
-  // Lost the race — read the winner.
-  const winner = await redis.get(key);
-  if (winner && winner.length > 0) {
-    return winner;
-  }
-  // Pathological: SETNX claimed loss but GET sees nothing (Redis
-  // eviction between calls). Fall back to ours and let the next caller
-  // race again.
-  await redis.set(key, fresh);
-  return fresh;
+  throw new Error(
+    `getOrCreatePgRolePassword: gave up after 5 SETNX/GET retries — Redis eviction storm or misconfig?`,
+  );
 }
 
 /**
  * Force-rotate the tenant role's password. Used at tenant-delete time
  * (paired with dropRole) and reserved for explicit rotation. NOT
  * called on bot-start anymore — see module docstring.
+ *
+ * Optional `redis` arg keeps Postgres-only callers (e.g. integration
+ * tests for dropRole) from spinning up a real ioredis client. Pass
+ * `null` to opt out of the Redis delete; pass an explicit instance
+ * for tests; default uses the global client. Copilot review fix on
+ * PR #107.
  */
-export async function forgetPgRolePassword(tenantId: string): Promise<void> {
-  await getRedisClient().del(pgRolePasswordKey(tenantId));
+export async function forgetPgRolePassword(
+  tenantId: string,
+  redis: import("ioredis").Redis | null = getRedisClient(),
+): Promise<void> {
+  if (redis === null) return;
+  await redis.del(pgRolePasswordKey(tenantId));
 }
 
 /**
@@ -302,12 +317,16 @@ export async function dropRole(tenantId: string): Promise<void> {
   `));
   // Also clear the cached password so a future tenant with the same
   // (cosmically unlikely) UUID gets a fresh one rather than reusing
-  // an old role's value.
-  try {
-    await forgetPgRolePassword(tenantId);
-  } catch {
-    // Redis hiccup at delete time isn't fatal — the next bot-start
-    // for this tenant will see the role missing and re-provision.
+  // an old role's value. Skip silently when REDIS_URL isn't configured
+  // — keeps Postgres-only integration tests from leaking ioredis
+  // reconnect handles (Copilot review fix on PR #107).
+  if (process.env.REDIS_URL) {
+    try {
+      await forgetPgRolePassword(tenantId);
+    } catch {
+      // Redis hiccup at delete time isn't fatal — the next bot-start
+      // for this tenant will see the role missing and re-provision.
+    }
   }
 }
 
