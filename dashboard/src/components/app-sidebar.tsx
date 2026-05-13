@@ -13,6 +13,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { BotStatusIndicator } from "@/components/bot-status-indicator";
+import { useMode } from "@/lib/use-mode";
 
 /**
  * Dashboard sidebar — PR A of the nav refactor. Renders **alongside**
@@ -24,9 +25,13 @@ import { BotStatusIndicator } from "@/components/bot-status-indicator";
  *   PR A this still tracks `?mode=` since `use-mode.ts` is untouched;
  *   PR B/C rewire it to read the route).
  * - Overview group: 3 mode-bound links → /overview/{paper,testnet,mainnet}.
- * - Pages group: mode-agnostic links (Trades, Strategies, HODL, Vaults).
- *   HODL + Vaults link to bare `/hodl` and `/vaults` per Decision 2
- *   (mainnet-only by design; no `?mode=` suffix).
+ * - Pages group:
+ *     - Trades, Strategies: propagate the active `?mode=` until PR B
+ *       rewires them to be mode-agnostic. Without this, clicking the
+ *       sidebar link from `/?mode=testnet` would silently reset to
+ *       paper. Copilot review fix on PR #103.
+ *     - HODL, Vaults: pinned to `?mode=mainnet` (Decision 2 — they
+ *       only operate on the mainnet bot).
  */
 
 const overviewModes = [
@@ -35,15 +40,16 @@ const overviewModes = [
   { href: "/overview/mainnet", label: "Mainnet" },
 ] as const;
 
-const pageLinks = [
-  { href: "/trades", label: "Trades" },
-  { href: "/strategies", label: "Strategies" },
-  { href: "/hodl", label: "HODL" },
-  { href: "/vaults", label: "Vaults" },
+const transitionalPageLinks = [
+  { base: "/trades", label: "Trades", pinMainnet: false },
+  { base: "/strategies", label: "Strategies", pinMainnet: false },
+  { base: "/hodl", label: "HODL", pinMainnet: true },
+  { base: "/vaults", label: "Vaults", pinMainnet: true },
 ] as const;
 
 export function AppSidebar() {
   const pathname = usePathname();
+  const activeMode = useMode();
 
   // Mirrors `nav.tsx:29` — public pages (login) hide nav chrome.
   if (pathname === "/login") return null;
@@ -78,19 +84,23 @@ export function AppSidebar() {
         <SidebarGroup>
           <SidebarGroupLabel>Pages</SidebarGroupLabel>
           <SidebarMenu>
-            {pageLinks.map((link) => (
-              <SidebarMenuItem key={link.href}>
-                <SidebarMenuButton
-                  isActive={pathname === link.href}
-                  tooltip={link.label}
-                  render={
-                    <Link href={link.href}>
-                      <span>{link.label}</span>
-                    </Link>
-                  }
-                />
-              </SidebarMenuItem>
-            ))}
+            {transitionalPageLinks.map((link) => {
+              const mode = link.pinMainnet ? "mainnet" : activeMode;
+              const href = `${link.base}?mode=${mode}`;
+              return (
+                <SidebarMenuItem key={link.base}>
+                  <SidebarMenuButton
+                    isActive={pathname === link.base}
+                    tooltip={link.label}
+                    render={
+                      <Link href={href}>
+                        <span>{link.label}</span>
+                      </Link>
+                    }
+                  />
+                </SidebarMenuItem>
+              );
+            })}
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>

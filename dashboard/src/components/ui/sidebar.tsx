@@ -82,8 +82,17 @@ function SidebarProvider({
         _setOpen(openState)
       }
 
-      // This sets the cookie to keep the sidebar state.
-      document.cookie = `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE}`
+      // Persist the open/closed state across reloads. SameSite=Lax
+      // prevents the cookie from being sent on cross-site requests
+      // (defence in depth — UI prefs aren't a CSRF surface but the
+      // default `None`-without-Secure varies by browser, and shipping
+      // an explicit attribute beats relying on the default).
+      // Secure attribute is auto-added in HTTPS contexts; safe to
+      // always set since hypertrade is HTTPS-only.
+      const secure = typeof window !== "undefined" && window.location.protocol === "https:"
+      document.cookie =
+        `${SIDEBAR_COOKIE_NAME}=${openState}; path=/; max-age=${SIDEBAR_COOKIE_MAX_AGE};` +
+        ` SameSite=Lax${secure ? "; Secure" : ""}`
     },
     [setOpenProp, open]
   )
