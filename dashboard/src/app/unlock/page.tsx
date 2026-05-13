@@ -1,6 +1,3 @@
-import { eq } from "drizzle-orm";
-
-import { db, tenants } from "@/lib/db";
 import { verifyUnlockToken } from "@/lib/unlock-token";
 
 import { UnlockClient } from "./unlock-client";
@@ -13,17 +10,28 @@ type SearchParams = Promise<{ token?: string }>;
  * /unlock?token=...   (PR 3c)
  *
  * Landing page for the Telegram unlock-deeplink flow. Validates
- * the signed token server-side (cheap; just HMAC + JSON.parse),
- * loads the tenant's display name for confirmation, and renders
- * a client component that prompts for the passphrase and calls
- * the existing /api/tenant/me/unlock endpoint.
+ * the signed token server-side (cheap; just HMAC + JSON.parse)
+ * and renders a client component that prompts for the passphrase
+ * and calls the existing /api/tenant/me/unlock endpoint.
+ *
+ * SECURITY (H-4): this route is in PUBLIC_PATHS and may be loaded
+ * unauthenticated. We deliberately render NO tenant-identifying
+ * info — no email, no display name, no tenant id — so a forwarded
+ * or screenshot-shared link doesn't disclose who the link belongs
+ * to. The actual passphrase POST still requires a valid session
+ * (`requireTenant` in /api/tenant/me/unlock), so we don't need the
+ * tenant id in the form either; the session decides which tenant
+ * is being unlocked.
+ *
+ * Token-validation errors collapse into a single generic message —
+ * we never distinguish "valid signature, tenant doesn't exist" from
+ * "expired" or "tampered with", since that would let an attacker
+ * with a valid-looking token probe whether a given tenant id exists.
  *
  * If the token is missing/invalid/expired we render an error
  * card — never redirect to /login, because the deeplink-clicker
  * may not yet have an authenticated session (this is the whole
- * point of the flow). The unlock POST below will require a
- * session, so the page also surfaces a "sign in first" hint
- * when applicable.
+ * point of the flow).
  */
 export default async function UnlockPage({
   searchParams,
@@ -42,34 +50,15 @@ export default async function UnlockPage({
     );
   }
 
+  // Pure crypto check — does NOT touch the DB. Either the token's
+  // signature + expiry are valid (continue) or they aren't (generic
+  // error; intentionally indistinguishable from "tenant unknown").
   const payload = await verifyUnlockToken(token);
   if (payload === null) {
     return (
       <ErrorCard
         title="Link expired or invalid"
-        body="The unlock link is no longer valid (expired or tampered with). Trigger a fresh one from the dashboard."
-      />
-    );
-  }
-
-  // Look up the tenant for display only — confirms the user sees
-  // "Unlock for alice@example.com" before typing their passphrase
-  // and notices if they accidentally clicked someone else's link.
-  const rows = await db
-    .select({
-      id: tenants.id,
-      email: tenants.email,
-      displayName: tenants.displayName,
-    })
-    .from(tenants)
-    .where(eq(tenants.id, payload.sub))
-    .limit(1);
-  const tenant = rows[0];
-  if (!tenant) {
-    return (
-      <ErrorCard
-        title="Tenant not found"
-        body="The unlock link references a tenant that no longer exists. If this is your account, contact the operator."
+        body="This unlock link has expired or is no longer valid. Open the dashboard or your bot's Telegram chat to generate a fresh one."
       />
     );
   }
@@ -77,15 +66,12 @@ export default async function UnlockPage({
   return (
     <main className="container mx-auto max-w-sm p-6 space-y-6 mt-12">
       <header>
-        <h1 className="text-2xl font-bold tracking-tight">Unlock bot</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Unlock your bot</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Enter your passphrase to resume your bot.
         </p>
       </header>
-      <UnlockClient
-        tenantId={tenant.id}
-        tenantLabel={tenant.displayName || tenant.email}
-      />
+      <UnlockClient />
     </main>
   );
 }

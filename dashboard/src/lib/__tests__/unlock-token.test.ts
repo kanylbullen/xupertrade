@@ -150,4 +150,22 @@ describe("verifyUnlockToken", () => {
     const truncated = `${payload}.AAAA`;
     expect(await verifyUnlockToken(truncated)).toBeNull();
   });
+
+  it("performs a pure crypto check (does NOT import @/lib/db)", async () => {
+    // H-4: the public /unlock page must validate tokens without
+    // reaching the DB — both because verify is on the hot path of
+    // an unauthenticated route, and because any per-tenant DB
+    // lookup is a vector for leaking which tenant ids exist. If
+    // a future refactor adds a DB lookup into the helper, this
+    // test fails so the reviewer is forced to reconsider.
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile(
+        new URL("../unlock-token.ts", import.meta.url),
+        "utf8",
+      ),
+    );
+    expect(src).not.toMatch(/from\s+["']@\/lib\/db["']/);
+    expect(src).not.toMatch(/from\s+["']\.\/db["']/);
+    expect(src).not.toMatch(/\bdrizzle-orm\b/);
+  });
 });
