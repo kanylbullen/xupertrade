@@ -23,6 +23,8 @@ import { isSessionRevoked } from "./session-store";
 
 export type Tenant = typeof tenants.$inferSelect;
 
+/**
+ * Sentinel returned by `getCurrentTenant` when the session is valid
  * AND the tenant row exists but `is_active=false` (operator-disabled
  * offboarding). Distinct from `null` (no/invalid session) so callers
  * can 403 with a useful message instead of bouncing the user back to

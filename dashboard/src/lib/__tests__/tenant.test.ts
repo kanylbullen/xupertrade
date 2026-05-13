@@ -204,6 +204,12 @@ describe("getCurrentTenant — M-3 OIDC group autocreate gate", () => {
     expect(caught).toBeInstanceOf(Response);
     expect(caught?.status).toBe(403);
     const body = await caught!.json();
-    expect(body).toEqual({ error: "oidc-not-in-required-group" });
+    // Body includes the required group so the UI can render
+    // "ask the operator to add you to <group>" (Copilot review fix on
+    // PR #94).
+    expect(body).toEqual({
+      error: "oidc-not-in-required-group",
+      required_group: "hypertrade-users",
+    });
   });
 });
