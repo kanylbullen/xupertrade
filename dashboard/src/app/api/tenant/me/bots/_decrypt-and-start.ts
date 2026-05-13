@@ -28,7 +28,7 @@ import {
   stopBot,
 } from "@/lib/bot-orchestrator";
 import {
-  generateRolePassword,
+  getOrCreatePgRolePassword,
   provisionRole,
   tenantDatabaseUrl,
 } from "@/lib/tenant-pg-role";
@@ -79,10 +79,18 @@ export async function decryptAndStart(args: Args): Promise<Result> {
     }
   }
 
-  // 2. Provision (or rotate) the tenant's pg role.
-  const tenantPassword = generateRolePassword();
+  // 2. Provision the tenant's pg role using the per-tenant cached
+  //    password (creates one on first use). This used to rotate the
+  //    password on every bot-start, which broke sibling bots running
+  //    for the same tenant — e.g. the operator's testnet+mainnet+paper
+  //    trio shared a role but each new start invalidated the others'
+  //    DATABASE_URL. The 2026-05-13 incident saw the testnet bot
+  //    place 5+ HL orders that never landed in `trades` because every
+  //    DB connection failed with InvalidPasswordError. See
+  //    `lib/tenant-pg-role.ts` module docstring.
   let tenantDbUrl: string;
   try {
+    const tenantPassword = await getOrCreatePgRolePassword(tenant.id);
     await provisionRole(tenant.id, tenantPassword);
     tenantDbUrl = tenantDatabaseUrl(tenant.id, tenantPassword);
   } catch (err) {

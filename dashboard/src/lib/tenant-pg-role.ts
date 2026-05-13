@@ -6,13 +6,28 @@
  * The bot container connects as that role; RLS policies (Phase 5a)
  * filter every query so the tenant can only see/write its own rows.
  *
- * v1 caveat: a fresh role password is generated on every bot-create,
- * overwriting any previous one. If a tenant ever has multiple bots
- * running concurrently (only operator does today via
- * multi_bot_enabled), the older bot's connection breaks on its next
- * reconnect. Acceptable for the closed-beta single-bot pattern;
- * multi-bot password sync gets a proper fix before
- * multi_bot_enabled is exposed to non-operator tenants.
+ * Password lifecycle (revised 2026-05-13 — was per-bot rotation):
+ *
+ *   The tenant role's password is generated once and then **reused
+ *   across all bots for the same tenant** (paper / testnet / mainnet).
+ *   The password is cached in Redis at `tenant:<id>:pg_role_pw`.
+ *
+ *   The previous v1 implementation rotated the password on every
+ *   bot-start. With three bots per tenant (the operator's standard
+ *   layout) starting sequentially during compose-up, the last bot to
+ *   start wins — the other two ran with stale DATABASE_URL env vars
+ *   and silently failed every Postgres connection attempt. Order
+ *   placement still succeeded (HL SDK is independent of DB) so the
+ *   bots executed real trades the DB never saw, producing the exact
+ *   divergence we built RLS to prevent. See incident 2026-05-13
+ *   05:00–10:00 UTC; trades 192–197 placed on HL but never recorded.
+ *
+ *   Storing the password in Redis is acceptable because the operator
+ *   already has DB-root and Redis-root on the same host — no trust
+ *   boundary to cross. On Redis loss the next bot-start regenerates
+ *   it; any concurrently-running bot for the same tenant should then
+ *   be restarted to pick up the new value. In practice the operator
+ *   restarts all three bots together via `docker compose up -d`.
  */
 
 import { randomBytes } from "node:crypto";
@@ -20,6 +35,7 @@ import { randomBytes } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { db } from "./db";
+import { getRedisClient } from "./redis";
 
 /**
  * Role name for a given tenant UUID. Strips dashes + lowercases.
@@ -42,11 +58,91 @@ export function roleNameForTenant(tenantId: string): string {
 
 /**
  * 32-byte URL-safe base64 password, ≈42 chars. Plenty of entropy for
- * a service-account credential that lives in container env vars and
- * is rotated on every bot-restart.
+ * a service-account credential that lives in container env vars.
+ *
+ * Note: this no longer rotates per bot-start (see module-level docstring).
+ * `getOrCreatePgRolePassword` is the high-level entrypoint; callers should
+ * prefer that. Exported here for the integration tests.
  */
 export function generateRolePassword(): string {
   return randomBytes(32).toString("base64url");
+}
+
+/** Redis key where the per-tenant role password is cached. */
+export function pgRolePasswordKey(tenantId: string): string {
+  // Validate format before letting the value reach Redis — defense
+  // against caller bugs that would otherwise scatter junk keys.
+  const hex = tenantId.replace(/-/g, "").toLowerCase();
+  if (!HEX32.test(hex)) {
+    throw new RangeError(
+      `tenantId must be a 32-hex UUID (got ${JSON.stringify(hex)})`,
+    );
+  }
+  return `tenant:${hex}:pg_role_pw`;
+}
+
+/**
+ * Return the tenant role's password from Redis, creating it on first
+ * access. Idempotent across concurrent callers via `SETNX`: only one
+ * caller wins the SETNX and the others read back the winner's value.
+ *
+ * Combined with `provisionRole` (which is also idempotent via
+ * CREATE-OR-ALTER), this means a bot-start for the operator's tenant
+ * gets the same DATABASE_URL no matter how many sibling bots are
+ * started concurrently — fixing the 2026-05-13 divergence incident.
+ */
+export async function getOrCreatePgRolePassword(
+  tenantId: string,
+): Promise<string> {
+  const key = pgRolePasswordKey(tenantId);
+  const redis = getRedisClient();
+  const existing = await redis.get(key);
+  if (existing && existing.length > 0) {
+    return existing;
+  }
+  // SETNX-then-GET loop — never overwrite unconditionally (Copilot
+  // review fix on PR #107). The previous fallback `redis.set(key, fresh)`
+  // could clobber a concurrent caller's freshly-written password,
+  // re-introducing the very divergence this helper exists to prevent.
+  // Pathological cases (SETNX races + Redis eviction in the same
+  // millisecond) just loop until either we win SETNX or someone else's
+  // value is readable. Bounded retry to avoid infinite loops on
+  // misconfigured Redis.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const fresh = generateRolePassword();
+    const won = await redis.set(key, fresh, "NX");
+    if (won === "OK") {
+      return fresh;
+    }
+    const winner = await redis.get(key);
+    if (winner && winner.length > 0) {
+      return winner;
+    }
+    // Both SETNX lost AND GET sees nothing → eviction happened between
+    // calls. Loop and try SETNX again.
+  }
+  throw new Error(
+    `getOrCreatePgRolePassword: gave up after 5 SETNX/GET retries — Redis eviction storm or misconfig?`,
+  );
+}
+
+/**
+ * Force-rotate the tenant role's password. Used at tenant-delete time
+ * (paired with dropRole) and reserved for explicit rotation. NOT
+ * called on bot-start anymore — see module docstring.
+ *
+ * Optional `redis` arg keeps Postgres-only callers (e.g. integration
+ * tests for dropRole) from spinning up a real ioredis client. Pass
+ * `null` to opt out of the Redis delete; pass an explicit instance
+ * for tests; default uses the global client. Copilot review fix on
+ * PR #107.
+ */
+export async function forgetPgRolePassword(
+  tenantId: string,
+  redis: import("ioredis").Redis | null = getRedisClient(),
+): Promise<void> {
+  if (redis === null) return;
+  await redis.del(pgRolePasswordKey(tenantId));
 }
 
 /**
@@ -219,6 +315,19 @@ export async function dropRole(tenantId: string): Promise<void> {
       END IF;
     END $$;
   `));
+  // Also clear the cached password so a future tenant with the same
+  // (cosmically unlikely) UUID gets a fresh one rather than reusing
+  // an old role's value. Skip silently when REDIS_URL isn't configured
+  // — keeps Postgres-only integration tests from leaking ioredis
+  // reconnect handles (Copilot review fix on PR #107).
+  if (process.env.REDIS_URL) {
+    try {
+      await forgetPgRolePassword(tenantId);
+    } catch {
+      // Redis hiccup at delete time isn't fatal — the next bot-start
+      // for this tenant will see the role missing and re-provision.
+    }
+  }
 }
 
 /**

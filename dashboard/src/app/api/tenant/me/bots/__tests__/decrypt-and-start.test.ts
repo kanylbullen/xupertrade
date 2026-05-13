@@ -18,7 +18,11 @@ vi.mock("@/lib/crypto/secrets", () => ({
   decryptSecret: vi.fn(),
 }));
 vi.mock("@/lib/tenant-pg-role", () => ({
-  generateRolePassword: vi.fn(() => "test-password"),
+  // 2026-05-13: switched from generateRolePassword (per-bot rotation)
+  // to getOrCreatePgRolePassword (cached in Redis, stable across
+  // bot-starts for the same tenant). Keep the mock returning a
+  // deterministic value so the URL builder produces a stable string.
+  getOrCreatePgRolePassword: vi.fn().mockResolvedValue("test-password"),
   provisionRole: vi.fn().mockResolvedValue(undefined),
   tenantDatabaseUrl: vi.fn(() => "postgres://tenant@db/tenant"),
 }));

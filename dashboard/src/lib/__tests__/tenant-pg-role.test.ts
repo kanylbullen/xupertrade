@@ -5,10 +5,51 @@
  * here we test only the pure helpers and the URL builder.
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// In-memory Redis fake for getOrCreatePgRolePassword tests.
+//
+// Wrapped in `vi.hoisted()` (Copilot review fix on PR #107): vitest
+// hoists `vi.mock` factories above any top-level `const` declarations,
+// so a `const fakeRedis` defined here would be in the TDZ when the
+// factory closure runs. `vi.hoisted` is the documented escape hatch
+// — its callback runs at hoist time so the value is ready when the
+// mock factory needs it.
+const { fakeRedis } = vi.hoisted(() => {
+  let store: Map<string, string> = new Map();
+  return {
+    fakeRedis: {
+      reset: () => { store = new Map(); },
+      get: vi.fn(async (k: string) => store.get(k) ?? null),
+      set: vi.fn(async (k: string, v: string, mode?: string) => {
+        if (mode === "NX") {
+          if (store.has(k)) return null;
+          store.set(k, v);
+          return "OK";
+        }
+        store.set(k, v);
+        return "OK";
+      }),
+      del: vi.fn(async (k: string) => (store.delete(k) ? 1 : 0)),
+    },
+  };
+});
+
+vi.mock("../redis", () => ({
+  getRedisClient: () => fakeRedis,
+}));
+
+// db is imported at module load even for the pure helpers we're testing
+// — provide a no-op stub so we don't hit a real Postgres.
+vi.mock("../db", () => ({
+  db: { execute: vi.fn() },
+}));
 
 import {
+  forgetPgRolePassword,
   generateRolePassword,
+  getOrCreatePgRolePassword,
+  pgRolePasswordKey,
   roleNameForTenant,
   tenantDatabaseUrl,
 } from "../tenant-pg-role";
@@ -131,5 +172,66 @@ describe("tenantDatabaseUrl", () => {
     } finally {
       if (orig !== undefined) process.env.DATABASE_URL = orig;
     }
+  });
+});
+
+describe("pgRolePasswordKey", () => {
+  it("namespaces by tenant under tenant:<hex>:pg_role_pw", () => {
+    expect(pgRolePasswordKey(TENANT)).toBe(
+      "tenant:3a2f1e4caaaabbbbccccdddd11112222:pg_role_pw",
+    );
+  });
+  it("rejects malformed tenant ids (would have leaked junk keys)", () => {
+    expect(() => pgRolePasswordKey("not-a-uuid")).toThrow(/32-hex UUID/);
+  });
+});
+
+describe("getOrCreatePgRolePassword (root-cause fix for 2026-05-13 incident)", () => {
+  beforeEach(() => {
+    fakeRedis.reset();
+    vi.clearAllMocks();
+  });
+
+  it("returns the same password on repeated calls for the same tenant", async () => {
+    // This is the regression test for the divergence incident: when
+    // three bots for one tenant start sequentially, all three must
+    // get the SAME DATABASE_URL or the older ones break on every
+    // future DB query.
+    const a = await getOrCreatePgRolePassword(TENANT);
+    const b = await getOrCreatePgRolePassword(TENANT);
+    const c = await getOrCreatePgRolePassword(TENANT);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    // First call SETNX wrote, subsequent calls hit the cache via GET.
+    expect(fakeRedis.set).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes through SETNX so concurrent calls converge to one value", async () => {
+    // Simulate the SETNX race: two concurrent callers both miss the
+    // GET, both attempt SET NX, only one wins, the loser reads the
+    // winner's value.
+    const [p1, p2, p3] = await Promise.all([
+      getOrCreatePgRolePassword(TENANT),
+      getOrCreatePgRolePassword(TENANT),
+      getOrCreatePgRolePassword(TENANT),
+    ]);
+    expect(p1).toBe(p2);
+    expect(p2).toBe(p3);
+  });
+
+  it("issues distinct passwords for distinct tenants", async () => {
+    const otherTenant = "11111111-2222-3333-4444-555566667777";
+    const a = await getOrCreatePgRolePassword(TENANT);
+    const b = await getOrCreatePgRolePassword(otherTenant);
+    expect(a).not.toBe(b);
+  });
+
+  it("regenerates after forgetPgRolePassword (rotation entry-point)", async () => {
+    const before = await getOrCreatePgRolePassword(TENANT);
+    await forgetPgRolePassword(TENANT);
+    const after = await getOrCreatePgRolePassword(TENANT);
+    // Cryptographically vanishingly small chance of collision; if
+    // this ever flakes, generateRolePassword's randomness is broken.
+    expect(after).not.toBe(before);
   });
 });
