@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { verify as bcryptVerify } from "@node-rs/bcrypt";
+import { hashSync, verify as bcryptVerify } from "@node-rs/bcrypt";
 
 import {
   fetchAuthConfig,
@@ -9,8 +9,42 @@ import {
   COOKIE_OPTIONS,
 } from "@/lib/auth";
 import { getAuthConfig } from "@/lib/auth-config";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
+
+// H-2: pre-compute a dummy bcrypt hash once at module load. Used as
+// the verify target on user-not-found so the bcrypt CPU cost is paid
+// regardless — eliminates the ~250ms timing oracle that would otherwise
+// let an attacker enumerate the configured `basic_user`.
+//
+// The plaintext is a public sentinel — there is nothing to protect
+// here; the hash exists purely to make `bcryptVerify` do work. Cost
+// 12 matches the cost typically used for stored basic-auth hashes
+// elsewhere in the dashboard so the timing profile lines up.
+const DUMMY_HASH = hashSync("dummy-not-a-real-password", 12);
+
+const RATE_LIMIT_MAX = 10;
+const RATE_LIMIT_WINDOW_SEC = 900; // 15 minutes
+
+function getClientIp(req: Request): string {
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  return "unknown";
+}
+
+function rateLimited(retryAfterSeconds: number): NextResponse {
+  return NextResponse.json(
+    { ok: false, error: "rate-limited", retry_after_seconds: retryAfterSeconds },
+    {
+      status: 429,
+      headers: { "Retry-After": String(retryAfterSeconds) },
+    },
+  );
+}
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
@@ -22,6 +56,30 @@ export async function POST(req: Request) {
 
   if (!username || !password) {
     return NextResponse.json({ ok: false, error: "missing-credentials" }, { status: 400 });
+  }
+
+  // H-2: rate-limit per-IP and per-username before any expensive work
+  // (auth-config fetch, bcrypt verify). Two buckets so a flood from a
+  // single IP doesn't lock out a separate user, and a flood guessing
+  // one username doesn't lock out other usernames from the same IP.
+  const ip = getClientIp(req);
+  const ipRl = await checkRateLimit(
+    "auth-login-ip",
+    ip,
+    RATE_LIMIT_MAX,
+    RATE_LIMIT_WINDOW_SEC,
+  );
+  if (!ipRl.allowed) {
+    return rateLimited(ipRl.resetInSeconds);
+  }
+  const userRl = await checkRateLimit(
+    "auth-login-user",
+    username.toLowerCase(),
+    RATE_LIMIT_MAX,
+    RATE_LIMIT_WINDOW_SEC,
+  );
+  if (!userRl.allowed) {
+    return rateLimited(userRl.resetInSeconds);
   }
 
   const cfg = await fetchAuthConfig(true);
@@ -56,23 +114,22 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  if (username !== storedUser) {
-    return NextResponse.json(
-      { ok: false, error: "invalid-credentials" },
-      { status: 401 },
-    );
-  }
-  let passwordOk = false;
+
+  // H-2: avoid the user-existence timing oracle. Always run bcrypt —
+  // against the stored hash if usernames match, otherwise against the
+  // pre-computed dummy hash so the CPU cost is identical. Combine
+  // both checks into a single 401 path so an attacker can't tell
+  // "user exists, wrong password" from "user does not exist".
+  const userMatches = username === storedUser;
+  const hashToCheck = userMatches ? storedHash : DUMMY_HASH;
+  let bcryptOk = false;
   try {
-    passwordOk = await bcryptVerify(password, storedHash);
+    bcryptOk = await bcryptVerify(password, hashToCheck);
   } catch {
     // Malformed hash in Redis — treat as failed auth, never crash.
-    return NextResponse.json(
-      { ok: false, error: "invalid-credentials" },
-      { status: 401 },
-    );
+    bcryptOk = false;
   }
-  if (!passwordOk) {
+  if (!userMatches || !bcryptOk) {
     return NextResponse.json(
       { ok: false, error: "invalid-credentials" },
       { status: 401 },
