@@ -79,8 +79,18 @@ export function UserMenu() {
         {initial}
       </Menu.Trigger>
       <Menu.Portal>
-        <Menu.Positioner sideOffset={8} side="top" align="start">
-          <Menu.Popup className="z-50 w-64 rounded-lg border bg-background shadow-lg outline-none">
+        <Menu.Positioner sideOffset={8} side="top" align="start" className="z-50">
+          {/* Base UI Menu.Popup uses `data-open` / `data-closed` data
+              attributes (see `MenuPopupDataAttributes`); without
+              explicit Tailwind variants for those, the popup defaults
+              to invisible (the lib expects the consumer to define
+              the open-state styling). Symptom we hit: clicking the
+              avatar locked body-scroll (Menu opened internally) but
+              nothing rendered visibly. Now: render visible by default,
+              fade out on closed. Ditto the trigger's z-index moves
+              onto the Positioner so the popup itself is layered above
+              the sidebar (z-50). */}
+          <Menu.Popup className="w-64 rounded-lg border bg-background shadow-lg outline-none transition-opacity data-[closed]:opacity-0 data-[closed]:pointer-events-none data-[open]:opacity-100">
             <div className="border-b px-4 py-3">
               <p className="text-xs text-muted-foreground">Signed in as</p>
               <p className="text-sm font-medium truncate">{me.email}</p>
