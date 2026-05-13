@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
 import aiohttp
+import re
 import redis.asyncio as redis
 
 from hypertrade.config import settings
@@ -19,6 +20,7 @@ from hypertrade.engine.control import BotControl
 from hypertrade.engine.indicators_status import get_all_status
 from hypertrade.events.bus import channel_for
 from hypertrade.exchange.base import Exchange
+from hypertrade.notify.rate_limit import check_rate_limit
 from hypertrade.strategies.base import Strategy
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,16 @@ def _format_event(event: dict) -> Optional[str]:
 
 
 CommandHandler = Callable[[list[str]], Awaitable[str]]
+
+# Telegram /link code format (M-1 fix). Crockford-base32 minus
+# 0/1/I/O, 10 chars → 32^10 ≈ 1.1×10^15 keyspace. Must match the
+# alphabet used by `dashboard/src/app/api/tenant/me/telegram/link/route.ts`.
+LINK_CODE_RE = re.compile(r"^[A-HJ-NP-Z2-9]{10}$")
+# Per-chat sliding-window: 5 attempts / 30 min. With 32^10 codespace
+# this is overkill; it just stops a confused legit user from
+# hammering bad codes too.
+LINK_RATELIMIT_MAX = 5
+LINK_RATELIMIT_WINDOW_S = 30 * 60
 
 
 class TelegramNotifier:
@@ -438,11 +450,17 @@ class TelegramNotifier:
         cmd = parts[0].split("@")[0].lower()
         args = parts[1:]
 
-        now = _time.monotonic()
-        last = self._last_command_time.get(cmd, 0.0)
-        if now - last < self._command_cooldown_seconds:
-            return
-        self._last_command_time[cmd] = now
+        # /link has its own per-chat sliding-window throttle (M-1).
+        # The legacy global-cooldown bucket is keyed by command name
+        # only, so a single brute-forcer would throttle legitimate
+        # tenants out of the feature — keep it for everything ELSE
+        # (status/positions/etc) where global pacing is fine.
+        if cmd != "/link":
+            now = _time.monotonic()
+            last = self._last_command_time.get(cmd, 0.0)
+            if now - last < self._command_cooldown_seconds:
+                return
+            self._last_command_time[cmd] = now
 
         handler_entry = self._commands.get(cmd)
         if not handler_entry:
@@ -718,27 +736,65 @@ class TelegramNotifier:
         chat_id: str | None = None,
         username: str | None = None,
     ) -> str:
-        """`/link <6-digit-code>` — pair this Telegram chat with a
-        tenant account. Code comes from POST
-        /api/tenant/me/telegram/link on the dashboard side (PR 3a)
-        and lives in Redis with a 10-min TTL.
+        """`/link <code>` — pair this Telegram chat with a tenant
+        account. Code comes from POST /api/tenant/me/telegram/link
+        on the dashboard side; it's a 10-character Crockford-base32
+        string (M-1: widened from the original 6-digit format) and
+        lives in Redis with a 10-min TTL.
 
         Auth: the code IS the auth — only the tenant who minted it
         knows the value, and consumption is one-shot. Re-link
         attempts for the same tenant just overwrite, so a user
         switching devices doesn't get stuck.
+
+        Per-chat rate-limit: 5 attempts / 30 min, hard-fail beyond.
+        Defence-in-depth on top of the 32^10 codespace — a single
+        attacker can't hammer one chat looking for code reuse.
         """
         if self._repo is None or self._redis is None:
             return "⚠️ Linking unavailable (DB or Redis not configured)"
         if chat_id is None:
             return "⚠️ Internal error: missing chat context"
-        if not args or len(args) != 1 or not args[0].isdigit() or len(args[0]) != 6:
+
+        # Per-chat sliding-window (M-1). Run BEFORE format check so a
+        # spam of "/link garbage" still counts toward the limit — we
+        # don't want to give attackers a free probe channel by
+        # rejecting on format and skipping the counter.
+        rl = await check_rate_limit(
+            self._redis,
+            "tg-link-attempt",
+            chat_id,
+            max_events=LINK_RATELIMIT_MAX,
+            window_seconds=LINK_RATELIMIT_WINDOW_S,
+        )
+        if not rl.allowed:
+            minutes = max(1, (rl.reset_in_seconds + 59) // 60)
             return (
-                "Usage: <code>/link 123456</code>\n\n"
-                "Get your 6-digit code from the dashboard's "
-                "Settings → Credentials page."
+                f"❌ Too many /link attempts from this chat. "
+                f"Try again in <b>{minutes}</b> min."
             )
-        code = args[0]
+
+        # Accept case-insensitive; strip stray whitespace so users
+        # copying from the dashboard don't trip on trailing spaces.
+        raw = (args[0].strip().upper() if args else "")
+        # Old 6-digit codes are no longer accepted. They have a
+        # 10-min TTL so any in-flight code from before the upgrade
+        # has already expired by the time the new bot ships, but
+        # surface a clear message just in case.
+        if raw.isdigit() and len(raw) == 6:
+            return (
+                "❌ The 6-digit code format is no longer supported.\n\n"
+                "Mint a fresh code on the dashboard's "
+                "Settings → Credentials page — it'll be 10 characters."
+            )
+        if len(args) != 1 or not LINK_CODE_RE.match(raw):
+            return (
+                "Usage: <code>/link ABCDE12345</code>\n\n"
+                "Get your 10-character code from the dashboard's "
+                "Settings → Credentials page (case-insensitive, "
+                "characters A-Z and 2-9 minus I/O)."
+            )
+        code = raw
         key = f"tg-link:{code}"
         # GETDEL is atomic — read-and-delete in one Redis op. Without
         # this, two concurrent /link with the same code could both

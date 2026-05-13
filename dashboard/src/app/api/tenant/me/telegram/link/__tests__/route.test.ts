@@ -1,11 +1,14 @@
 /**
- * Tests for /api/tenant/me/telegram/link (PR 3a).
+ * Tests for /api/tenant/me/telegram/link (PR 3a; M-1 widens code).
  *
- * Mocks the tenant resolver, db, and redis client so we don't
- * need live infra. Verifies the 6-digit-code lifecycle:
+ * Mocks the tenant resolver, db, redis, and rate-limit helper so we
+ * don't need live infra. Verifies:
  *   - GET returns linked status from DB row (bigint chat_id → string)
- *   - POST mints a code, stores in Redis with NX + 10min TTL
+ *   - POST mints a 10-char Crockford-base32 code (32^10 keyspace),
+ *     stores in Redis with NX + 10min TTL
  *   - POST reuses existing active code (spam prevention)
+ *   - POST is per-tenant rate-limited (429 with Retry-After when
+ *     mint quota exceeded)
  *   - DELETE removes the link row
  *   - 401 propagates from requireTenant
  */
@@ -46,6 +49,14 @@ vi.mock("@/lib/redis", () => ({
   })),
 }));
 
+// Mint-rate-limit (M-1). Mock so unit tests don't need a live
+// Redis pipeline; default to "allowed" and override per-test for
+// the 429 path.
+const checkRateLimitMock = vi.fn();
+vi.mock("@/lib/rate-limit", () => ({
+  checkRateLimit: (...args: unknown[]) => checkRateLimitMock(...args),
+}));
+
 import { requireTenant } from "@/lib/tenant";
 
 import { DELETE, GET, POST } from "../route";
@@ -74,6 +85,12 @@ beforeEach(() => {
   // Default: no active code, so POST mints a fresh one. Tests
   // that want reuse-existing override this.
   redisGet.mockResolvedValue(null);
+  // Default: under quota.
+  checkRateLimitMock.mockResolvedValue({
+    allowed: true,
+    remaining: 9,
+    resetInSeconds: 3600,
+  });
 });
 
 afterEach(() => {
@@ -83,6 +100,7 @@ afterEach(() => {
   redisSet.mockReset();
   redisGet.mockReset();
   redisTtl.mockReset();
+  checkRateLimitMock.mockReset();
 });
 
 describe("GET /api/tenant/me/telegram/link", () => {
@@ -143,13 +161,17 @@ describe("GET /api/tenant/me/telegram/link", () => {
 });
 
 describe("POST /api/tenant/me/telegram/link", () => {
-  it("mints a 6-digit code and stores it in Redis NX with TTL", async () => {
+  // M-1: minted code must match the wider Crockford-base32 format.
+  // Bot's `/link` parser uses the same regex.
+  const CODE_PATTERN = /^[A-HJ-NP-Z2-9]{10}$/;
+
+  it("mints a 10-char Crockford-base32 code and stores it in Redis NX with TTL", async () => {
     redisSet.mockResolvedValueOnce("OK"); // tg-link:<code> set
     redisSet.mockResolvedValueOnce("OK"); // reverse-pointer set
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).toMatch(/^\d{6}$/);
+    expect(body.code).toMatch(CODE_PATTERN);
     expect(body.expiresInSeconds).toBe(600);
     expect(redisSet).toHaveBeenCalledWith(
       `tg-link:${body.code}`,
@@ -166,23 +188,35 @@ describe("POST /api/tenant/me/telegram/link", () => {
     );
   });
 
+  it("minted codes never contain forbidden glyphs (0/1/I/O)", async () => {
+    // Sanity-check the alphabet by minting many codes and scanning.
+    // The masking trick (byte & 0x1f) is uniform over 32 chars
+    // because 32 = 2^5, so this is mostly a regression guard
+    // against accidentally re-introducing a 30-char alphabet.
+    redisSet.mockResolvedValue("OK");
+    for (let i = 0; i < 50; i++) {
+      const res = await POST(makeReq());
+      const body = await res.json();
+      expect(body.code).toMatch(CODE_PATTERN);
+      expect(body.code).not.toMatch(/[01IO]/);
+      expect(body.code.length).toBe(10);
+    }
+  });
+
   it("returns existing active code instead of churning Redis keys", async () => {
-    // Simulate: tenant already has code "123456" with 300s left.
-    redisGet.mockResolvedValueOnce("123456");
+    redisGet.mockResolvedValueOnce("OLDCODE2345");
     redisTtl.mockResolvedValueOnce(300);
 
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).toBe("123456");
+    expect(body.code).toBe("OLDCODE2345");
     expect(body.expiresInSeconds).toBe(300);
-    // No new code minted — spam vector closed.
     expect(redisSet).not.toHaveBeenCalled();
   });
 
   it("mints fresh code if reverse pointer exists but TTL expired", async () => {
-    // Race: pointer just expired, ttl returns -2 (key gone) or 0.
-    redisGet.mockResolvedValueOnce("oldcode");
+    redisGet.mockResolvedValueOnce("OLDCODE2345");
     redisTtl.mockResolvedValueOnce(-2);
     redisSet.mockResolvedValueOnce("OK");
     redisSet.mockResolvedValueOnce("OK");
@@ -190,8 +224,23 @@ describe("POST /api/tenant/me/telegram/link", () => {
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).not.toBe("oldcode");
+    expect(body.code).not.toBe("OLDCODE2345");
+    expect(body.code).toMatch(CODE_PATTERN);
     expect(redisSet).toHaveBeenCalled();
+  });
+
+  it("returns 429 with Retry-After when mint quota exceeded (M-1)", async () => {
+    checkRateLimitMock.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetInSeconds: 1800,
+    });
+    const res = await POST(makeReq());
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("1800");
+    // No code minted, no Redis writes.
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(redisGet).not.toHaveBeenCalled();
   });
 
   it("retries on Redis SET NX collision", async () => {
