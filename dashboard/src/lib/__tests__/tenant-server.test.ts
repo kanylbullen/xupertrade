@@ -117,6 +117,7 @@ describe("requireTenantServer", () => {
       id: "11111111-2222-3333-4444-555555555555",
       authentikSub: "alice@example.com",
       isOperator: false,
+      isActive: true,
     };
     chainSelectReturning([row]);
 
@@ -141,6 +142,7 @@ describe("requireTenantServer", () => {
       id: "22222222-3333-4444-5555-666666666666",
       authentikSub: "newuser@example.com",
       isOperator: false,
+      isActive: true,
     };
     let selectCalls = 0;
     mockedSelect.mockImplementation(() => {

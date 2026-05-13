@@ -13,12 +13,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../tenant", () => ({
   requireTenant: vi.fn(),
+  getTenantRowBypassActive: vi.fn(),
 }));
 
-import { requireTenant, type Tenant } from "../tenant";
+import {
+  getTenantRowBypassActive,
+  requireTenant,
+  type Tenant,
+} from "../tenant";
 import { requireOperator } from "../operator";
 
 const mockedRequireTenant = vi.mocked(requireTenant);
+const mockedBypassActive = vi.mocked(getTenantRowBypassActive);
 
 function fakeTenant(overrides: Partial<Tenant> = {}): Tenant {
   return {
@@ -43,6 +49,7 @@ function makeReq(): Request {
 
 afterEach(() => {
   mockedRequireTenant.mockReset();
+  mockedBypassActive.mockReset();
 });
 
 describe("requireOperator", () => {
@@ -52,13 +59,20 @@ describe("requireOperator", () => {
       isOperator: true,
       email: "operator@example.com",
     });
-    mockedRequireTenant.mockResolvedValue(operator);
+    // M-2: requireOperator looks up the row bypass-active first; only
+    // when that yields no row / non-operator does it fall through to
+    // requireTenant. For operator-success, bypass-active returns the row.
+    mockedBypassActive.mockResolvedValue(operator);
 
     await expect(requireOperator(makeReq())).resolves.toBe(operator);
+    // requireTenant should NOT have been consulted — operators bypass
+    // the active-flag check.
+    expect(mockedRequireTenant).not.toHaveBeenCalled();
   });
 
   it("throws a 403 Response when tenant is authenticated but not operator", async () => {
     const regular = fakeTenant({ isOperator: false });
+    mockedBypassActive.mockResolvedValue(regular);
     mockedRequireTenant.mockResolvedValue(regular);
 
     let thrown: unknown = null;
@@ -83,6 +97,7 @@ describe("requireOperator", () => {
         headers: { "content-type": "application/json" },
       },
     );
+    mockedBypassActive.mockResolvedValue(null);
     mockedRequireTenant.mockRejectedValue(unauth);
 
     let thrown: unknown = null;
@@ -110,6 +125,7 @@ describe("requireOperator", () => {
     const weird = fakeTenant({
       isOperator: "true" as unknown as boolean,
     });
+    mockedBypassActive.mockResolvedValue(weird);
     mockedRequireTenant.mockResolvedValue(weird);
 
     let thrown: unknown = null;
@@ -128,6 +144,7 @@ describe("requireOperator", () => {
     const numeric = fakeTenant({
       isOperator: 1 as unknown as boolean,
     });
+    mockedBypassActive.mockResolvedValue(numeric);
     mockedRequireTenant.mockResolvedValue(numeric);
 
     let thrown: unknown = null;
