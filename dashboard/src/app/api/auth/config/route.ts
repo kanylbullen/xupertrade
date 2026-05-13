@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { fetchAuthConfig } from "@/lib/auth";
-import { isPhaseManagingAuth } from "@/lib/phase-sync";
+// Import from the detect-only module to avoid pulling ioredis into
+// this route's bundle (Copilot review fix on PR #104).
+import { isPhaseManagingAuth } from "@/lib/phase-sync-detect";
 
 export const dynamic = "force-dynamic";
 

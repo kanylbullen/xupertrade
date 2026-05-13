@@ -78,28 +78,51 @@ export async function syncPhaseAuthConfig(
     for (const { redis, value } of present) {
       pipe.set(redis, value);
     }
-    await pipe.exec();
+    // ioredis pipeline().exec() resolves with `[err, result][]` even
+    // when individual commands fail — only network/protocol errors
+    // throw. Inspect the per-command tuples to surface partial sync
+    // (Copilot review fix on PR #104). A partial sync defeats the
+    // incident-fix goal: Redis would hold a mix of new + stale values.
+    const results = await pipe.exec();
+    const failed: Array<{ redis: string; error: string }> = [];
+    if (results) {
+      results.forEach(([err], i) => {
+        if (err) {
+          failed.push({
+            redis: present[i].redis,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      });
+    }
+    if (failed.length > 0) {
+      console.warn(
+        `[phase-sync] partial Redis sync — ${failed.length}/${present.length} writes failed:`,
+        failed,
+      );
+      return { written: present.length - failed.length, total, redisError: true };
+    }
     console.log(
       `[phase-sync] OIDC config synced from env (${present.length}/${total} keys)`,
     );
     return { written: present.length, total, redisError: false };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Network/protocol error — pipeline didn't even reach Redis.
+    // Note: `getAuthConfig` does NOT have an env-first fallback today
+    // (it awaits `mget` first, then merges env). So a Redis outage
+    // makes the dashboard unauthable regardless of Phase env. The
+    // sync's job is just to keep Redis fresh; Redis-down is a
+    // separate failure mode.
     console.warn(
-      `[phase-sync] Redis unreachable, sync skipped — getAuthConfig will fall back to env-first: ${msg}`,
+      `[phase-sync] Redis unreachable, sync skipped: ${msg}`,
     );
     return { written: 0, total, redisError: true };
   }
 }
 
-/**
- * Server-side helper for the UI banner. Returns true if ANY of the
- * sync'd env vars is non-empty after trim — i.e. Phase IS the source
- * of truth and UI edits will be overwritten on next restart.
- */
-export function isPhaseManagingAuth(): boolean {
-  return SYNC_KEYS.some(({ env }) => {
-    const raw = process.env[env];
-    return raw != null && String(raw).trim() !== "";
-  });
-}
+// Re-export the lightweight detector from `phase-sync-detect.ts` so
+// existing import sites (`from "@/lib/phase-sync"`) keep working
+// without dragging the ioredis-pulling sync function. New callers
+// should import from `phase-sync-detect.ts` directly.
+export { isPhaseManagingAuth, listPhaseManagedAuthKeys } from "./phase-sync-detect";
