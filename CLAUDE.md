@@ -241,6 +241,21 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && phase run -- docker compose up -d --force-recreate dashboard"
 ```
 
+> ⚠️ **`up -d --force-recreate dashboard` only refreshes the dashboard
+> container.** Tenant-bots are orchestrator-spawned (separate Docker
+> containers, not in `docker-compose.yml` post-PR-4c) and the orchestrator
+> does NOT auto-restart them when `hypertrade-bot:latest` updates. So a
+> bot code change ships the new image into the registry but already-running
+> tenant bots keep using the read-only layers from the image they spawned
+> against until the dashboard explicitly recreates them.
+>
+> When the bot code itself changed (not just the dashboard), the
+> operator must trigger a tenant-bot restart per running bot via the
+> dashboard UI's `Settings → Bots → restart`. Or via API:
+> `POST /api/tenant/me/bots/<bot_id>/stop` then `/start`. Until that
+> happens, the new bot logic only applies to bots STARTED after the
+> deploy — not to ones already running.
+
 For mainnet (opt-in via `--profile mainnet`), the same three-step shape
 applies — substitute the mainnet profile/services into steps 1 and 3:
 
@@ -313,8 +328,17 @@ under the cache-trap warning below).
 > "Host-side cron jobs" above) keeps this from accumulating between
 > deploys.
 
-Build only what changed for speed (e.g.
-`phase run -- bash -c 'docker compose build --pull bot-testnet bot-paper dashboard'`).
+Build only what changed for speed — but keep `--no-cache --pull` and
+the standalone build step (no chained `&& up -d`):
+
+```bash
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && phase run -- docker compose --profile build build --no-cache --pull dashboard"
+```
+
+Then verify image age and recreate per the three-step shape above. The
+old `bash -c 'build --pull && up -d'` form is what bit us with the
+cache-trap — don't reintroduce it.
 
 ### Standard "is the bot OK?" check
 
@@ -332,7 +356,13 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 # `hypertrade-bot-0000000000000000-testnet` for the operator's tenant);
 # discover the right one before grepping logs.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "container=\$(docker ps --format '{{.Names}}' | grep -E '^hypertrade-bot-.*-testnet\$' | head -1); \
+  "matches=\$(docker ps --format '{{.Names}}' | grep -E '^hypertrade-bot-.*-testnet\$'); \
+   case \$(echo \"\$matches\" | grep -c .) in \
+     0) echo 'no testnet bot container running' >&2; exit 1 ;; \
+     1) container=\$matches ;; \
+     *) echo 'multiple testnet bots — pick one explicitly:' >&2; \
+        echo \"\$matches\" >&2; exit 1 ;; \
+   esac; \
    echo \"=== \$container ===\"; \
    docker logs \"\$container\" --since 1h 2>&1 | grep -iE 'error|warning' | tail -50"
 ```
