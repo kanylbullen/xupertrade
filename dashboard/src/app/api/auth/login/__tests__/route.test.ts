@@ -13,12 +13,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@node-rs/bcrypt", () => ({
-  // hashSync is called once at module load to pre-compute DUMMY_HASH —
-  // return a deterministic placeholder so we don't pay for a real
-  // bcrypt round in test setup.
-  hashSync: vi.fn(() => "$2b$12$dummy.hash.placeholder.value.for.tests"),
+  // PR #92 Copilot review fix: DUMMY_HASH is now a hardcoded
+  // string constant in route.ts (no `hashSync` at module load),
+  // so the test mock only needs `verify`.
   verify: vi.fn(),
 }));
+
+// Must match the constant in `route.ts` exactly. Used to assert that
+// user-not-found goes through the dummy verify path, not the stored
+// hash path.
+const DUMMY_HASH =
+  "$2y$12$ZkgAhco9SGGGbpEEVfxrgOb6BPW73tCuEMAbrPaC4QunY/iOBqDaa";
 
 vi.mock("@/lib/rate-limit", () => ({
   checkRateLimit: vi.fn(),
@@ -153,8 +158,8 @@ describe("POST /api/auth/login — H-2 hardening", () => {
     expect(mockedBcryptVerify).toHaveBeenCalledTimes(1);
     const [, hashArg] = mockedBcryptVerify.mock.calls[0];
     // Crucially — the hash passed must NOT be the real stored hash;
-    // it must be the dummy hash (placeholder string from the mock).
-    expect(hashArg).toBe("$2b$12$dummy.hash.placeholder.value.for.tests");
+    // it must be the hardcoded DUMMY_HASH from route.ts.
+    expect(hashArg).toBe(DUMMY_HASH);
   });
 
   it("bcrypt.verify runs on user-found-wrong-password", async () => {

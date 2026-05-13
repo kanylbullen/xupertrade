@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hashSync, verify as bcryptVerify } from "@node-rs/bcrypt";
+import { verify as bcryptVerify } from "@node-rs/bcrypt";
 
 import {
   fetchAuthConfig,
@@ -9,32 +9,28 @@ import {
   COOKIE_OPTIONS,
 } from "@/lib/auth";
 import { getAuthConfig } from "@/lib/auth-config";
+import { getClientIp } from "@/lib/client-ip";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
-// H-2: pre-compute a dummy bcrypt hash once at module load. Used as
-// the verify target on user-not-found so the bcrypt CPU cost is paid
-// regardless — eliminates the ~250ms timing oracle that would otherwise
-// let an attacker enumerate the configured `basic_user`.
+// H-2: precomputed bcrypt hash used as the verify target on
+// user-not-found so the bcrypt CPU cost is paid regardless —
+// eliminates the ~250ms timing oracle that would otherwise let an
+// attacker enumerate the configured `basic_user`.
 //
-// The plaintext is a public sentinel — there is nothing to protect
-// here; the hash exists purely to make `bcryptVerify` do work. Cost
-// 12 matches the cost typically used for stored basic-auth hashes
-// elsewhere in the dashboard so the timing profile lines up.
-const DUMMY_HASH = hashSync("dummy-not-a-real-password", 12);
+// HARDCODED rather than `hashSync(...)` at module load (Copilot review
+// fix on PR #92) so we don't pay an unnecessary ~250ms cold-start
+// cost on every Next.js process spawn. Any valid cost-12 bcrypt hash
+// works; this one was generated once locally with cost 12 and the
+// plaintext "dummy-not-a-real-password". The plaintext is public —
+// there is nothing to protect here, the hash exists purely to make
+// `bcryptVerify` do work.
+const DUMMY_HASH =
+  "$2y$12$ZkgAhco9SGGGbpEEVfxrgOb6BPW73tCuEMAbrPaC4QunY/iOBqDaa";
 
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_SEC = 900; // 15 minutes
-
-function getClientIp(req: Request): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return "unknown";
-}
 
 function rateLimited(retryAfterSeconds: number): NextResponse {
   return NextResponse.json(
@@ -126,7 +122,14 @@ export async function POST(req: Request) {
   try {
     bcryptOk = await bcryptVerify(password, hashToCheck);
   } catch {
-    // Malformed hash in Redis — treat as failed auth, never crash.
+    // Malformed stored hash. Pay the bcrypt cost on the dummy hash so
+    // a corrupted hash in Redis doesn't reintroduce a timing oracle
+    // (Copilot review fix on PR #92). Auth still fails.
+    try {
+      await bcryptVerify(password, DUMMY_HASH);
+    } catch {
+      // Even the dummy hash is unreachable — auth simply fails.
+    }
     bcryptOk = false;
   }
   if (!userMatches || !bcryptOk) {

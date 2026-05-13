@@ -11,6 +11,7 @@
 import { eq } from "drizzle-orm";
 
 import { appendAuditLog } from "@/lib/audit-log";
+import { getClientIp } from "@/lib/client-ip";
 import {
   cacheKey,
   clearKey,
@@ -35,15 +36,6 @@ export const dynamic = "force-dynamic";
 // notice via the audit log (every failed attempt writes a row).
 const UNLOCK_RATE_LIMIT_MAX = 10;
 const UNLOCK_RATE_LIMIT_WINDOW_SEC = 900;
-
-function getClientIp(req: Request): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return "unknown";
-}
 
 export async function POST(req: Request): Promise<Response> {
   let tenant: Awaited<ReturnType<typeof requireTenant>>;

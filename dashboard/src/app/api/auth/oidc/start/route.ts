@@ -8,26 +8,18 @@ import {
   safeNext,
   resolveRedirectUri,
 } from "@/lib/oidc";
+import { getClientIp } from "@/lib/client-ip";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
 // H-2: cap OIDC authorization-request initiations per IP. Each call
-// mints a state cookie and 302s to the upstream IdP; an attacker can
-// otherwise spam this endpoint to fill the IdP's state cache or fill
-// our access logs. Limit is human-paced (60/min is well above any
-// legit retry pattern but cheap to enforce).
+// mints a state cookie and redirects to the upstream IdP; an attacker
+// can otherwise spam this endpoint to fill the IdP's state cache or
+// fill our access logs. Limit is human-paced (60/min is well above
+// any legit retry pattern but cheap to enforce).
 const OIDC_START_RATE_LIMIT_MAX = 60;
 const OIDC_START_RATE_LIMIT_WINDOW_SEC = 60;
-
-function getClientIp(req: Request): string {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return "unknown";
-}
 
 export async function GET(req: Request) {
   const url = new URL(req.url);

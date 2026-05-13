@@ -4,7 +4,7 @@
  * Covers:
  *   - Rate-limit gate: when checkRateLimit denies, return 429 with
  *     Retry-After header and DO NOT call the IdP / mint state cookie.
- *   - When allowed, the existing 302-to-IdP behavior is preserved.
+ *   - When allowed, the existing 307-to-IdP redirect is preserved.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -87,7 +87,7 @@ describe("GET /api/auth/oidc/start — H-2", () => {
     expect(mockedBuildAuthUrl).not.toHaveBeenCalled();
   });
 
-  it("11th attempt within window denies (1st-60th allowed)", async () => {
+  it("denies after the per-IP limit (60/min) is reached", async () => {
     // Walk the helper: 60 allowed redirects, then 1 denied.
     // We don't actually fire 60 — just verify the route honors the
     // boolean on each call. The numeric limit is enforced by
@@ -103,7 +103,7 @@ describe("GET /api/auth/oidc/start — H-2", () => {
     expect(res.status).toBe(429);
   });
 
-  it("happy path 302s to the IdP and sets the state cookie", async () => {
+  it("happy path 307s to the IdP and sets the state cookie", async () => {
     const res = await GET(startReq());
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toContain("idp.example/authorize");
