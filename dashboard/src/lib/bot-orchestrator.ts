@@ -121,9 +121,14 @@ export function containerName(tenantId: string, mode: BotMode): string {
  *     RLS isolation (Phase 5b).
  *   - TENANT_ID, BOT_ID, EXCHANGE_MODE, API_PORT — set by
  *     `buildSpec` directly (stable per-bot identifiers).
- *   - HYPERLIQUID_*, TELEGRAM_*, VAULT_TRACKING_ADDRESS — per-tenant
- *     secrets via `decryptedSecrets`, not system-managed (and gated
- *     by `TENANT_ALLOWED_SECRETS` at the secret-CRUD boundary).
+ *   - Per-tenant credential secrets via `decryptedSecrets` — exact set
+ *     gated by `TENANT_ALLOWED_SECRETS` in
+ *     `app/api/tenant/me/secrets/[key]/route.ts`. Currently:
+ *     `HYPERLIQUID_PRIVATE_KEY`, `HYPERLIQUID_ACCOUNT_ADDRESS`,
+ *     `HYPERLIQUID_MAINNET_PRIVATE_KEY`,
+ *     `HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS`, `TELEGRAM_BOT_TOKEN`,
+ *     `TELEGRAM_CHAT_ID`, `VAULT_TRACKING_ADDRESS`. Anything outside
+ *     that set is rejected at write time, so it can't end up here.
  *   - AUTH_MODE, OIDC_*, TLS_* — owned exclusively by the dashboard
  *     (read directly from Redis via `lib/auth-config.ts` +
  *     `lib/tls-config.ts`). Bots have nothing to do with auth/TLS config.

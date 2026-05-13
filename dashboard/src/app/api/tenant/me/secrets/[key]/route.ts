@@ -47,6 +47,12 @@ const MAX_VALUE_BYTES = 4096; // 4KB plenty for HL keys, tokens, addresses
 const TENANT_ALLOWED_SECRETS = new Set([
   "HYPERLIQUID_PRIVATE_KEY",
   "HYPERLIQUID_ACCOUNT_ADDRESS",
+  // Optional separate mainnet wallet — the credentials UI
+  // (settings/credentials) writes these regardless of whether the
+  // orchestrator currently injects them. TODO(orchestrator): pick
+  // MAINNET_* over the testnet keys when EXCHANGE_MODE=mainnet.
+  "HYPERLIQUID_MAINNET_PRIVATE_KEY",
+  "HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS",
   "TELEGRAM_BOT_TOKEN",
   "TELEGRAM_CHAT_ID",
   "VAULT_TRACKING_ADDRESS",

@@ -76,6 +76,8 @@ describe("PUT /api/tenant/me/secrets/[key] — allowlist (C-1)", () => {
   it.each([
     "HYPERLIQUID_PRIVATE_KEY",
     "HYPERLIQUID_ACCOUNT_ADDRESS",
+    "HYPERLIQUID_MAINNET_PRIVATE_KEY",
+    "HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "VAULT_TRACKING_ADDRESS",
