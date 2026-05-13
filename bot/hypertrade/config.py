@@ -67,16 +67,21 @@ class Settings(BaseSettings):
         nothing useful.
 
         Background: PR 4c retired the compose-bot model and per-tenant
-        bots are spawned by the dashboard orchestrator. The credentials
-        UI doesn't currently expose a `VAULT_TRACKING_ADDRESS` slot
-        for most tenants, so the /vaults page rendered the qualified-
-        vaults scanner list but their own vault holdings did not appear
-        despite being a mainnet bot. This fallback keeps the common
-        case working with zero extra config; the explicit secret
-        remains the override path for monitoring a different wallet.
+        bots are spawned by the dashboard orchestrator. Before this PR
+        the credentials UI didn't expose a `VAULT_TRACKING_ADDRESS`
+        slot for most tenants, so the /vaults page rendered the
+        qualified-vaults scanner list but their own vault holdings
+        did not appear despite being a mainnet bot. This fallback
+        keeps the common case working with zero extra config; the
+        explicit secret (now a UI slot too) remains the override path
+        for monitoring a different wallet.
         """
-        if self.vault_tracking_address:
-            return self.vault_tracking_address.strip().lower()
+        # Normalize first (Copilot review fix on PR #99): a whitespace-
+        # only value would previously short-circuit the fallback to ""
+        # rather than fall through to hyperliquid_account_address.
+        explicit = (self.vault_tracking_address or "").strip().lower()
+        if explicit:
+            return explicit
         if self.exchange_mode == "mainnet" and self.hyperliquid_account_address:
             return self.hyperliquid_account_address.strip().lower()
         return ""

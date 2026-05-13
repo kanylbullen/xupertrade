@@ -212,14 +212,16 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   //   1. fixed system identifiers (TENANT_ID, BOT_ID, EXCHANGE_MODE)
   //   2. decryptedSecrets (user-supplied)
   //   3. systemEnv (orchestrator-supplied; wins over user)
-  //   4. API_PORT (mode-pinned, wins over EVERYTHING else)
-  // Steps 2 and 3 collisions: orchestrator wins, so a malicious
-  // user can't override DATABASE_URL via the secret CRUD API. Step 4
-  // is set explicitly AFTER the spread so a caller can't accidentally
-  // override the routing convention either — bots must listen on the
-  // port their mode dictates (paper=8000, testnet=8001, mainnet=8002)
-  // so a single getBotApiUrl helper (lib/bot-api.ts) works for both
-  // operator's compose-defined bots and per-tenant orchestrator bots.
+  //   4. API_PORT (mode-pinned)
+  //   5. TELEGRAM_ENABLED (mode-pinned; PR #99)
+  // Steps 4 and 5 are mode-derived final overrides — they're set
+  // explicitly AFTER the spread so neither a tenant-supplied secret
+  // nor a stale orchestrator-system value can win over them. API_PORT
+  // pins the routing convention (bots must listen on the port their
+  // mode dictates: paper=8000, testnet=8001, mainnet=8002 — so a single
+  // getBotApiUrl helper in lib/bot-api.ts works for everything).
+  // TELEGRAM_ENABLED pins the single-Telegram-owner convention (only
+  // testnet posts; see the comment on that key below).
   const envMap: Record<string, string> = {
     TENANT_ID: params.tenantId,
     BOT_ID: params.botId,

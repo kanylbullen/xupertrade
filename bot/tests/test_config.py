@@ -1,12 +1,13 @@
 """Tests for the Settings model — focused on derived properties.
 
 Background: PR 4c retired the compose-bot model; per-tenant bots are
-spawned by the dashboard orchestrator. The credentials UI doesn't
-expose a `VAULT_TRACKING_ADDRESS` slot for most tenants, which broke
-the /vaults page's "your holdings" panel for mainnet bots whose own
-wallet IS the vault-holding wallet. `effective_vault_tracking_address`
-falls back to `HYPERLIQUID_ACCOUNT_ADDRESS` on mainnet only — testnet
-wallets aren't on mainnet so the lookup would return nothing useful.
+spawned by the dashboard orchestrator. Before this PR the credentials
+UI didn't expose a `VAULT_TRACKING_ADDRESS` slot for most tenants,
+which broke the /vaults page's "your holdings" panel for mainnet bots
+whose own wallet IS the vault-holding wallet.
+`effective_vault_tracking_address` falls back to
+`HYPERLIQUID_ACCOUNT_ADDRESS` on mainnet only — testnet wallets
+aren't on mainnet so the lookup would return nothing useful.
 """
 
 from __future__ import annotations
