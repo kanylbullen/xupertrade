@@ -66,6 +66,35 @@ function isAllowedForPut(key: string): boolean {
   return TENANT_ALLOWED_SECRETS.has(key);
 }
 
+const EXPIRY_TRACKED_KEYS = new Set([
+  "HYPERLIQUID_PRIVATE_KEY",
+  "HYPERLIQUID_MAINNET_PRIVATE_KEY",
+]);
+
+// Accept either `YYYY-MM-DD` (the native <input type=date> wire format)
+// or a full ISO-8601 timestamp. Returns null for empty input; throws
+// Response on invalid input so the PUT handler can return 400.
+function parseExpiresAt(raw: unknown): Date | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  if (typeof raw !== "string") {
+    throw Response.json(
+      { error: "expiresAt must be a string (YYYY-MM-DD) or null" },
+      { status: 400 },
+    );
+  }
+  // Bare date → interpret as UTC midnight (consistent with the input
+  // type's wire format being a calendar date, not an instant).
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+  const parsed = new Date(dateOnly ? `${raw}T00:00:00Z` : raw);
+  if (Number.isNaN(parsed.getTime())) {
+    throw Response.json(
+      { error: "expiresAt is not a valid date" },
+      { status: 400 },
+    );
+  }
+  return parsed;
+}
+
 type Params = { params: Promise<{ key: string }> };
 
 export async function PUT(req: Request, ctx: Params): Promise<Response> {
@@ -115,6 +144,20 @@ export async function PUT(req: Request, ctx: Params): Promise<Response> {
     );
   }
 
+  // expiresAt is only meaningful for the two HL private-key rows.
+  // For other keys we silently drop any client-supplied value so the
+  // UI can send the field unconditionally without us 400-ing.
+  let expiresAt: Date | null = null;
+  if (EXPIRY_TRACKED_KEYS.has(key)) {
+    const rawExp = (body as { expiresAt?: unknown })?.expiresAt;
+    try {
+      expiresAt = parseExpiresAt(rawExp);
+    } catch (err) {
+      if (err instanceof Response) return err;
+      throw err;
+    }
+  }
+
   let k: Buffer;
   try {
     k = await requireUnlockedKey(req, tenant);
@@ -125,27 +168,39 @@ export async function PUT(req: Request, ctx: Params): Promise<Response> {
 
   const { ciphertext, nonce } = encryptSecret(k, value);
 
+  const insertValues = {
+    tenantId: tenant.id,
+    key,
+    ciphertext,
+    nonce,
+    ...(EXPIRY_TRACKED_KEYS.has(key) ? { expiresAt } : {}),
+  };
+  const updateSet: Record<string, unknown> = {
+    ciphertext,
+    nonce,
+    // Use DB-side `NOW()` so the update path matches the insert
+    // path's `defaultNow()` source. Avoids ordering surprises if
+    // app and DB clocks differ.
+    updatedAt: sql`now()`,
+  };
+  if (EXPIRY_TRACKED_KEYS.has(key)) {
+    updateSet.expiresAt = expiresAt;
+  }
   await db
     .insert(tenantSecrets)
-    .values({
-      tenantId: tenant.id,
-      key,
-      ciphertext,
-      nonce,
-    })
+    .values(insertValues)
     .onConflictDoUpdate({
       target: [tenantSecrets.tenantId, tenantSecrets.key],
-      set: {
-        ciphertext,
-        nonce,
-        // Use DB-side `NOW()` so the update path matches the insert
-        // path's `defaultNow()` source. Avoids ordering surprises if
-        // app and DB clocks differ.
-        updatedAt: sql`now()`,
-      },
+      set: updateSet,
     });
 
-  return Response.json({ key, set: true });
+  return Response.json({
+    key,
+    set: true,
+    ...(EXPIRY_TRACKED_KEYS.has(key)
+      ? { expiresAt: expiresAt ? expiresAt.toISOString() : null }
+      : {}),
+  });
 }
 
 export async function DELETE(req: Request, ctx: Params): Promise<Response> {

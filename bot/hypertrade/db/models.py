@@ -138,6 +138,10 @@ class TenantSecret(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    # Operator-set rotation deadline for HL private keys (alembic 0015).
+    # NULL = no expiry tracking. Only the dashboard credentials UI
+    # writes this, and only for HYPERLIQUID_{,MAINNET_}PRIVATE_KEY.
+    expires_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class TenantAuditLog(Base):

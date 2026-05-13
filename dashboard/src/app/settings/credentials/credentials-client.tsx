@@ -5,12 +5,29 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { TelegramLinkCard } from "@/components/telegram-link-card";
 import { UnlockModal } from "@/components/unlock-modal";
 
+import { formatExpiryBadge } from "./expiry";
+
 type Me = {
   passphraseSet: boolean;
   unlocked: boolean;
 };
 
-type SecretRow = { key: string; updatedAt: string };
+type SecretRow = {
+  key: string;
+  updatedAt: string;
+  expiresAt: string | null;
+};
+
+const EXPIRY_TRACKED_KEYS = new Set([
+  "HYPERLIQUID_PRIVATE_KEY",
+  "HYPERLIQUID_MAINNET_PRIVATE_KEY",
+]);
+
+function defaultExpiryDate(): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 180);
+  return d.toISOString().slice(0, 10);
+}
 
 /**
  * The set of credential slots this UI exposes. Keys must match the
@@ -261,6 +278,7 @@ function CredentialsList({ onLocked }: { onLocked: () => void }) {
 
   const setKeys = new Set(secrets.map((s) => s.key));
   const updatedAtMap = new Map(secrets.map((s) => [s.key, s.updatedAt]));
+  const expiresAtMap = new Map(secrets.map((s) => [s.key, s.expiresAt]));
 
   return (
     <div className="space-y-4">
@@ -271,6 +289,7 @@ function CredentialsList({ onLocked }: { onLocked: () => void }) {
           slot={slot}
           isSet={setKeys.has(slot.key)}
           updatedAt={updatedAtMap.get(slot.key)}
+          expiresAt={expiresAtMap.get(slot.key) ?? null}
           onChange={refresh}
           onLocked={onLocked}
         />
@@ -283,12 +302,14 @@ function SecretSlot({
   slot,
   isSet,
   updatedAt,
+  expiresAt,
   onChange,
   onLocked,
 }: {
   slot: { key: string; label: string; hint: string };
   isSet: boolean;
   updatedAt: string | undefined;
+  expiresAt: string | null;
   onChange: () => void;
   /** Called when a write returns 401 — tenant got locked between the
    *  page load and this action (K-cache expired, user locked in
@@ -296,10 +317,24 @@ function SecretSlot({
    *  unlock prompt instead of leaving the user stuck on an error. */
   onLocked: () => void;
 }) {
+  const tracksExpiry = EXPIRY_TRACKED_KEYS.has(slot.key);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const ref = useRef<HTMLInputElement>(null);
+  const [expiryInput, setExpiryInput] = useState<string>("");
+
+  // When the user opens the edit form for an HL key, seed the date
+  // picker with the existing expires_at (if any) or today+180d as a
+  // sensible default. They can clear it to drop expiry tracking.
+  function startEditing() {
+    if (tracksExpiry) {
+      setExpiryInput(
+        expiresAt ? expiresAt.slice(0, 10) : defaultExpiryDate(),
+      );
+    }
+    setEditing(true);
+  }
 
   function save(e: React.FormEvent) {
     e.preventDefault();
@@ -311,12 +346,16 @@ function SecretSlot({
     setError(null);
     startTransition(async () => {
       try {
+        const body: { value: string; expiresAt?: string | null } = { value };
+        if (tracksExpiry) {
+          body.expiresAt = expiryInput || null;
+        }
         const res = await fetch(
           `/api/tenant/me/secrets/${encodeURIComponent(slot.key)}`,
           {
             method: "PUT",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ value }),
+            body: JSON.stringify(body),
           },
         );
         if (res.status === 401) {
@@ -399,12 +438,28 @@ function SecretSlot({
               Updated {new Date(updatedAt).toLocaleString()}
             </p>
           )}
+          {tracksExpiry && expiresAt && (() => {
+            const b = formatExpiryBadge(expiresAt);
+            const cls =
+              b.tone === "bad"
+                ? "bg-red-500/20 text-red-500"
+                : b.tone === "warn"
+                  ? "bg-amber-500/20 text-amber-500"
+                  : "bg-muted text-muted-foreground";
+            return (
+              <span
+                className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${cls}`}
+              >
+                {b.text}
+              </span>
+            );
+          })()}
         </div>
         {!editing && (
           <div className="flex shrink-0 gap-2">
             <button
               type="button"
-              onClick={() => setEditing(true)}
+              onClick={startEditing}
               disabled={isPending}
               className="rounded border px-3 py-1 text-xs hover:bg-muted disabled:opacity-50"
             >
@@ -434,6 +489,27 @@ function SecretSlot({
             placeholder="Paste value here"
             disabled={isPending}
           />
+          {tracksExpiry && (
+            <div className="flex items-center gap-2">
+              <label
+                className="text-xs text-muted-foreground"
+                htmlFor={`exp-${slot.key}`}
+              >
+                Expires:
+              </label>
+              <input
+                id={`exp-${slot.key}`}
+                type="date"
+                value={expiryInput}
+                onChange={(e) => setExpiryInput(e.target.value)}
+                disabled={isPending}
+                className="rounded border bg-background px-2 py-1 text-xs"
+              />
+              <span className="text-[11px] text-muted-foreground">
+                Empty = no reminders. Default = today + 180 days.
+              </span>
+            </div>
+          )}
           {error && (
             <p className="text-sm text-red-500" role="alert">
               {error}
