@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { useMode, withMode } from "@/lib/use-mode";
 import { Switch } from "@/components/ui/switch";
 
-export function MultiCoinToggle() {
-  const mode = useMode();
+import { type Mode, withMode } from "@/lib/mode";
+
+export function MultiCoinToggle({ mode }: { mode: Mode }) {
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const [isPending, startTransition] = useTransition();
 

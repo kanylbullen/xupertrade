@@ -1,7 +1,12 @@
 import { db, trades, positions, equitySnapshots, strategyConfigs, fundingPayments } from "./db";
 import { desc, eq, and, gte, sql, sum, count } from "drizzle-orm";
 
-export type Mode = "paper" | "testnet" | "mainnet";
+import { type Mode } from "./mode";
+
+// Re-export from the shared mode module so callers can keep importing
+// `Mode` from queries.ts unchanged (Copilot review fix on PR #105 —
+// dedup of inlined Mode type).
+export { type Mode };
 
 // Every query takes `tenantId` as a required parameter. The dashboard
 // connects as the postgres superuser (per the Phase 6c PR δ plan
@@ -15,12 +20,20 @@ export type Mode = "paper" | "testnet" | "mainnet";
 export async function getRecentTrades(
   tenantId: string,
   limit = 50,
-  mode: Mode = "paper",
+  mode?: Mode,
 ) {
+  // `mode` is optional after the sidebar cutover: the Trades page is
+  // mode-agnostic by default ("all modes") and only narrows when the
+  // operator picks a specific mode in the filter pill. The Overview
+  // page still passes a concrete mode (route-bound).
+  const conditions = [eq(trades.tenantId, tenantId)];
+  if (mode !== undefined) {
+    conditions.push(eq(trades.mode, mode));
+  }
   return db
     .select()
     .from(trades)
-    .where(and(eq(trades.tenantId, tenantId), eq(trades.mode, mode)))
+    .where(and(...conditions))
     .orderBy(desc(trades.timestamp))
     .limit(limit);
 }

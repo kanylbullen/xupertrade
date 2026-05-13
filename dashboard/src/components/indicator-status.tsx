@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useMode, withMode } from "@/lib/use-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+
+import { type Mode, withMode } from "@/lib/mode";
 
 type Status = {
   name: string;
@@ -45,8 +46,7 @@ function signalLabel(signal: Status["signal"]): string {
   }
 }
 
-export function IndicatorStatus() {
-  const mode = useMode();
+export function IndicatorStatus({ mode }: { mode: Mode }) {
   const [statuses, setStatuses] = useState<Status[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);

@@ -778,8 +778,12 @@ export default function StrategiesPage() {
         <p className="text-sm text-muted-foreground mt-1">
           Click a strategy below to jump to its details. Leverage and on/off
           controls live on the{" "}
-          <a href="/status" className="underline hover:text-foreground">
-            status page
+          <a href="/options" className="underline hover:text-foreground">
+            options page
+          </a>
+          ; per-bot runtime status lives on{" "}
+          <a href="/settings/bots" className="underline hover:text-foreground">
+            settings → bots
           </a>
           .
         </p>
