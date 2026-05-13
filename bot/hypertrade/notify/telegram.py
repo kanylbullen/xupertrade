@@ -109,9 +109,11 @@ CommandHandler = Callable[[list[str]], Awaitable[str]]
 # 0/1/I/O, 10 chars → 32^10 ≈ 1.1×10^15 keyspace. Must match the
 # alphabet used by `dashboard/src/app/api/tenant/me/telegram/link/route.ts`.
 LINK_CODE_RE = re.compile(r"^[A-HJ-NP-Z2-9]{10}$")
-# Per-chat sliding-window: 5 attempts / 30 min. With 32^10 codespace
-# this is overkill; it just stops a confused legit user from
-# hammering bad codes too.
+# Per-chat fixed-window (INCR + EXPIRE NX, see notify/rate_limit.py):
+# 5 attempts / 30 min. With 32^10 codespace this is overkill; it just
+# stops a confused legit user from hammering bad codes too. Worst case
+# under fixed-window is 2× burst at the boundary (10 attempts in 30s
+# at the window edge) — irrelevant given the keyspace.
 LINK_RATELIMIT_MAX = 5
 LINK_RATELIMIT_WINDOW_S = 30 * 60
 
@@ -450,7 +452,7 @@ class TelegramNotifier:
         cmd = parts[0].split("@")[0].lower()
         args = parts[1:]
 
-        # /link has its own per-chat sliding-window throttle (M-1).
+        # /link has its own per-chat fixed-window throttle (M-1).
         # The legacy global-cooldown bucket is keyed by command name
         # only, so a single brute-forcer would throttle legitimate
         # tenants out of the feature — keep it for everything ELSE
@@ -756,7 +758,7 @@ class TelegramNotifier:
         if chat_id is None:
             return "⚠️ Internal error: missing chat context"
 
-        # Per-chat sliding-window (M-1). Run BEFORE format check so a
+        # Per-chat fixed-window (M-1). Run BEFORE format check so a
         # spam of "/link garbage" still counts toward the limit — we
         # don't want to give attackers a free probe channel by
         # rejecting on format and skipping the counter.
@@ -789,10 +791,10 @@ class TelegramNotifier:
             )
         if len(args) != 1 or not LINK_CODE_RE.match(raw):
             return (
-                "Usage: <code>/link ABCDE12345</code>\n\n"
+                "Usage: <code>/link ABCDE2HJK7</code>\n\n"
                 "Get your 10-character code from the dashboard's "
                 "Settings → Credentials page (case-insensitive, "
-                "characters A-Z and 2-9 minus I/O)."
+                "characters A-Z minus I/O and digits 2-9 — no 0, 1)."
             )
         code = raw
         key = f"tg-link:{code}"

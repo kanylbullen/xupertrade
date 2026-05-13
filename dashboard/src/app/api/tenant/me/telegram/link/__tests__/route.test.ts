@@ -41,11 +41,13 @@ vi.mock("@/lib/db", () => ({
 const redisSet = vi.fn();
 const redisGet = vi.fn();
 const redisTtl = vi.fn();
+const redisDel = vi.fn();
 vi.mock("@/lib/redis", () => ({
   getRedisClient: vi.fn(() => ({
     set: redisSet,
     get: redisGet,
     ttl: redisTtl,
+    del: redisDel,
   })),
 }));
 
@@ -100,6 +102,7 @@ afterEach(() => {
   redisSet.mockReset();
   redisGet.mockReset();
   redisTtl.mockReset();
+  redisDel.mockReset();
   checkRateLimitMock.mockReset();
 });
 
@@ -204,19 +207,22 @@ describe("POST /api/tenant/me/telegram/link", () => {
   });
 
   it("returns existing active code instead of churning Redis keys", async () => {
-    redisGet.mockResolvedValueOnce("OLDCODE2345");
+    // Use a valid Crockford-format code so the format check passes
+    // and the idempotent path returns it as-is (Copilot review fix
+    // on PR #95 — was OLDCODE2345 which contains O, forbidden).
+    redisGet.mockResolvedValueOnce("ABCD2HJK7N");
     redisTtl.mockResolvedValueOnce(300);
 
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).toBe("OLDCODE2345");
+    expect(body.code).toBe("ABCD2HJK7N");
     expect(body.expiresInSeconds).toBe(300);
     expect(redisSet).not.toHaveBeenCalled();
   });
 
   it("mints fresh code if reverse pointer exists but TTL expired", async () => {
-    redisGet.mockResolvedValueOnce("OLDCODE2345");
+    redisGet.mockResolvedValueOnce("ABCD2HJK7N");
     redisTtl.mockResolvedValueOnce(-2);
     redisSet.mockResolvedValueOnce("OK");
     redisSet.mockResolvedValueOnce("OK");
@@ -224,12 +230,32 @@ describe("POST /api/tenant/me/telegram/link", () => {
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).not.toBe("OLDCODE2345");
+    expect(body.code).not.toBe("ABCD2HJK7N");
     expect(body.code).toMatch(CODE_PATTERN);
     expect(redisSet).toHaveBeenCalled();
   });
 
+  it("drops stale legacy 6-digit reverse pointer and mints a fresh code", async () => {
+    // Copilot suppressed-comment fix on PR #95: a stale 6-digit code
+    // left over from before the format change shouldn't be returned
+    // (the bot would reject it and the user would be stuck for 10 min).
+    redisGet.mockResolvedValueOnce("123456"); // legacy 6-digit
+    redisDel.mockResolvedValueOnce(1);
+    redisSet.mockResolvedValueOnce("OK");
+    redisSet.mockResolvedValueOnce("OK");
+
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).toMatch(CODE_PATTERN);
+    expect(body.code).not.toBe("123456");
+    expect(redisDel).toHaveBeenCalled();
+  });
+
   it("returns 429 with Retry-After when mint quota exceeded (M-1)", async () => {
+    // Quota check fires AFTER the existing-code fast-path now (Copilot
+    // review fix on PR #95). Default mock returns null for redisGet
+    // (no existing code), so we proceed to the rate-limit branch.
     checkRateLimitMock.mockResolvedValueOnce({
       allowed: false,
       remaining: 0,
@@ -238,9 +264,20 @@ describe("POST /api/tenant/me/telegram/link", () => {
     const res = await POST(makeReq());
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toBe("1800");
-    // No code minted, no Redis writes.
+    // No code minted, no SET write — the existing-code fast-path
+    // does call GET first but doesn't modify state.
     expect(redisSet).not.toHaveBeenCalled();
-    expect(redisGet).not.toHaveBeenCalled();
+  });
+
+  it("idempotent fast-path does NOT consume mint quota (Copilot review fix)", async () => {
+    // Tenant POSTs while a code already exists → returns the active
+    // code without calling checkRateLimit at all. This avoids 429ing
+    // a polling UI.
+    redisGet.mockResolvedValueOnce("ABCD2HJK7N");
+    redisTtl.mockResolvedValueOnce(300);
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    expect(checkRateLimitMock).not.toHaveBeenCalled();
   });
 
   it("retries on Redis SET NX collision", async () => {

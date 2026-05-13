@@ -60,6 +60,7 @@ const MINT_WINDOW_SECONDS = 3600;
 // alphabet matches the regex /^[A-HJ-NP-Z2-9]{10}$/ — bot's `/link`
 // parser validates with the same regex so codes round-trip.
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CODE_PATTERN = /^[A-HJ-NP-Z2-9]{10}$/;
 
 function makeCode(): string {
   // CSPRNG-backed. Alphabet length is 32 = 2^5, so a byte's low 5
@@ -113,10 +114,34 @@ export async function POST(req: Request): Promise<Response> {
   const redis = getRedisClient();
   const reversePointerKey = `tg-link:tenant:${tenant.id}`;
 
-  // Per-tenant mint rate-limit (M-1). Defence-in-depth against a
-  // compromised dashboard session minting unbounded codes to feed a
-  // brute-force run against /link — even with the 32^10 keyspace
-  // making brute force infeasible, key churn is still abuse.
+  // Idempotent fast-path FIRST (Copilot review fix on PR #95): if the
+  // tenant already has an active code in the new format, return it
+  // without consuming mint quota. Repeated POSTs from a polling UI
+  // shouldn't 429.
+  const existingCode = await redis.get(reversePointerKey);
+  if (existingCode !== null && CODE_PATTERN.test(existingCode)) {
+    const ttl = await redis.ttl(reversePointerKey);
+    if (ttl > 0) {
+      return Response.json({
+        code: existingCode,
+        expiresInSeconds: ttl,
+      });
+    }
+    // ttl ≤ 0 means the key is expiring at this moment (race) —
+    // fall through to mint a fresh code.
+  } else if (existingCode !== null) {
+    // Stale legacy 6-digit code (or some other non-Crockford value)
+    // from before the PR #95 format change. Drop it so we mint a
+    // fresh one. The bot would have rejected it anyway.
+    await redis.del(reversePointerKey);
+  }
+
+  // Per-tenant mint rate-limit (M-1). Only applies when we're
+  // actually minting a new code (the idempotent fast-path above
+  // returns first). Defence-in-depth against a compromised
+  // dashboard session minting unbounded codes to feed a brute-force
+  // run against /link — even with the 32^10 keyspace making brute
+  // force infeasible, key churn is still abuse.
   const limit = await checkRateLimit(
     "tg-link-mint",
     tenant.id,
@@ -131,22 +156,6 @@ export async function POST(req: Request): Promise<Response> {
         headers: { "Retry-After": String(limit.resetInSeconds) },
       },
     );
-  }
-
-  // If this tenant already has an active code, return it as-is
-  // along with the remaining TTL — prevents a spam-POST from
-  // churning Redis keys and gives the UI an idempotent feel.
-  const existingCode = await redis.get(reversePointerKey);
-  if (existingCode !== null) {
-    const ttl = await redis.ttl(reversePointerKey);
-    if (ttl > 0) {
-      return Response.json({
-        code: existingCode,
-        expiresInSeconds: ttl,
-      });
-    }
-    // ttl ≤ 0 means the key is expiring at this moment (race) —
-    // fall through to mint a fresh code.
   }
 
   // Retry on collision (probability ~ 32^-10 per attempt — basically
