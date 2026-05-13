@@ -141,7 +141,7 @@ append daily.
 
 Add a `_poll_vaults` method to `runner.py` that runs daily (24h cooldown
 in tick loop). Mirrors the `_poll_funding` pattern. Lives in the
-testnet bot (which has Telegram).
+mainnet bot (vaults are a mainnet-only concept; moved from testnet 2026-05-13).
 
 Pseudo:
 ```python

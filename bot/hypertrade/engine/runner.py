@@ -341,19 +341,21 @@ class EngineRunner:
                 logger.exception("Trade-rate alarm check failed")
             self._last_rate_check = time.time()
 
-        # Vault scanner: daily poll, owned by the testnet bot only. Both
-        # paper and testnet share the same Postgres in the default Compose
-        # setup, so running it in every container would duplicate the
-        # 14 MB catalogue fetch and risk emitting two `vault.qualified`
-        # alerts for the same state change. Telegram also lives on the
-        # testnet bot, so this puts the alerts at the same source as the
-        # poll. The /vaults dashboard reads from the shared DB regardless
-        # of which mode the user is browsing.
+        # Vault scanner: daily poll, owned by the mainnet bot only. All
+        # bot containers share the same Postgres, so running it in every
+        # container would duplicate the 14 MB catalogue fetch and risk
+        # emitting two `vault.qualified` alerts for the same state
+        # change. Vaults are an on-chain mainnet concept (testnet/paper
+        # have no real vaults) and the /vaults dashboard is pinned to
+        # mainnet, so mainnet is the natural single owner. The published
+        # event's `mode` field tags Telegram messages as MAINNET via
+        # EventBus.publish. The /vaults dashboard reads from the shared
+        # DB so the row is visible from any mode the user browses.
         # On failure we DON'T advance _last_vault_poll, so a transient HL
         # outage retries on the next tick instead of waiting a full day.
         if (
             self.repo
-            and settings.exchange_mode == "testnet"
+            and settings.exchange_mode == "mainnet"
             and (time.time() - self._last_vault_poll) > 24 * 3600
         ):
             try:
