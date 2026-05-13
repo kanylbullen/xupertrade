@@ -5,6 +5,8 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { TelegramLinkCard } from "@/components/telegram-link-card";
 import { UnlockModal } from "@/components/unlock-modal";
 
+import { formatExpiryBadge } from "./expiry";
+
 type Me = {
   passphraseSet: boolean;
   unlocked: boolean;
@@ -25,19 +27,6 @@ function defaultExpiryDate(): string {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() + 180);
   return d.toISOString().slice(0, 10);
-}
-
-function formatExpiryBadge(iso: string): { text: string; tone: "ok" | "warn" | "bad" } {
-  const expires = new Date(iso);
-  const now = new Date();
-  const days = Math.round((expires.getTime() - now.getTime()) / 86400000);
-  if (days < 0) {
-    return { text: `Expired ${-days}d ago`, tone: "bad" };
-  }
-  return {
-    text: `Expires ${expires.toISOString().slice(0, 10)} (${days}d)`,
-    tone: days <= 14 ? "warn" : "ok",
-  };
 }
 
 /**
@@ -357,9 +346,9 @@ function SecretSlot({
     setError(null);
     startTransition(async () => {
       try {
-        const body: { value: string; expires_at?: string | null } = { value };
+        const body: { value: string; expiresAt?: string | null } = { value };
         if (tracksExpiry) {
-          body.expires_at = expiryInput || null;
+          body.expiresAt = expiryInput || null;
         }
         const res = await fetch(
           `/api/tenant/me/secrets/${encodeURIComponent(slot.key)}`,

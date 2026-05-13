@@ -78,7 +78,7 @@ function parseExpiresAt(raw: unknown): Date | null {
   if (raw === null || raw === undefined || raw === "") return null;
   if (typeof raw !== "string") {
     throw Response.json(
-      { error: "expires_at must be a string (YYYY-MM-DD) or null" },
+      { error: "expiresAt must be a string (YYYY-MM-DD) or null" },
       { status: 400 },
     );
   }
@@ -88,7 +88,7 @@ function parseExpiresAt(raw: unknown): Date | null {
   const parsed = new Date(dateOnly ? `${raw}T00:00:00Z` : raw);
   if (Number.isNaN(parsed.getTime())) {
     throw Response.json(
-      { error: "expires_at is not a valid date" },
+      { error: "expiresAt is not a valid date" },
       { status: 400 },
     );
   }
@@ -144,12 +144,12 @@ export async function PUT(req: Request, ctx: Params): Promise<Response> {
     );
   }
 
-  // expires_at is only meaningful for the two HL private-key rows.
+  // expiresAt is only meaningful for the two HL private-key rows.
   // For other keys we silently drop any client-supplied value so the
   // UI can send the field unconditionally without us 400-ing.
   let expiresAt: Date | null = null;
   if (EXPIRY_TRACKED_KEYS.has(key)) {
-    const rawExp = (body as { expires_at?: unknown })?.expires_at;
+    const rawExp = (body as { expiresAt?: unknown })?.expiresAt;
     try {
       expiresAt = parseExpiresAt(rawExp);
     } catch (err) {
@@ -198,7 +198,7 @@ export async function PUT(req: Request, ctx: Params): Promise<Response> {
     key,
     set: true,
     ...(EXPIRY_TRACKED_KEYS.has(key)
-      ? { expires_at: expiresAt ? expiresAt.toISOString() : null }
+      ? { expiresAt: expiresAt ? expiresAt.toISOString() : null }
       : {}),
   });
 }
