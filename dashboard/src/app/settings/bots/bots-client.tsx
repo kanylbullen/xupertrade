@@ -374,7 +374,9 @@ function BotCard({
           {error}
         </p>
       )}
-      {bot && bot.isRunning && <BotRuntime mode={mode} />}
+      {bot && bot.isRunning && (
+        <BotRuntime mode={mode} startedAt={bot.lastStartedAt} />
+      )}
     </div>
   );
 }
@@ -396,10 +398,34 @@ type RuntimeState = {
  * endpoints to surface verbatim — TODO below; the dashboard renders
  * what it can today and adds them once exposed.
  */
-function BotRuntime({ mode }: { mode: Mode }) {
+/**
+ * How long after `startedAt` we treat 5xx / network errors as "still
+ * booting" rather than a hard failure. Bot startup includes HL SDK
+ * init (meta + spot_meta fetches with retry, can take 5-30s on a
+ * good day, 60s+ during HL hiccups), aiohttp listen-bind, and Redis/
+ * Postgres connection pool warm-up. After the grace window we revert
+ * to the verbose "HTTP 502" message so a chronically-failing bot
+ * gets surfaced instead of stuck on "Starting…" forever.
+ */
+const STARTUP_GRACE_MS = 90_000;
+
+function BotRuntime({
+  mode,
+  startedAt,
+}: {
+  mode: Mode;
+  startedAt: string | null;
+}) {
   const [state, setState] = useState<RuntimeState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastFetchAt, setLastFetchAt] = useState<Date | null>(null);
+  // Re-render every 5s so the grace window flips to the verbose
+  // error message at the right time without waiting for a fetch.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 5_000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -438,9 +464,25 @@ function BotRuntime({ mode }: { mode: Mode }) {
   }, [mode]);
 
   if (error) {
+    // First N seconds after a Start click, the bot's API isn't bound
+    // yet (Python startup + HL SDK init). 502 from the dashboard
+    // proxy is normal here — render "Starting…" so the operator
+    // doesn't think something's broken on their first deploy.
+    // Outside the grace window, surface the verbose error so a
+    // chronically-failing bot is visible rather than masked.
+    const startedAtMs = startedAt ? new Date(startedAt).getTime() : 0;
+    const inGrace =
+      startedAtMs > 0 && Date.now() - startedAtMs < STARTUP_GRACE_MS;
     return (
       <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
-        Runtime status unavailable: {error}
+        {inGrace ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-yellow-400" />
+            Starting…
+          </span>
+        ) : (
+          <>Runtime status unavailable: {error}</>
+        )}
       </div>
     );
   }
