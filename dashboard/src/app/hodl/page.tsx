@@ -1,4 +1,4 @@
-export const dynamic = "force-dynamic";
+export const revalidate = 60;
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -82,10 +82,15 @@ export default async function HodlPage() {
   let purchases: Purchase[] = [];
   let botApiOnline = false;
   if (botApiUrl) try {
+    const fetchOpts = {
+      next: { revalidate: 60 },
+      headers: authHeaders,
+      signal: AbortSignal.timeout(8000),
+    } as const;
     const [signalsRes, levelsRes, purchasesRes] = await Promise.all([
-      fetch(`${botApiUrl}/api/hodl/signals`, { cache: "no-store", headers: authHeaders }),
-      fetch(`${botApiUrl}/api/hodl/levels`, { cache: "no-store", headers: authHeaders }),
-      fetch(`${botApiUrl}/api/hodl/purchases?limit=20`, { cache: "no-store", headers: authHeaders }),
+      fetch(`${botApiUrl}/api/hodl/signals`, fetchOpts),
+      fetch(`${botApiUrl}/api/hodl/levels`, fetchOpts),
+      fetch(`${botApiUrl}/api/hodl/purchases?limit=20`, fetchOpts),
     ]);
     if (signalsRes.ok) {
       const data = (await signalsRes.json()) as { signals: SignalState[] };
