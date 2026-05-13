@@ -79,11 +79,16 @@ export async function getAuthConfig(
   ];
   const vals = await client.mget(...keysArr);
 
-  const envMode = process.env.AUTH_MODE || "";
-  const envIssuer = process.env.OIDC_ISSUER || "";
-  const envClientId = process.env.OIDC_CLIENT_ID || "";
-  const envClientSecret = process.env.OIDC_CLIENT_SECRET || "";
-  const envScopes = process.env.OIDC_SCOPES || "";
+  // Trim env values to match `lib/phase-sync.ts` which trims before
+  // writing to Redis. Without this, an env with leading/trailing
+  // whitespace would land in Redis trimmed but env-first reads would
+  // see the raw value, recreating the cross-path drift the sync was
+  // built to eliminate (Copilot review fix on PR #104).
+  const envMode = (process.env.AUTH_MODE || "").trim();
+  const envIssuer = (process.env.OIDC_ISSUER || "").trim();
+  const envClientId = (process.env.OIDC_CLIENT_ID || "").trim();
+  const envClientSecret = (process.env.OIDC_CLIENT_SECRET || "").trim();
+  const envScopes = (process.env.OIDC_SCOPES || "").trim();
 
   const mode = envMode || vals[0] || "disabled";
   return {

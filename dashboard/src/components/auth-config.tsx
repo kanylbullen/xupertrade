@@ -13,6 +13,10 @@ type Config = {
   oidc_issuer: string;
   oidc_client_id: string;
   oidc_scopes: string;
+  // True when `src/instrumentation.ts` is overwriting these keys from
+  // Phase env at every container start — any edits saved here will be
+  // reverted on next restart. Drives the warning banner below.
+  phase_managed?: boolean;
 };
 
 export function AuthConfig() {
@@ -127,6 +131,16 @@ export function AuthConfig() {
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
+        {cfg.phase_managed && (
+          <div
+            role="alert"
+            data-testid="phase-managed-banner"
+            className="rounded-md border border-yellow-500/50 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200"
+          >
+            Auth config is sourced from Phase secrets at container
+            startup; edits here will be overwritten on next restart.
+          </div>
+        )}
         <div className="space-y-2">
           <label className="text-sm font-medium">Mode</label>
           <div className="flex gap-2">
