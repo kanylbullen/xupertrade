@@ -625,6 +625,29 @@ class HyperLiquidExchange(Exchange):
             logger.exception("Failed to fetch user funding history")
             return []
 
+    async def fetch_user_fills(
+        self, address: str | None = None, since_ms: int | None = None,
+    ) -> list[dict]:
+        """Return raw HL fill records for the trading account.
+
+        When `since_ms` is provided, uses the SDK's time-bounded
+        `user_fills_by_time(address, start_time)`. Without it, returns
+        the recent default window from `user_fills(address)`. Empty
+        list on any error so the reconcile caller can continue.
+        """
+        addr = (address or self._account_address)
+        try:
+            if since_ms is not None:
+                return await self._run_with_retry(
+                    self._info.user_fills_by_time, addr, int(since_ms),
+                ) or []
+            return await self._run_with_retry(
+                self._info.user_fills, addr,
+            ) or []
+        except Exception:
+            logger.exception("Failed to fetch user fills for %s", addr)
+            return []
+
     async def get_current_price(self, symbol: str) -> float:
         try:
             mids = await self._run_with_retry(self._info.all_mids)

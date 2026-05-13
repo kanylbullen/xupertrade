@@ -210,7 +210,42 @@ function BotCard({
   onLocked: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [reconcileMsg, setReconcileMsg] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  function reconcile() {
+    if (!bot) return;
+    setError(null);
+    setReconcileMsg(null);
+    startTransition(async () => {
+      try {
+        const res = await fetch(
+          `/api/tenant/me/bots/${bot.id}/reconcile`,
+          { method: "POST" },
+        );
+        if (res.status === 401) {
+          onLocked();
+          return;
+        }
+        const data = (await res.json().catch(() => null)) as
+          | { examined?: number; inserted?: number; skipped?: number; error?: string }
+          | null;
+        if (!res.ok) {
+          setError(data?.error ?? `Failed (${res.status})`);
+          return;
+        }
+        setReconcileMsg(
+          `Reconciled: ${data?.inserted ?? 0} inserted, ${data?.skipped ?? 0} skipped (examined ${data?.examined ?? 0})`,
+        );
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? `Network error: ${err.message}`
+            : "Network error — check your connection and try again.",
+        );
+      }
+    });
+  }
 
   function call(method: "POST" | "DELETE", url: string) {
     setError(null);
@@ -340,6 +375,17 @@ function BotCard({
           {bot && bot.isRunning && (
             <button
               type="button"
+              onClick={reconcile}
+              disabled={isPending}
+              title="Backfill missing trade rows from HyperLiquid fill history"
+              className="rounded border px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
+            >
+              {isPending ? "Working…" : "Reconcile fills"}
+            </button>
+          )}
+          {bot && bot.isRunning && (
+            <button
+              type="button"
               onClick={() =>
                 call("POST", `/api/tenant/me/bots/${bot.id}/stop`)
               }
@@ -372,6 +418,11 @@ function BotCard({
       {error && (
         <p className="mt-3 text-sm text-red-500" role="alert">
           {error}
+        </p>
+      )}
+      {reconcileMsg && (
+        <p className="mt-3 text-sm text-muted-foreground" role="status">
+          {reconcileMsg}
         </p>
       )}
       {bot && bot.isRunning && (
