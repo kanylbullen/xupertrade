@@ -125,20 +125,20 @@ class EngineRunner:
         self._pushed_leverage: dict[str, int] = {}
 
     async def startup(self) -> None:
-        """Restore in-memory strategy state from DB after a restart, then
-        kick off a background re-push of the persisted Caddy TLS config
-        so HTTPS comes back up without requiring a manual click on the
-        Options page. The TLS push is deliberately fire-and-forget so a
-        slow/unreachable Caddy can't delay engine startup.
+        """Restore in-memory strategy state from DB after a restart.
+
+        NOTE: PR 4c removed `_kick_caddy_tls_restore` (the dashboard now
+        owns Caddy admin via `dashboard/src/lib/caddy-admin.ts`). The
+        callers in this method were accidentally left behind and crashed
+        every tenant-bot at startup with `AttributeError`. Removed in
+        a follow-up hotfix.
         """
         if not self.repo:
-            self._kick_caddy_tls_restore()
             return
         try:
             positions = await self.repo.get_open_positions()
         except Exception:
             logger.exception("Failed to fetch open positions for state restoration")
-            self._kick_caddy_tls_restore()
             return
 
         import json
