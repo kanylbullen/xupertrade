@@ -1,7 +1,12 @@
 import { db, trades, positions, equitySnapshots, strategyConfigs, fundingPayments } from "./db";
 import { desc, eq, and, gte, sql, sum, count } from "drizzle-orm";
 
-export type Mode = "paper" | "testnet" | "mainnet";
+import { type Mode } from "./mode";
+
+// Re-export from the shared mode module so callers can keep importing
+// `Mode` from queries.ts unchanged (Copilot review fix on PR #105 —
+// dedup of inlined Mode type).
+export { type Mode };
 
 // Every query takes `tenantId` as a required parameter. The dashboard
 // connects as the postgres superuser (per the Phase 6c PR δ plan

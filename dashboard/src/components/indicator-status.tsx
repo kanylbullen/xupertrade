@@ -4,12 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-type Mode = "paper" | "testnet" | "mainnet";
-
-function withMode(path: string, mode: Mode): string {
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}mode=${mode}`;
-}
+import { type Mode, withMode } from "@/lib/mode";
 
 type Status = {
   name: string;

@@ -3,12 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import { Switch } from "@/components/ui/switch";
 
-type Mode = "paper" | "testnet" | "mainnet";
-
-function withMode(path: string, mode: Mode): string {
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}mode=${mode}`;
-}
+import { type Mode, withMode } from "@/lib/mode";
 
 export function StrategyToggle({ name, mode }: { name: string; mode: Mode }) {
   const [enabled, setEnabled] = useState<boolean | null>(null);

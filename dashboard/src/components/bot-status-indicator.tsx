@@ -3,13 +3,9 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 
-type Mode = "paper" | "testnet" | "mainnet";
-type BotState = "loading" | "running" | "paused" | "offline";
+import { type Mode, withMode } from "@/lib/mode";
 
-function withMode(path: string, mode: Mode): string {
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}mode=${mode}`;
-}
+type BotState = "loading" | "running" | "paused" | "offline";
 
 /**
  * Tiny status pill. Source of `mode`:

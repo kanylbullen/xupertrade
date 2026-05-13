@@ -2,12 +2,7 @@
 
 import { useEffect, useState, useTransition } from "react";
 
-type Mode = "paper" | "testnet" | "mainnet";
-
-function withMode(path: string, mode: Mode): string {
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}mode=${mode}`;
-}
+import { type Mode, withMode } from "@/lib/mode";
 
 type Info = { default: number; current: number; overridden: boolean };
 

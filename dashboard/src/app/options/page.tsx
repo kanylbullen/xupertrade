@@ -5,6 +5,7 @@ import { Separator } from "@/components/ui/separator";
 import { StrategyToggle } from "@/components/strategy-toggle";
 import { LeverageInput } from "@/components/leverage-input";
 import { MultiCoinToggle } from "@/components/multi-coin-toggle";
+import { OptionsModePicker } from "@/components/options-mode-picker";
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
@@ -50,10 +51,22 @@ export default async function OptionsPage({
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Options</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Trading rules, strategy controls, and leverage settings.
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold">Options</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Trading rules, strategy controls, and leverage settings.
+              <span className="ml-1 text-xs">
+                (Per-bot — picker on the right.)
+              </span>
+            </p>
+          </div>
+          {/* Mode picker (Copilot review fix on PR #105 — Options
+              page is per-bot but the sidebar nav has no global mode
+              toggle, so without this the operator silently lands on
+              paper-mode controls). Sticky in localStorage. */}
+          <OptionsModePicker active={mode} />
+        </div>
       </div>
 
       {/* Trading rules */}
