@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchAuthConfig } from "@/lib/auth";
+import { isPhaseManagingAuth } from "@/lib/phase-sync";
 
 export const dynamic = "force-dynamic";
 
@@ -23,5 +24,9 @@ export async function GET() {
     oidc_issuer: cfg.oidc_issuer,
     oidc_client_id: cfg.oidc_client_id,
     oidc_scopes: cfg.oidc_scopes,
+    // When true, `src/instrumentation.ts` overwrites these Redis keys
+    // from Phase env at every container start — UI edits will not
+    // survive a restart. Drives the banner in `auth-config.tsx`.
+    phase_managed: isPhaseManagingAuth(),
   });
 }

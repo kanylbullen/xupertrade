@@ -76,6 +76,19 @@ services:
       # resolves to the container hostname — breaks OIDC).
       PUBLIC_URL: "${PUBLIC_URL:-${DASHBOARD_URL:-http://localhost:3000}}"
       API_KEY: "${API_KEY:-}"
+      # Phase-managed auth config (PR feat/phase-auth-autosync).
+      # `phase run` injects these on the host before `docker compose up`;
+      # the dashboard's `src/instrumentation.ts` hook mirrors any
+      # non-empty value into Redis at startup so all auth-config
+      # readers (UI, OIDC callback, /api/auth/login) stay in lockstep
+      # with Phase. Defaulted to empty so a dashboard launched without
+      # Phase (local dev, CI) still boots — the sync just skips
+      # whichever keys are empty.
+      OIDC_ISSUER: "${OIDC_ISSUER:-}"
+      OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:-}"
+      OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
+      OIDC_SCOPES: "${OIDC_SCOPES:-}"
+      AUTH_MODE: "${AUTH_MODE:-}"
       # Multi-tenancy Phase 3a: dashboard creates per-tenant bot
       # containers via the host docker daemon. The shared network
       # name lets bots reach postgres + redis on the internal docker
