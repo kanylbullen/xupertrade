@@ -74,6 +74,7 @@ export function UserMenu() {
       <Menu.Trigger
         className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-sm font-semibold text-foreground hover:bg-muted/70 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
         title={label}
+        aria-label={`User menu — ${label}`}
       >
         {initial}
       </Menu.Trigger>
@@ -116,7 +117,7 @@ export function UserMenu() {
                   router.refresh();
                 })
               }
-              className="block w-full text-left px-4 py-2 text-sm hover:bg-muted data-[highlighted]:bg-muted transition-colors outline-none cursor-pointer disabled:opacity-50"
+              className="block w-full text-left px-4 py-2 text-sm hover:bg-muted data-[highlighted]:bg-muted transition-colors outline-none cursor-pointer aria-disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:pointer-events-none data-[disabled]:opacity-50 data-[disabled]:cursor-not-allowed"
             >
               {isPending ? "Signing out…" : "Sign out"}
             </Menu.Item>

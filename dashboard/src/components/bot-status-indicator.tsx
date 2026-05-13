@@ -77,9 +77,10 @@ export function BotStatusIndicator({
     const { dotClass, title } = dotPresentation(state, mode);
     return (
       <span
-        className={`inline-flex h-2 w-2 shrink-0 rounded-full ${dotClass}`}
-        title={title}
+        role="img"
         aria-label={title}
+        title={title}
+        className={`inline-flex h-2 w-2 shrink-0 rounded-full ${dotClass}`}
       />
     );
   }
