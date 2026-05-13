@@ -121,8 +121,16 @@ describe("POST /api/tenant/me/bots/[id]/stop", () => {
     const res = await POST(makeReq(), makeCtx());
     expect(res.status).toBe(200);
     expect(mockedStopBot).toHaveBeenCalledWith("deadbeef");
+    // Both columns must be cleared: containerName is what
+    // `getBotApiUrl` keys off for routing, so a stale value would
+    // make a stopped bot look reachable. (Live incident 2026-05-13
+    // motivated the symmetric Start/Stop persist contract.)
     expect(updateChain.set).toHaveBeenCalledWith(
-      expect.objectContaining({ isRunning: false, containerId: null }),
+      expect.objectContaining({
+        isRunning: false,
+        containerId: null,
+        containerName: null,
+      }),
     );
   });
 

@@ -68,6 +68,11 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     .set({
       isRunning: false,
       containerId: null,
+      // Clear container_name too — the container is gone after
+      // stopAndRemove(), so the routing target is no longer valid.
+      // Keeping a stale name here would let `getBotApiUrl` resolve to
+      // a hostname that no longer exists, masking real failures.
+      containerName: null,
       lastStoppedAt: sql`now()`,
     })
     .where(
