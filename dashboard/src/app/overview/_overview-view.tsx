@@ -229,7 +229,7 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
 
       <div className="space-y-3">
         <h2 className="text-lg font-semibold">Strategy Signal Status</h2>
-        <IndicatorStatus />
+        <IndicatorStatus mode={mode} />
       </div>
 
       <Card>

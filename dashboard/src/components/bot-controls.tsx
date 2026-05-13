@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { useMode, withMode } from "@/lib/use-mode";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +16,13 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 
+type Mode = "paper" | "testnet" | "mainnet";
+
+function withMode(path: string, mode: Mode): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}mode=${mode}`;
+}
+
 type State = {
   paused: boolean;
   disabled_strategies: string[];
@@ -24,8 +30,7 @@ type State = {
   equity: number;
 };
 
-export function BotControls() {
-  const mode = useMode();
+export function BotControls({ mode }: { mode: Mode }) {
   const [state, setState] = useState<State | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();

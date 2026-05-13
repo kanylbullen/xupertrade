@@ -62,15 +62,12 @@ type MyPositionsResponse = {
   total_equity_usd: number;
 };
 
-export default async function VaultsPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ mode?: string }>;
-}) {
-  const params = await searchParams;
-  const rawMode = params.mode ?? "paper";
-  const mode: "paper" | "testnet" | "mainnet" =
-    rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
+export default async function VaultsPage() {
+  // Vaults are an on-chain mainnet concept — testnet/paper bots have
+  // nothing to scan (Decision 2 of the sidebar nav refactor). Page is
+  // pinned to mainnet; the existing "bot offline" empty state renders
+  // when no mainnet bot is running.
+  const mode = "mainnet" as const;
 
   const tenant = await requireTenantServer();
   const botRows = await db

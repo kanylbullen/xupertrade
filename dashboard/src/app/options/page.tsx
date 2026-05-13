@@ -71,7 +71,7 @@ export default async function OptionsPage({
                 Prevents compounding exposure and conflicting long/short positions.
               </p>
             </div>
-            <MultiCoinToggle />
+            <MultiCoinToggle mode={mode} />
           </div>
         </CardContent>
       </Card>
@@ -117,8 +117,8 @@ export default async function OptionsPage({
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <LeverageInput name={s.name} />
-                  <StrategyToggle name={s.name} />
+                  <LeverageInput name={s.name} mode={mode} />
+                  <StrategyToggle name={s.name} mode={mode} />
                 </div>
               </div>
             ))}

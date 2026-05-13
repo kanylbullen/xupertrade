@@ -26,7 +26,7 @@ const DEFAULT_AUTH_MODE = "disabled";
  * Renders nothing in disabled-auth mode (no identity to show, no
  * sign-out to do).
  */
-export function UserMenu({ suffix }: { suffix: string }) {
+export function UserMenu() {
   const router = useRouter();
   const [me, setMe] = useState<Me | null>(null);
   const [authMode, setAuthMode] = useState<string>(DEFAULT_AUTH_MODE);
@@ -126,7 +126,7 @@ export function UserMenu({ suffix }: { suffix: string }) {
             Bots
           </Link>
           <Link
-            href={`/options${suffix}`}
+            href="/options"
             className="block px-4 py-2 text-sm hover:bg-muted transition-colors"
             onClick={() => setOpen(false)}
           >

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupLabel,
   SidebarHeader,
@@ -13,25 +14,22 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { BotStatusIndicator } from "@/components/bot-status-indicator";
-import { useMode } from "@/lib/use-mode";
+import { UserMenu } from "@/components/user-menu";
 
 /**
- * Dashboard sidebar — PR A of the nav refactor. Renders **alongside**
- * the existing top-bar `<Nav />` for one PR cycle; PR C removes Nav
- * and this becomes the sole navigation surface.
+ * Dashboard sidebar — sole nav surface after the cutover (PR B + C of
+ * the nav refactor merged into one). The top-bar `<Nav />` and
+ * `<ModeSwitch />` are gone; mode is route-bound on the Overview only,
+ * mode-agnostic everywhere else.
  *
- * Layout per the plan:
- * - Header: brand + BotStatusIndicator (mode-aware via useMode — for
- *   PR A this still tracks `?mode=` since `use-mode.ts` is untouched;
- *   PR B/C rewire it to read the route).
+ * Layout:
+ * - Header: brand + BotStatusIndicator (reads `/overview/<mode>` from
+ *   the pathname; defaults to testnet on mode-agnostic routes).
  * - Overview group: 3 mode-bound links → /overview/{paper,testnet,mainnet}.
- * - Pages group:
- *     - Trades, Strategies: propagate the active `?mode=` until PR B
- *       rewires them to be mode-agnostic. Without this, clicking the
- *       sidebar link from `/?mode=testnet` would silently reset to
- *       paper. Copilot review fix on PR #103.
- *     - HODL, Vaults: pinned to `?mode=mainnet` (Decision 2 — they
- *       only operate on the mainnet bot).
+ * - Pages group: bare paths (no `?mode=`) — Trades is mode-agnostic
+ *   with its own filter pill, Strategies is hardcoded descriptive
+ *   cards, HODL + Vaults are mainnet-only by design.
+ * - Footer: `<UserMenu />` — Credentials / Bots / Settings / Sign out.
  */
 
 const overviewModes = [
@@ -40,18 +38,17 @@ const overviewModes = [
   { href: "/overview/mainnet", label: "Mainnet" },
 ] as const;
 
-const transitionalPageLinks = [
-  { base: "/trades", label: "Trades", pinMainnet: false },
-  { base: "/strategies", label: "Strategies", pinMainnet: false },
-  { base: "/hodl", label: "HODL", pinMainnet: true },
-  { base: "/vaults", label: "Vaults", pinMainnet: true },
+const pageLinks = [
+  { href: "/trades", label: "Trades" },
+  { href: "/strategies", label: "Strategies" },
+  { href: "/hodl", label: "HODL" },
+  { href: "/vaults", label: "Vaults" },
 ] as const;
 
 export function AppSidebar() {
   const pathname = usePathname();
-  const activeMode = useMode();
 
-  // Mirrors `nav.tsx:29` — public pages (login) hide nav chrome.
+  // Mirrors the deleted `nav.tsx:29` — public pages (login) hide nav chrome.
   if (pathname === "/login") return null;
 
   return (
@@ -84,26 +81,25 @@ export function AppSidebar() {
         <SidebarGroup>
           <SidebarGroupLabel>Pages</SidebarGroupLabel>
           <SidebarMenu>
-            {transitionalPageLinks.map((link) => {
-              const mode = link.pinMainnet ? "mainnet" : activeMode;
-              const href = `${link.base}?mode=${mode}`;
-              return (
-                <SidebarMenuItem key={link.base}>
-                  <SidebarMenuButton
-                    isActive={pathname === link.base}
-                    tooltip={link.label}
-                    render={
-                      <Link href={href}>
-                        <span>{link.label}</span>
-                      </Link>
-                    }
-                  />
-                </SidebarMenuItem>
-              );
-            })}
+            {pageLinks.map((link) => (
+              <SidebarMenuItem key={link.href}>
+                <SidebarMenuButton
+                  isActive={pathname === link.href}
+                  tooltip={link.label}
+                  render={
+                    <Link href={link.href}>
+                      <span>{link.label}</span>
+                    </Link>
+                  }
+                />
+              </SidebarMenuItem>
+            ))}
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>
+      <SidebarFooter>
+        <UserMenu />
+      </SidebarFooter>
     </Sidebar>
   );
 }

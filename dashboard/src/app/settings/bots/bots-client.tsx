@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, useTransition } from "react";
 
 import { UnlockModal } from "@/components/unlock-modal";
+import { LiveLog } from "@/components/live-log";
 
 const MODES = ["paper", "testnet", "mainnet"] as const;
 type Mode = (typeof MODES)[number];
@@ -85,7 +86,36 @@ export function BotsClient() {
           Go to credentials
         </Link>
       </p>
+      {/* Tenant-wide live event stream — was previously the LiveLog
+          on the retired /status page (Decision 3 of the sidebar nav
+          refactor). One panel because the underlying Redis pub/sub
+          is tenant-wide, not per-bot. Collapsed by default to keep
+          the page calm; expanding it kicks off the SSE connection. */}
+      <RecentEventsPanel />
     </div>
+  );
+}
+
+function RecentEventsPanel() {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="rounded-lg border bg-card"
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+    >
+      <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium">
+        Recent events {open ? "▾" : "▸"}
+      </summary>
+      <div className="border-t p-4">
+        {open ? (
+          <LiveLog />
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Expand to start streaming live trade / heartbeat / signal events.
+          </p>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -344,6 +374,126 @@ function BotCard({
           {error}
         </p>
       )}
+      {bot && bot.isRunning && <BotRuntime mode={mode} />}
+    </div>
+  );
+}
+
+type RuntimeState = {
+  paused: boolean;
+  disabled_strategies: string[];
+  open_positions: number;
+  equity: number;
+};
+
+/**
+ * Per-bot runtime stats — heartbeat / paused / open positions /
+ * equity. Replaces what used to live on the retired `/status` page
+ * (Decision 3 of the sidebar nav refactor).
+ *
+ * Source: `/api/control/state?mode=<mode>` proxies to the running
+ * bot. Heartbeat age and last-trade-time would need new bot-side
+ * endpoints to surface verbatim — TODO below; the dashboard renders
+ * what it can today and adds them once exposed.
+ */
+function BotRuntime({ mode }: { mode: Mode }) {
+  const [state, setState] = useState<RuntimeState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [lastFetchAt, setLastFetchAt] = useState<Date | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch(
+          `/api/control/state?mode=${mode}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) {
+          if (!cancelled) {
+            setError(`HTTP ${res.status}`);
+            setState(null);
+          }
+          return;
+        }
+        const data = (await res.json()) as RuntimeState;
+        if (!cancelled) {
+          setState(data);
+          setError(null);
+          setLastFetchAt(new Date());
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "fetch failed");
+          setState(null);
+        }
+      }
+    }
+    load();
+    const t = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [mode]);
+
+  if (error) {
+    return (
+      <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+        Runtime status unavailable: {error}
+      </div>
+    );
+  }
+  if (!state) {
+    return (
+      <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+        Loading runtime status…
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 grid gap-2 border-t pt-3 text-xs sm:grid-cols-4">
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          Trading
+        </div>
+        <div className={state.paused ? "text-yellow-400" : "text-green-400"}>
+          {state.paused ? "Paused" : "Running"}
+        </div>
+      </div>
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          Open positions
+        </div>
+        <div className="font-mono">{state.open_positions}</div>
+      </div>
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          Equity
+        </div>
+        <div className="font-mono">${state.equity.toLocaleString()}</div>
+      </div>
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          Disabled strategies
+        </div>
+        <div className="font-mono">{state.disabled_strategies.length}</div>
+      </div>
+      {state.disabled_strategies.length > 0 && (
+        <div className="sm:col-span-4 text-[11px] text-muted-foreground">
+          Off: {state.disabled_strategies.join(", ")}
+        </div>
+      )}
+      {lastFetchAt && (
+        <div className="sm:col-span-4 text-[10px] text-muted-foreground">
+          Last polled {lastFetchAt.toLocaleTimeString("sv-SE", { hour12: false })}
+        </div>
+      )}
+      {/* TODO: surface heartbeat age + last-trade time + per-bot
+          restart action. Needs new bot-side endpoints (`/api/control/heartbeat`
+          read, `/api/last-trade`) wired through tenantBotFetch with
+          explicit `?mode=<mode>` propagation. */}
     </div>
   );
 }

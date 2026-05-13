@@ -1,9 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useMode, withMode } from "@/lib/use-mode";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+
+type Mode = "paper" | "testnet" | "mainnet";
+
+function withMode(path: string, mode: Mode): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}mode=${mode}`;
+}
 
 type Status = {
   name: string;
@@ -45,8 +51,7 @@ function signalLabel(signal: Status["signal"]): string {
   }
 }
 
-export function IndicatorStatus() {
-  const mode = useMode();
+export function IndicatorStatus({ mode }: { mode: Mode }) {
   const [statuses, setStatuses] = useState<Status[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);

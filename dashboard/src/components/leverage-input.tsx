@@ -1,12 +1,17 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { useMode, withMode } from "@/lib/use-mode";
+
+type Mode = "paper" | "testnet" | "mainnet";
+
+function withMode(path: string, mode: Mode): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}mode=${mode}`;
+}
 
 type Info = { default: number; current: number; overridden: boolean };
 
-export function LeverageInput({ name }: { name: string }) {
-  const mode = useMode();
+export function LeverageInput({ name, mode }: { name: string; mode: Mode }) {
   const [info, setInfo] = useState<Info | null>(null);
   const [draft, setDraft] = useState<number | null>(null);
   const [isPending, startTransition] = useTransition();

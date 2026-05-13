@@ -57,15 +57,12 @@ type Purchase = {
   notes: string | null;
 };
 
-export default async function HodlPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ mode?: string }>;
-}) {
-  const params = await searchParams;
-  const rawMode = params.mode ?? "paper";
-  const mode: "paper" | "testnet" | "mainnet" =
-    rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
+export default async function HodlPage() {
+  // HODL signals are mainnet-only by design (Decision 2 of the
+  // sidebar nav refactor — long-term holding signals only make sense
+  // against the real-money chain). No mode picker here. The existing
+  // "bot offline" empty state renders when no mainnet bot is running.
+  const mode = "mainnet" as const;
 
   const tenant = await requireTenantServer();
   const botRows = await db

@@ -1,11 +1,16 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { useMode, withMode } from "@/lib/use-mode";
 import { Switch } from "@/components/ui/switch";
 
-export function StrategyToggle({ name }: { name: string }) {
-  const mode = useMode();
+type Mode = "paper" | "testnet" | "mainnet";
+
+function withMode(path: string, mode: Mode): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}mode=${mode}`;
+}
+
+export function StrategyToggle({ name, mode }: { name: string; mode: Mode }) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [isPending, startTransition] = useTransition();
 

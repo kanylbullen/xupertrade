@@ -1,22 +1,28 @@
-import { OverviewView, type OverviewMode } from "./overview/_overview-view";
+import { permanentRedirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
+const VALID_MODES = new Set(["paper", "testnet", "mainnet"]);
+
 /**
- * Legacy `/?mode=...` overview entrypoint. Kept working unchanged
- * through PR A/B of the sidebar nav refactor so existing bookmarks and
- * the still-rendered top-bar Nav continue to function. PR C will swap
- * this for a 308 redirect to `/overview/<mode>`.
+ * Legacy `/?mode=...` entrypoint. After the sidebar cutover the
+ * Overview lives at `/overview/<mode>` (route-bound). This page is now
+ * a 308 redirect that preserves the legacy `?mode=` value so existing
+ * bookmarks and any hand-typed URLs survive transparently.
+ *
+ * `?mode=` missing or unknown → redirect to `/overview/paper` (the
+ * default mode the dashboard's always opened on).
  */
-export default async function OverviewPage({
+export default async function RootIndex({
   searchParams,
 }: {
   searchParams: Promise<{ mode?: string }>;
-}) {
+}): Promise<never> {
   const params = await searchParams;
-  const rawMode = params.mode ?? "paper";
-  const mode: OverviewMode =
-    rawMode === "testnet" || rawMode === "mainnet" ? rawMode : "paper";
-
-  return <OverviewView mode={mode} />;
+  const raw = params.mode;
+  const mode = raw && VALID_MODES.has(raw) ? raw : "paper";
+  // permanentRedirect issues a 308 (preserves method + body, signals
+  // bookmark-update intent). The legacy mode value is preserved by
+  // routing into the same mode at the new URL shape.
+  permanentRedirect(`/overview/${mode}`);
 }
