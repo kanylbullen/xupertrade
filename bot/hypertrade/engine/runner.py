@@ -63,17 +63,29 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     return False
 
 
+_TRANSIENT_VERDICT_SUBSTRINGS = (
+    "evaluation failed",
+    "no data",
+)
+
+
 def _is_transient_unknown_verdict(verdict: str | None) -> bool:
-    """Return True if `verdict` looks like the transient "evaluation
-    failed" sentinel produced by hodl.base.Signal.evaluate() when an
-    upstream fetch raised. Used to suppress recovery-noise notifications:
+    """Return True if `verdict` looks like a transient sentinel produced
+    by hodl.base.Signal.evaluate() when an upstream fetch raised or
+    returned no data. Used to suppress recovery-noise notifications:
     if we never pinged the user about the failure, we shouldn't ping
     them about the recovery either.
+
+    Copilot review fix on PR #98: previous predicate was
+    `startswith("unknown")` which would also suppress legitimate
+    Unknown-shaped verdicts like "Unknown — manual disabled" or
+    "Unknown — unsupported asset". Narrow to the specific transient
+    sentinels emitted by the fetch-failure / no-data paths.
     """
     if not verdict:
         return False
     v = verdict.lower()
-    return v.startswith("unknown") or "evaluation failed" in v
+    return any(s in v for s in _TRANSIENT_VERDICT_SUBSTRINGS)
 
 
 _start_time = time.time()
@@ -1224,16 +1236,20 @@ class EngineRunner:
             if prev is None or prev == state.verdict:
                 continue
 
-            # Recovery-noise filter: when prev is the transient "Unknown
-            # — evaluation failed" sentinel, the follow-up normal verdict
-            # is just recovery from a fetch hiccup. The original failure
-            # didn't notify (it's caught at sig.evaluate() and logged),
-            # so the recovery shouldn't either. Still log the transition
-            # to runner so the timeline survives.
+            # Recovery / inter-transient noise filter (Copilot review fix
+            # on PR #98): suppress when prev was a transient sentinel
+            # AND the new verdict is either normal (recovery — symmetrical
+            # to the never-notified failure) or another transient (e.g.
+            # "Unknown — evaluation failed" → "Unknown — no data" — still
+            # broken, just a different shape, no point pinging twice).
+            #
+            # Failure transitions in the OTHER direction (normal → transient)
+            # still publish below — the user wants to know when something
+            # newly breaks.
             if _is_transient_unknown_verdict(prev):
                 logger.info(
-                    "[hodl/%s] verdict recovery (suppressed notify): "
-                    "%r → %r (score %.2f)",
+                    "[hodl/%s] verdict transition from transient "
+                    "(suppressed notify): %r → %r (score %.2f)",
                     sig.name, prev, state.verdict, state.score,
                 )
                 continue

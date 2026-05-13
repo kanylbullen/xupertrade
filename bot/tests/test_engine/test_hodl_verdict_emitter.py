@@ -49,10 +49,25 @@ class _RecordingBus:
         self.published.append(event)
 
 
+class _LoudExchange:
+    """Stub exchange for the runner constructor. _evaluate_hodl_signals
+    must NOT touch the exchange — any attribute access here raises so a
+    future refactor that accidentally pulls the exchange into the HODL
+    path fails loudly instead of returning None silently. Copilot
+    review fix on PR #98 (was `exchange=None`).
+    """
+
+    def __getattr__(self, name: str):  # noqa: D401
+        raise AssertionError(
+            f"_evaluate_hodl_signals must not touch exchange; got .{name}"
+        )
+
+
 def _make_runner(bus: _RecordingBus) -> EngineRunner:
-    # exchange/strategies aren't touched by _evaluate_hodl_signals
+    # strategies + exchange aren't touched by _evaluate_hodl_signals;
+    # _LoudExchange enforces that at runtime if a regression slips in.
     runner = EngineRunner(
-        exchange=None,  # type: ignore[arg-type]
+        exchange=_LoudExchange(),  # type: ignore[arg-type]
         strategies=[],
         repo=None,
         event_bus=bus,
@@ -133,6 +148,42 @@ async def test_unknown_no_data_to_normal_does_not_publish(monkeypatch):
     await _run_with_signal(runner, sig, monkeypatch)
 
     assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_transient_to_other_transient_does_not_publish(monkeypatch):
+    """Transient → another transient is still broken — don't ping twice.
+
+    Copilot review fix on PR #98: previously this transition WOULD have
+    published because only the prev side was checked.
+    """
+    bus = _RecordingBus()
+    runner = _make_runner(bus)
+    runner._last_hodl_zones["vault_picks"] = "Unknown — evaluation failed"
+
+    sig = _FakeSignal("vault_picks", "USD", "Unknown — no data")
+    await _run_with_signal(runner, sig, monkeypatch)
+
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_non_transient_unknown_recovery_publishes(monkeypatch):
+    """Non-transient Unknown verdicts (e.g. operator-disabled) are real
+    state, not error noise. Recovery from them DOES warrant a ping.
+
+    Copilot review fix on PR #98: previously the predicate was
+    `startswith("unknown")` which would have suppressed this; narrowed
+    to specific transient sentinels so legit Unknowns aren't muted.
+    """
+    bus = _RecordingBus()
+    runner = _make_runner(bus)
+    runner._last_hodl_zones["vault_picks"] = "Unknown — manual disabled"
+
+    sig = _FakeSignal("vault_picks", "USD", "Watch — 2 candidates")
+    await _run_with_signal(runner, sig, monkeypatch)
+
+    assert len(bus.published) == 1
 
 
 @pytest.mark.asyncio
