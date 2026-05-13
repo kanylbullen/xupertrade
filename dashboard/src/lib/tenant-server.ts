@@ -27,7 +27,7 @@ import {
 } from "./auth";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import type { Tenant } from "./tenant";
+import { getRequiredOidcGroup, type Tenant } from "./tenant";
 import { isSessionRevoked } from "./session-store";
 
 // Operator tenant UUID (Phase 6b backfill). Used as a fallback in
@@ -90,6 +90,21 @@ export async function requireTenantServer(): Promise<Tenant> {
     // in JS, redirect to /login with a clear error message instead.
     if (existing[0].isActive !== true) redirect("/login?error=tenant-disabled");
     return existing[0];
+  }
+
+  // M-3: gate autocreate on the operator-configured Authentik group.
+  // Existing tenants above are NOT re-checked — group enforcement is
+  // autocreate-only by design. Default-empty `OIDC_REQUIRED_GROUP`
+  // preserves pre-M-3 behavior. Mirrors getCurrentTenant in tenant.ts.
+  const requiredGroup = getRequiredOidcGroup();
+  if (requiredGroup) {
+    // Copilot review fix on PR #94: explicit Array.isArray guard
+    // mirrors tenant.ts to avoid `.includes` substring-match if
+    // `groups` ever lands as a string.
+    const groups = Array.isArray(session.groups) ? session.groups : [];
+    if (!groups.includes(requiredGroup)) {
+      redirect("/login?error=oidc-not-in-required-group");
+    }
   }
 
   // First-sight auto-create. onConflictDoNothing handles the race

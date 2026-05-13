@@ -30,6 +30,16 @@ export type SessionPayload = {
   sub: string;
   iat: number;
   exp: number;
+  /**
+   * OIDC `groups` claim captured at login. Optional — basic-auth and
+   * pre-M-3 OIDC sessions don't carry it. Used by the tenant resolver
+   * to gate autocreate against `OIDC_REQUIRED_GROUP` (security audit
+   * M-3). Existing sessions without this field continue to function;
+   * group enforcement only fires when the env var is set AND we're
+   * about to autocreate a fresh tenant row, so missing groups on an
+   * already-provisioned tenant is never re-checked at login.
+   */
+  groups?: string[];
 };
 
 /** Fetch the auth config — now reads Redis directly via
@@ -159,9 +169,20 @@ export function verifySession(
   return payload;
 }
 
-export function newSessionPayload(username: string): SessionPayload {
+export function newSessionPayload(
+  username: string,
+  groups?: string[],
+): SessionPayload {
   const now = Math.floor(Date.now() / 1000);
-  return { sub: username, iat: now, exp: now + SESSION_TTL_SECONDS };
+  const payload: SessionPayload = {
+    sub: username,
+    iat: now,
+    exp: now + SESSION_TTL_SECONDS,
+  };
+  // Only attach groups if non-empty — keeps cookies small for the
+  // basic-auth path and for IdPs that don't expose the claim.
+  if (groups && groups.length > 0) payload.groups = groups;
+  return payload;
 }
 
 export const COOKIE_OPTIONS = {
