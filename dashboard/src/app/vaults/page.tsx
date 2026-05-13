@@ -317,7 +317,7 @@ function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
         </div>
       </CardHeader>
       <CardContent>
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-4">
           {data.positions.map((p) => (
             <PositionCard key={p.vault_address} p={p} />
           ))}
