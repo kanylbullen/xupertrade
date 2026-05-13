@@ -19,6 +19,7 @@ import {
   verifySession,
 } from "./auth";
 import { loadKey } from "./crypto/k-cache";
+import { isSessionRevoked } from "./session-store";
 
 export type Tenant = typeof tenants.$inferSelect;
 
@@ -54,7 +55,12 @@ export async function getSessionFromRequest(
   if (!match) return null;
   const secret = await getSessionSecret().catch(() => "");
   if (!secret) return null;
-  return verifySession(match[1], secret);
+  const payload = verifySession(match[1], secret);
+  if (payload === null) return null;
+  // H-3: revoked sessions look identical to "no session" upstream so
+  // requireTenant returns 401 cleanly. Fail-closed on Redis error.
+  if (await isSessionRevoked(match[1])) return null;
+  return payload;
 }
 
 /**

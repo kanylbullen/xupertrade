@@ -5,6 +5,7 @@ import {
   verifySession,
   SESSION_COOKIE,
 } from "@/lib/auth";
+import { isSessionRevoked } from "@/lib/session-store";
 
 // Public paths — never require auth
 const PUBLIC_PATHS = new Set([
@@ -55,7 +56,13 @@ export async function proxy(req: NextRequest) {
   }
   const secret = await getSessionSecret();
   const session = secret ? verifySession(cookie, secret) : null;
-  if (session) return NextResponse.next();
+  if (session) {
+    // H-3: server-side revocation check. Even a HMAC-valid cookie
+    // is rejected if logout marked it revoked. Fail-closed on Redis
+    // error (isSessionRevoked returns true) — bounce to /login.
+    const revoked = await isSessionRevoked(cookie);
+    if (!revoked) return NextResponse.next();
+  }
 
   return _redirectToLogin(req, pathname);
 }

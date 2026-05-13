@@ -28,6 +28,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { Tenant } from "./tenant";
+import { isSessionRevoked } from "./session-store";
 
 // Operator tenant UUID (Phase 6b backfill). Used as a fallback in
 // disabled-auth mode (mirrors proxy.ts behavior — proxy lets all
@@ -72,6 +73,10 @@ export async function requireTenantServer(): Promise<Tenant> {
 
   const session = verifySession(sessionValue, secret);
   if (session === null) redirect("/login");
+
+  // H-3: revoked cookies bounce to /login same as no/invalid session.
+  // Fail-closed on Redis error.
+  if (await isSessionRevoked(sessionValue)) redirect("/login");
 
   const existing = await db
     .select()
