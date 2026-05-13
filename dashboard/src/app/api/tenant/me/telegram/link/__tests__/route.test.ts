@@ -1,11 +1,14 @@
 /**
- * Tests for /api/tenant/me/telegram/link (PR 3a).
+ * Tests for /api/tenant/me/telegram/link (PR 3a; M-1 widens code).
  *
- * Mocks the tenant resolver, db, and redis client so we don't
- * need live infra. Verifies the 6-digit-code lifecycle:
+ * Mocks the tenant resolver, db, redis, and rate-limit helper so we
+ * don't need live infra. Verifies:
  *   - GET returns linked status from DB row (bigint chat_id → string)
- *   - POST mints a code, stores in Redis with NX + 10min TTL
+ *   - POST mints a 10-char Crockford-base32 code (32^10 keyspace),
+ *     stores in Redis with NX + 10min TTL
  *   - POST reuses existing active code (spam prevention)
+ *   - POST is per-tenant rate-limited (429 with Retry-After when
+ *     mint quota exceeded)
  *   - DELETE removes the link row
  *   - 401 propagates from requireTenant
  */
@@ -38,12 +41,22 @@ vi.mock("@/lib/db", () => ({
 const redisSet = vi.fn();
 const redisGet = vi.fn();
 const redisTtl = vi.fn();
+const redisDel = vi.fn();
 vi.mock("@/lib/redis", () => ({
   getRedisClient: vi.fn(() => ({
     set: redisSet,
     get: redisGet,
     ttl: redisTtl,
+    del: redisDel,
   })),
+}));
+
+// Mint-rate-limit (M-1). Mock so unit tests don't need a live
+// Redis pipeline; default to "allowed" and override per-test for
+// the 429 path.
+const checkRateLimitMock = vi.fn();
+vi.mock("@/lib/rate-limit", () => ({
+  checkRateLimit: (...args: unknown[]) => checkRateLimitMock(...args),
 }));
 
 import { requireTenant } from "@/lib/tenant";
@@ -74,6 +87,12 @@ beforeEach(() => {
   // Default: no active code, so POST mints a fresh one. Tests
   // that want reuse-existing override this.
   redisGet.mockResolvedValue(null);
+  // Default: under quota.
+  checkRateLimitMock.mockResolvedValue({
+    allowed: true,
+    remaining: 9,
+    resetInSeconds: 3600,
+  });
 });
 
 afterEach(() => {
@@ -83,6 +102,8 @@ afterEach(() => {
   redisSet.mockReset();
   redisGet.mockReset();
   redisTtl.mockReset();
+  redisDel.mockReset();
+  checkRateLimitMock.mockReset();
 });
 
 describe("GET /api/tenant/me/telegram/link", () => {
@@ -143,13 +164,17 @@ describe("GET /api/tenant/me/telegram/link", () => {
 });
 
 describe("POST /api/tenant/me/telegram/link", () => {
-  it("mints a 6-digit code and stores it in Redis NX with TTL", async () => {
+  // M-1: minted code must match the wider Crockford-base32 format.
+  // Bot's `/link` parser uses the same regex.
+  const CODE_PATTERN = /^[A-HJ-NP-Z2-9]{10}$/;
+
+  it("mints a 10-char Crockford-base32 code and stores it in Redis NX with TTL", async () => {
     redisSet.mockResolvedValueOnce("OK"); // tg-link:<code> set
     redisSet.mockResolvedValueOnce("OK"); // reverse-pointer set
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).toMatch(/^\d{6}$/);
+    expect(body.code).toMatch(CODE_PATTERN);
     expect(body.expiresInSeconds).toBe(600);
     expect(redisSet).toHaveBeenCalledWith(
       `tg-link:${body.code}`,
@@ -166,23 +191,38 @@ describe("POST /api/tenant/me/telegram/link", () => {
     );
   });
 
+  it("minted codes never contain forbidden glyphs (0/1/I/O)", async () => {
+    // Sanity-check the alphabet by minting many codes and scanning.
+    // The masking trick (byte & 0x1f) is uniform over 32 chars
+    // because 32 = 2^5, so this is mostly a regression guard
+    // against accidentally re-introducing a 30-char alphabet.
+    redisSet.mockResolvedValue("OK");
+    for (let i = 0; i < 50; i++) {
+      const res = await POST(makeReq());
+      const body = await res.json();
+      expect(body.code).toMatch(CODE_PATTERN);
+      expect(body.code).not.toMatch(/[01IO]/);
+      expect(body.code.length).toBe(10);
+    }
+  });
+
   it("returns existing active code instead of churning Redis keys", async () => {
-    // Simulate: tenant already has code "123456" with 300s left.
-    redisGet.mockResolvedValueOnce("123456");
+    // Use a valid Crockford-format code so the format check passes
+    // and the idempotent path returns it as-is (Copilot review fix
+    // on PR #95 — was OLDCODE2345 which contains O, forbidden).
+    redisGet.mockResolvedValueOnce("ABCD2HJK7N");
     redisTtl.mockResolvedValueOnce(300);
 
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).toBe("123456");
+    expect(body.code).toBe("ABCD2HJK7N");
     expect(body.expiresInSeconds).toBe(300);
-    // No new code minted — spam vector closed.
     expect(redisSet).not.toHaveBeenCalled();
   });
 
   it("mints fresh code if reverse pointer exists but TTL expired", async () => {
-    // Race: pointer just expired, ttl returns -2 (key gone) or 0.
-    redisGet.mockResolvedValueOnce("oldcode");
+    redisGet.mockResolvedValueOnce("ABCD2HJK7N");
     redisTtl.mockResolvedValueOnce(-2);
     redisSet.mockResolvedValueOnce("OK");
     redisSet.mockResolvedValueOnce("OK");
@@ -190,8 +230,54 @@ describe("POST /api/tenant/me/telegram/link", () => {
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.code).not.toBe("oldcode");
+    expect(body.code).not.toBe("ABCD2HJK7N");
+    expect(body.code).toMatch(CODE_PATTERN);
     expect(redisSet).toHaveBeenCalled();
+  });
+
+  it("drops stale legacy 6-digit reverse pointer and mints a fresh code", async () => {
+    // Copilot suppressed-comment fix on PR #95: a stale 6-digit code
+    // left over from before the format change shouldn't be returned
+    // (the bot would reject it and the user would be stuck for 10 min).
+    redisGet.mockResolvedValueOnce("123456"); // legacy 6-digit
+    redisDel.mockResolvedValueOnce(1);
+    redisSet.mockResolvedValueOnce("OK");
+    redisSet.mockResolvedValueOnce("OK");
+
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.code).toMatch(CODE_PATTERN);
+    expect(body.code).not.toBe("123456");
+    expect(redisDel).toHaveBeenCalled();
+  });
+
+  it("returns 429 with Retry-After when mint quota exceeded (M-1)", async () => {
+    // Quota check fires AFTER the existing-code fast-path now (Copilot
+    // review fix on PR #95). Default mock returns null for redisGet
+    // (no existing code), so we proceed to the rate-limit branch.
+    checkRateLimitMock.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetInSeconds: 1800,
+    });
+    const res = await POST(makeReq());
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("1800");
+    // No code minted, no SET write — the existing-code fast-path
+    // does call GET first but doesn't modify state.
+    expect(redisSet).not.toHaveBeenCalled();
+  });
+
+  it("idempotent fast-path does NOT consume mint quota (Copilot review fix)", async () => {
+    // Tenant POSTs while a code already exists → returns the active
+    // code without calling checkRateLimit at all. This avoids 429ing
+    // a polling UI.
+    redisGet.mockResolvedValueOnce("ABCD2HJK7N");
+    redisTtl.mockResolvedValueOnce(300);
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    expect(checkRateLimitMock).not.toHaveBeenCalled();
   });
 
   it("retries on Redis SET NX collision", async () => {
