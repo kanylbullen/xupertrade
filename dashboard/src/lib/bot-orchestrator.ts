@@ -227,6 +227,34 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     ...params.decryptedSecrets,
     ...(params.systemEnv ?? {}),
     API_PORT: String(API_PORT_BY_MODE[params.mode]),
+    // Mode-gate Telegram so only ONE bot per tenant posts notifications.
+    // The legacy compose model hardcoded `TELEGRAM_ENABLED=false` on
+    // bot-paper and bot-mainnet; only bot-testnet posted (and
+    // subscribed to all 3 modes' event channels for routing). After
+    // PR 4c retired the compose-bot model, every orchestrator-spawned
+    // bot inherited `Settings.telegram_enabled=True` (the bot config
+    // default) — so paper + testnet both fired notifiers and the
+    // operator saw EVERY trade.executed twice (once paper-tagged,
+    // once testnet-tagged). This restores the legacy single-owner
+    // convention by setting TELEGRAM_ENABLED=true only on testnet:
+    //   - testnet is the canonical Telegram owner (matches the legacy
+    //     compose convention; testnet bot's notifier already
+    //     subscribes to paper+testnet+mainnet event channels for
+    //     cross-mode routing).
+    //   - paper is silenced (would just spam duplicates of every
+    //     testnet trade.executed since both bots' notifiers receive
+    //     the same pubsub messages).
+    //   - mainnet is silenced (operator policy: avoid noise on the
+    //     real-money side; paper+testnet activity vastly outnumbers
+    //     mainnet, so a mainnet-side notifier would either drown in
+    //     paper noise or require channel-filtering work we haven't
+    //     built).
+    // Placed AFTER the `...systemEnv` spread (and AFTER
+    // `...decryptedSecrets`) so neither tenant-supplied
+    // TELEGRAM_ENABLED nor a stale orchestrator-system value can win
+    // over the mode-derived gate. Same pattern as API_PORT — the
+    // value is mode-pinned and not operator-overridable per-bot.
+    TELEGRAM_ENABLED: params.mode === "testnet" ? "true" : "false",
   };
   const env = Object.entries(envMap).map(([k, v]) => `${k}=${v}`);
   return {

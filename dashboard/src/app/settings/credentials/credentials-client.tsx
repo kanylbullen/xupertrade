@@ -53,6 +53,11 @@ const SLOTS: ReadonlyArray<{
     label: "Telegram chat ID",
     hint: "Optional. Numeric ID of the chat where the bot posts updates.",
   },
+  {
+    key: "VAULT_TRACKING_ADDRESS",
+    label: "Vault tracking address (optional)",
+    hint: "0x + 40 hex. Defaults to your mainnet account address. Override only if you want to monitor a different wallet's vault holdings.",
+  },
 ];
 
 export function CredentialsClient() {

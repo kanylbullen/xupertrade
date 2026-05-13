@@ -502,9 +502,9 @@ def _control_routes(
         if (err := _require_auth(request)) is not None:
             return err
         repo: Repository | None = request.app.get("repo")
-        if repo is None or not settings.vault_tracking_address:
+        addr = settings.effective_vault_tracking_address
+        if repo is None or not addr:
             return _cors({"address": "", "positions": [], "total_equity_usd": 0.0})
-        addr = settings.vault_tracking_address.strip().lower()
         try:
             entries = await repo.list_user_vault_entries(addr)
         except Exception as e:

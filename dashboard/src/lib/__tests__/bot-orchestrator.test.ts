@@ -181,6 +181,82 @@ describe("buildSpec", () => {
     );
   });
 
+  describe("TELEGRAM_ENABLED mode-gate (post-PR-4c dup-notification fix)", () => {
+    // After PR 4c retired the compose-bot model, every orchestrator-
+    // spawned bot inherited Settings.telegram_enabled=True (the bot
+    // config default). Operator saw EVERY trade.executed twice — once
+    // tagged "PAPER" and once tagged "TESTNET". The legacy compose
+    // model hardcoded TELEGRAM_ENABLED=false on bot-paper and
+    // bot-mainnet so only bot-testnet posted (and routed events for
+    // all 3 modes via channel subscriptions). buildSpec now restores
+    // that single-owner convention by mode-gating TELEGRAM_ENABLED.
+    it("enables Telegram on testnet (canonical owner per legacy compose convention)", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "testnet",
+        decryptedSecrets: {},
+      });
+      const entries = spec.env.filter((e) => e.startsWith("TELEGRAM_ENABLED="));
+      expect(entries).toEqual(["TELEGRAM_ENABLED=true"]);
+    });
+
+    it.each(["paper", "mainnet"] as const)(
+      "disables Telegram on %s (silenced to prevent duplicate notifications)",
+      (mode) => {
+        const spec = buildSpec({
+          tenantId: TENANT_ID,
+          botId: BOT_ID,
+          mode,
+          decryptedSecrets: {},
+        });
+        const entries = spec.env.filter((e) =>
+          e.startsWith("TELEGRAM_ENABLED="),
+        );
+        expect(entries).toEqual(["TELEGRAM_ENABLED=false"]);
+      },
+    );
+
+    it("tenant-supplied TELEGRAM_ENABLED in decryptedSecrets cannot win over the mode gate", () => {
+      // Tenant tries to flip the gate on paper-bot via the secret CRUD
+      // API — must NOT win, otherwise a misconfigured tenant would
+      // resurrect the dup-notification bug. The mode-derived value is
+      // injected AFTER both decryptedSecrets and systemEnv spreads.
+      for (const mode of ["paper", "mainnet"] as const) {
+        const spec = buildSpec({
+          tenantId: TENANT_ID,
+          botId: BOT_ID,
+          mode,
+          decryptedSecrets: { TELEGRAM_ENABLED: "true" },
+        });
+        const entries = spec.env.filter((e) =>
+          e.startsWith("TELEGRAM_ENABLED="),
+        );
+        expect(entries).toEqual(["TELEGRAM_ENABLED=false"]);
+      }
+    });
+
+    it("systemEnv-supplied TELEGRAM_ENABLED also cannot win over the mode gate", () => {
+      // A future operator who tries to flip the gate by injecting
+      // TELEGRAM_ENABLED into systemEnv must also be overridden — the
+      // mode is the single source of truth. (Future per-mode override
+      // would need a real escape hatch like
+      // HYPERTRADE_BOT_TELEGRAM_ENABLED_MODE; intentionally not added
+      // in this PR.)
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "paper",
+        decryptedSecrets: {},
+        systemEnv: { TELEGRAM_ENABLED: "true" },
+      });
+      const entries = spec.env.filter((e) =>
+        e.startsWith("TELEGRAM_ENABLED="),
+      );
+      expect(entries).toEqual(["TELEGRAM_ENABLED=false"]);
+    });
+  });
+
   it("systemEnv is omitted from env when not supplied", () => {
     const spec = buildSpec({
       tenantId: TENANT_ID,

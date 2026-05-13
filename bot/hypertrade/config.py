@@ -55,6 +55,33 @@ class Settings(BaseSettings):
     vault_tracking_address: str = ""
 
     @property
+    def effective_vault_tracking_address(self) -> str:
+        """Resolved vault-tracking address with a sensible fallback.
+
+        Returns the explicit `VAULT_TRACKING_ADDRESS` if the operator set
+        one. Otherwise, on mainnet, falls back to the bot's own
+        `HYPERLIQUID_ACCOUNT_ADDRESS` since the trading wallet is also
+        the one whose vault holdings the operator typically wants to
+        monitor. On testnet/paper there is no fallback because testnet
+        wallets aren't on mainnet — the lookup would just return
+        nothing useful.
+
+        Background: PR 4c retired the compose-bot model and per-tenant
+        bots are spawned by the dashboard orchestrator. The credentials
+        UI doesn't currently expose a `VAULT_TRACKING_ADDRESS` slot
+        for most tenants, so the /vaults page rendered the qualified-
+        vaults scanner list but their own vault holdings did not appear
+        despite being a mainnet bot. This fallback keeps the common
+        case working with zero extra config; the explicit secret
+        remains the override path for monitoring a different wallet.
+        """
+        if self.vault_tracking_address:
+            return self.vault_tracking_address.strip().lower()
+        if self.exchange_mode == "mainnet" and self.hyperliquid_account_address:
+            return self.hyperliquid_account_address.strip().lower()
+        return ""
+
+    @property
     def is_paper(self) -> bool:
         return self.exchange_mode == "paper"
 
