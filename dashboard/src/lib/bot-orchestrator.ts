@@ -221,7 +221,7 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   // mode dictates: paper=8000, testnet=8001, mainnet=8002 — so a single
   // getBotApiUrl helper in lib/bot-api.ts works for everything).
   // TELEGRAM_ENABLED pins the single-Telegram-owner convention (only
-  // testnet posts; see the comment on that key below).
+  // mainnet posts; see the comment on that key below).
   const envMap: Record<string, string> = {
     TENANT_ID: params.tenantId,
     BOT_ID: params.botId,
@@ -237,26 +237,30 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     // bot inherited `Settings.telegram_enabled=True` (the bot config
     // default) — so paper + testnet both fired notifiers and the
     // operator saw EVERY trade.executed twice (once paper-tagged,
-    // once testnet-tagged). This restores the legacy single-owner
-    // convention by setting TELEGRAM_ENABLED=true only on testnet:
-    //   - testnet is the canonical Telegram owner (matches the legacy
-    //     compose convention; testnet bot's notifier already
-    //     subscribes to paper+testnet+mainnet event channels for
-    //     cross-mode routing).
-    //   - paper is silenced (would just spam duplicates of every
-    //     testnet trade.executed since both bots' notifiers receive
-    //     the same pubsub messages).
-    //   - mainnet is silenced (operator policy: avoid noise on the
-    //     real-money side; paper+testnet activity vastly outnumbers
-    //     mainnet, so a mainnet-side notifier would either drown in
-    //     paper noise or require channel-filtering work we haven't
-    //     built).
+    // once testnet-tagged).
+    //
+    // 2026-05-13: ownership moved from testnet to mainnet. Corollary
+    // to PR #113, which moved the vault scanner to mainnet (vaults
+    // only exist on HL mainnet). Mainnet is now the single owner of
+    // both Telegram notifications and the vault scanner, so the
+    // operator sees the real-money side prefixed correctly instead
+    // of every notification tagged TESTNET.
+    //   - mainnet is the canonical Telegram owner (matches vault
+    //     scanner ownership; its notifier subscribes to
+    //     paper+testnet+mainnet event channels for cross-mode
+    //     routing).
+    //   - testnet is silenced (was the previous owner; would
+    //     otherwise double-emit during the overlap window — operator
+    //     must restart both bots after deploy).
+    //   - paper is silenced (would spam duplicates of every
+    //     trade.executed since all bots' notifiers receive the same
+    //     pubsub messages).
     // Placed AFTER the `...systemEnv` spread (and AFTER
     // `...decryptedSecrets`) so neither tenant-supplied
     // TELEGRAM_ENABLED nor a stale orchestrator-system value can win
     // over the mode-derived gate. Same pattern as API_PORT — the
     // value is mode-pinned and not operator-overridable per-bot.
-    TELEGRAM_ENABLED: params.mode === "testnet" ? "true" : "false",
+    TELEGRAM_ENABLED: params.mode === "mainnet" ? "true" : "false",
   };
   const env = Object.entries(envMap).map(([k, v]) => `${k}=${v}`);
   return {
