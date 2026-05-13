@@ -6,7 +6,7 @@ import { useEffect, useState, useTransition } from "react";
 import { UnlockModal } from "@/components/unlock-modal";
 import { LiveLog } from "@/components/live-log";
 
-const MODES = ["paper", "testnet", "mainnet"] as const;
+const MODES = ["mainnet", "testnet", "paper"] as const;
 type Mode = (typeof MODES)[number];
 
 type BotRow = {
