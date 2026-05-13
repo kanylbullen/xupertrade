@@ -255,6 +255,41 @@ describe("buildSpec", () => {
       );
       expect(entries).toEqual(["TELEGRAM_ENABLED=false"]);
     });
+
+    it("tenant-supplied TELEGRAM_ENABLED=false in decryptedSecrets cannot silence mainnet", () => {
+      // Symmetric to the paper/testnet case: a tenant who tries to
+      // silence the mainnet notifier via the secret CRUD API must NOT
+      // win, otherwise the canonical Telegram owner could be muted by
+      // a tenant misconfig. The mode-derived value is injected AFTER
+      // the decryptedSecrets spread.
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: { TELEGRAM_ENABLED: "false" },
+      });
+      const entries = spec.env.filter((e) =>
+        e.startsWith("TELEGRAM_ENABLED="),
+      );
+      expect(entries).toEqual(["TELEGRAM_ENABLED=true"]);
+    });
+
+    it("systemEnv-supplied TELEGRAM_ENABLED=false also cannot silence mainnet", () => {
+      // Symmetric to the systemEnv=true paper case. Mode is the single
+      // source of truth in both directions: operator cannot enable on
+      // a silenced mode AND cannot disable on the canonical owner.
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        systemEnv: { TELEGRAM_ENABLED: "false" },
+      });
+      const entries = spec.env.filter((e) =>
+        e.startsWith("TELEGRAM_ENABLED="),
+      );
+      expect(entries).toEqual(["TELEGRAM_ENABLED=true"]);
+    });
   });
 
   it("systemEnv is omitted from env when not supplied", () => {

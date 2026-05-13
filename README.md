@@ -131,7 +131,7 @@ Per-bot env (set in `docker-compose.yml`, override via env):
 | `MAX_DAILY_LOSS_USD` | `100` | Trading halts when daily PnL drops below this. |
 | `POLL_INTERVAL_SECONDS` | `60` | How often the runner ticks. |
 | `KILL_SWITCH` | `false` | Emergency stop (set without restart via dashboard). |
-| `TELEGRAM_ENABLED` | `false` (paper/mainnet), `true` (testnet) | Only one bot should run the Telegram poller. |
+| `TELEGRAM_ENABLED` | `true` (mainnet), `false` (paper/testnet) | Only one bot should run the Telegram poller. |
 
 ## Setting up HyperLiquid testnet
 
