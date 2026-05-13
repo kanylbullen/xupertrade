@@ -26,6 +26,8 @@ export type AuditAction =
   | "bot.delete"
   | "passphrase.set"
   | "passphrase.unlock"
+  | "passphrase.unlock-failed"
+  | "passphrase.unlock-rate-limited"
   | "passphrase.lock"
   | "tenant.disabled"
   // PR 3d: telegram linking + unlock-deeplink flow.
