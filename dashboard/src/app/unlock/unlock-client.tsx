@@ -3,22 +3,21 @@
 import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
-type Props = {
-  tenantId: string;
-  tenantLabel: string;
-};
-
 /**
  * Passphrase entry on /unlock — calls existing /api/tenant/me/unlock,
  * which also caches K in Redis for the session. After success we
  * redirect to /settings/bots so the user can start their bots.
  *
  * Requires an authenticated session — the unlock endpoint itself
- * gates on `requireTenant`. If the user isn't signed in we show
- * a "sign in first" message rather than silently 401'ing the
- * passphrase POST (less confusing).
+ * gates on `requireTenant` and decides which tenant is being
+ * unlocked from the session cookie. We deliberately do NOT take
+ * a tenantId / tenantLabel prop, so the public /unlock page can't
+ * leak any per-tenant info to a user who merely opens the link
+ * (H-4). If the user isn't signed in we show a "sign in first"
+ * message rather than silently 401'ing the passphrase POST (less
+ * confusing).
  */
-export function UnlockClient({ tenantId, tenantLabel }: Props) {
+export function UnlockClient() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -93,10 +92,6 @@ export function UnlockClient({ tenantId, tenantLabel }: Props) {
 
   return (
     <form onSubmit={submit} className="space-y-4 rounded-lg border p-6">
-      <p className="text-xs text-muted-foreground">
-        Unlocking for{" "}
-        <span className="font-medium text-foreground">{tenantLabel}</span>
-      </p>
       <input
         ref={inputRef}
         type="password"
@@ -106,9 +101,6 @@ export function UnlockClient({ tenantId, tenantLabel }: Props) {
         placeholder="Passphrase"
         disabled={pending}
         autoFocus
-        // Pin tenant id into form data so any future logging can
-        // tie the action to the deeplink subject (PR 3d audit log).
-        data-tenant-id={tenantId}
       />
       {error && (
         <p className="text-sm text-red-500" role="alert">
