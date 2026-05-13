@@ -45,26 +45,37 @@ async function performLogout(req: Request): Promise<NextResponse> {
   );
   const cookieValue = match?.[1] ?? "";
 
+  // Verify the cookie's HMAC BEFORE writing anything to Redis. Without
+  // this, an unauthenticated caller could send arbitrary `Cookie:`
+  // headers to /api/auth/logout and force unbounded
+  // `session:revoked:<sha256(garbage)>` writes (each with an 8-day TTL)
+  // — trivial Redis memory/IO DoS. Verifying first means we only accept
+  // cookies that we ourselves signed. Copilot review fix on PR #91.
   if (cookieValue) {
-    // Layer 1: revocation list. Best-effort; never propagate errors.
+    let payload: { sub: string } | null = null;
     try {
-      await markSessionRevoked(cookieValue);
+      const secret = await getSessionSecret().catch(() => "");
+      payload = secret ? verifySession(cookieValue, secret) : null;
     } catch (err) {
-      console.warn("[logout] markSessionRevoked failed:", err);
+      console.warn("[logout] session verify failed:", err);
     }
 
-    // Layer 2: evict K-cache for this (tenant, session). Requires
-    // resolving the tenant from the cookie's `sub`. Both lookups are
-    // best-effort — a missing/invalid cookie or absent tenant row
-    // just means there's nothing to evict.
-    try {
-      const sessionId = createHash("sha256")
-        .update(cookieValue)
-        .digest("hex")
-        .slice(0, 32);
-      const secret = await getSessionSecret().catch(() => "");
-      const payload = secret ? verifySession(cookieValue, secret) : null;
-      if (payload) {
+    if (payload) {
+      // Layer 1: revocation list. Best-effort; never propagate errors.
+      try {
+        await markSessionRevoked(cookieValue);
+      } catch (err) {
+        console.warn("[logout] markSessionRevoked failed:", err);
+      }
+
+      // Layer 2: evict K-cache for this (tenant, session). Resolves
+      // tenant from the verified `sub`. Best-effort — a missing tenant
+      // row just means there's nothing to evict.
+      try {
+        const sessionId = createHash("sha256")
+          .update(cookieValue)
+          .digest("hex")
+          .slice(0, 32);
         const rows = await db
           .select({ id: tenants.id })
           .from(tenants)
@@ -73,9 +84,9 @@ async function performLogout(req: Request): Promise<NextResponse> {
         if (rows.length > 0) {
           await clearKey(rows[0].id, sessionId);
         }
+      } catch (err) {
+        console.warn("[logout] k-cache eviction failed:", err);
       }
-    } catch (err) {
-      console.warn("[logout] k-cache eviction failed:", err);
     }
   }
 

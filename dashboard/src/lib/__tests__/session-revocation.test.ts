@@ -196,7 +196,11 @@ describe("/api/auth/logout", () => {
     expect((res.headers.get("set-cookie") ?? "")).toMatch(/Max-Age=0/i);
   });
 
-  it("logout skips k-cache eviction when cookie HMAC is invalid", async () => {
+  it("logout skips revocation AND k-cache eviction when cookie HMAC is invalid", async () => {
+    // Regression test for PR #91 Copilot review: an unauthenticated
+    // caller must NOT be able to spam revocation entries by sending
+    // garbage cookies. Both the revocation list and the K-cache
+    // eviction are gated behind successful HMAC verification.
     verify.mockReturnValue(null);
     setupMocks();
     const { POST } = await import("../../app/api/auth/logout/route");
@@ -204,9 +208,11 @@ describe("/api/auth/logout", () => {
       method: "POST",
       headers: { cookie: "hypertrade_session=garbage" },
     });
-    await POST(req);
-    // Revocation always runs; k-cache eviction needs a valid payload.
-    expect(markRevoked).toHaveBeenCalledOnce();
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    expect(markRevoked).not.toHaveBeenCalled();
     expect(clearK).not.toHaveBeenCalled();
+    // Cookie still cleared on the response — UX is unchanged.
+    expect((res.headers.get("set-cookie") ?? "")).toMatch(/Max-Age=0/i);
   });
 });

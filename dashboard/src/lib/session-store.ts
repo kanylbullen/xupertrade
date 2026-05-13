@@ -43,7 +43,11 @@ function revocationKey(cookieValue: string): string {
 
 /**
  * Mark a session cookie as revoked. Idempotent — repeated calls just
- * refresh the TTL. Safe to pass an empty/garbage cookie (no-op).
+ * refresh the TTL. Empty input is a no-op; **non-empty unverified
+ * input still writes a Redis entry**, so callers MUST verify the
+ * cookie's HMAC before calling this. Otherwise an unauthenticated
+ * caller could DoS Redis by spamming garbage cookies (see PR #91
+ * Copilot review fix in app/api/auth/logout/route.ts).
  */
 export async function markSessionRevoked(
   cookieValue: string,
