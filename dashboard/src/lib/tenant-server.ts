@@ -83,7 +83,14 @@ export async function requireTenantServer(): Promise<Tenant> {
     .from(tenants)
     .where(eq(tenants.authentikSub, session.sub))
     .limit(1);
-  if (existing.length > 0) return existing[0];
+  if (existing.length > 0) {
+    // M-2: enforce `is_active`. We deliberately do NOT add this to the
+    // WHERE — a filtered query would mask a disabled row as "missing"
+    // and silently re-create it via the autoCreate path below. Detect
+    // in JS, redirect to /login with a clear error message instead.
+    if (existing[0].isActive !== true) redirect("/login?error=tenant-disabled");
+    return existing[0];
+  }
 
   // First-sight auto-create. onConflictDoNothing handles the race
   // between two parallel requests for a brand-new sub.
@@ -105,5 +112,8 @@ export async function requireTenantServer(): Promise<Tenant> {
   if (created.length === 0) {
     throw new Error("tenant insert succeeded but row not found");
   }
+  // M-2 belt-and-braces: pre-existing disabled row could have won the
+  // onConflictDoNothing race.
+  if (created[0].isActive !== true) redirect("/login?error=tenant-disabled");
   return created[0];
 }
