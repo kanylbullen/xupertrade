@@ -56,11 +56,11 @@ function makeTenant() {
   } as Awaited<ReturnType<typeof requireTenant>>;
 }
 
-function makeReq(value: string): Request {
+function makeReq(value: string, extra?: Record<string, unknown>): Request {
   return new Request("https://example.com/api/tenant/me/secrets/X", {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ value }),
+    body: JSON.stringify({ value, ...(extra ?? {}) }),
   });
 }
 
@@ -125,5 +125,69 @@ describe("PUT /api/tenant/me/secrets/[key] — allowlist (C-1)", () => {
     const body = await res.json();
     expect(body.error).toMatch(/\[A-Z0-9_\]\{1,64\}/);
     expect(db.insert).not.toHaveBeenCalled();
+  });
+});
+
+describe("PUT expires_at — HL key rotation reminders", () => {
+  it("stores expires_at for HYPERLIQUID_PRIVATE_KEY and roundtrips it", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32, 9));
+
+    const res = await PUT(
+      makeReq("0x" + "a".repeat(64), { expires_at: "2027-01-15" }),
+      makeCtx("HYPERLIQUID_PRIVATE_KEY"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.expires_at).toBe("2027-01-15T00:00:00.000Z");
+
+    const valuesArg = insertChain.values.mock.calls[0][0];
+    expect(valuesArg.expiresAt).toBeInstanceOf(Date);
+    expect((valuesArg.expiresAt as Date).toISOString()).toBe(
+      "2027-01-15T00:00:00.000Z",
+    );
+  });
+
+  it("accepts empty string as null (clears expiry)", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32, 9));
+
+    const res = await PUT(
+      makeReq("0x" + "b".repeat(64), { expires_at: "" }),
+      makeCtx("HYPERLIQUID_MAINNET_PRIVATE_KEY"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.expires_at).toBeNull();
+    const valuesArg = insertChain.values.mock.calls[0][0];
+    expect(valuesArg.expiresAt).toBeNull();
+  });
+
+  it("400s on invalid date format", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32, 9));
+
+    const res = await PUT(
+      makeReq("v", { expires_at: "not-a-date" }),
+      makeCtx("HYPERLIQUID_PRIVATE_KEY"),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/expires_at/);
+  });
+
+  it("silently drops expires_at for non-HL keys", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32, 9));
+
+    const res = await PUT(
+      makeReq("token", { expires_at: "2027-01-15" }),
+      makeCtx("TELEGRAM_BOT_TOKEN"),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.expires_at).toBeUndefined();
+    const valuesArg = insertChain.values.mock.calls[0][0];
+    expect("expiresAt" in valuesArg).toBe(false);
   });
 });

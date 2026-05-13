@@ -1152,5 +1152,22 @@ class Repository:
                     existing.telegram_username = telegram_username
                     existing.linked_at = datetime.now(timezone.utc)
 
+    async def get_hl_key_expiries(
+        self, tenant_id: uuid.UUID
+    ) -> list[tuple[str, datetime]]:
+        """Return [(key, expires_at)] for this tenant's HL private-key
+        secrets that have an expiry set. Skips rows where expires_at is
+        NULL. Used by the rotation-reminder loop."""
+        keys = ("HYPERLIQUID_PRIVATE_KEY", "HYPERLIQUID_MAINNET_PRIVATE_KEY")
+        async with self._session_factory() as session:
+            rows = await session.execute(
+                select(TenantSecret.key, TenantSecret.expires_at).where(
+                    TenantSecret.tenant_id == tenant_id,
+                    TenantSecret.key.in_(keys),
+                    TenantSecret.expires_at.is_not(None),
+                )
+            )
+            return [(k, e) for k, e in rows.all()]
+
     async def close(self) -> None:
         await self._engine.dispose()

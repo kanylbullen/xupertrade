@@ -165,6 +165,7 @@ class TelegramNotifier:
         self._poll_task: asyncio.Task | None = None
         self._daily_task: asyncio.Task | None = None
         self._weekly_task: asyncio.Task | None = None
+        self._key_expiry_task: asyncio.Task | None = None
         self._last_update_id: int = 0
         self._last_command_time: dict[str, float] = {}
         self._command_cooldown_seconds: float = 5.0
@@ -237,6 +238,10 @@ class TelegramNotifier:
         if self._repo is not None:
             self._daily_task = asyncio.create_task(self._daily_loop())
             self._weekly_task = asyncio.create_task(self._weekly_loop())
+            if settings.tenant_id:
+                self._key_expiry_task = asyncio.create_task(
+                    self._key_expiry_loop()
+                )
         if self._control is not None:
             self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(
@@ -321,7 +326,13 @@ class TelegramNotifier:
             )
 
     async def stop(self) -> None:
-        for t in (self._event_task, self._poll_task, self._daily_task, self._weekly_task):
+        for t in (
+            self._event_task,
+            self._poll_task,
+            self._daily_task,
+            self._weekly_task,
+            self._key_expiry_task,
+        ):
             if t:
                 t.cancel()
                 try:
@@ -622,6 +633,85 @@ class TelegramNotifier:
                 await self.send(text)
             except Exception:
                 logger.exception("Weekly eval failed")
+
+    # ----- HL key expiry reminders -----
+
+    REMINDER_WINDOW_DAYS = 14
+    EXPIRED_NOTIFIED_TTL_SECONDS = 30 * 24 * 3600
+
+    async def _key_expiry_loop(self) -> None:
+        """Daily check: warn about HL private keys nearing/past expiry.
+
+        Runs once per day at 09:00 UTC. Picks up `expires_at` set on
+        the two HL private-key rows in `tenant_secrets`. Sends a
+        recurring 14-day warning + a one-shot EXPIRED notification
+        deduped via Redis.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        while True:
+            now = datetime.now(timezone.utc)
+            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target = target + timedelta(days=1)
+            try:
+                await asyncio.sleep((target - now).total_seconds())
+            except asyncio.CancelledError:
+                raise
+            try:
+                await self._check_key_expiries()
+            except Exception:
+                logger.exception("Key expiry check failed")
+
+    async def _check_key_expiries(self) -> None:
+        if (
+            self._repo is None
+            or self._redis is None
+            or not settings.tenant_id
+            or not self.configured
+        ):
+            return
+        import uuid as _uuid
+        from datetime import datetime, timedelta, timezone
+
+        try:
+            tenant_uuid = _uuid.UUID(settings.tenant_id)
+        except (ValueError, AttributeError):
+            return
+        rows = await self._repo.get_hl_key_expiries(tenant_uuid)
+        now = datetime.now(timezone.utc)
+        window = now + timedelta(days=self.REMINDER_WINDOW_DAYS)
+        for key, expires_at in rows:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if now < expires_at <= window:
+                days = max(0, (expires_at - now).days)
+                date_iso = expires_at.date().isoformat()
+                await self.send(
+                    f"🔑 HL key <code>{html.escape(key)}</code> expires in "
+                    f"<b>{days}</b> days ({date_iso}). Rotate it via "
+                    f"Settings → Credentials."
+                )
+            elif now >= expires_at:
+                date_iso = expires_at.date().isoformat()
+                dedup_key = (
+                    f"tenant:{settings.tenant_id}:secret_expired_notified:"
+                    f"{key}:{expires_at.isoformat()}"
+                )
+                # SET NX so the first daily pass after expiry sends and
+                # subsequent passes are no-ops. TTL auto-cleans the
+                # marker so a future expires_at change (different ISO)
+                # gets its own dedup slot.
+                marked = await self._redis.set(
+                    dedup_key, "1",
+                    nx=True, ex=self.EXPIRED_NOTIFIED_TTL_SECONDS,
+                )
+                if marked:
+                    await self.send(
+                        f"⚠️ HL key <code>{html.escape(key)}</code> "
+                        f"EXPIRED on {date_iso}. Bot cannot trade with "
+                        f"this key. Rotate now."
+                    )
 
     # ----- command handlers -----
 

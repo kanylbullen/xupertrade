@@ -225,6 +225,10 @@ export const tenantSecrets = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // Operator-set rotation deadline (alembic 0015). NULL = no expiry
+    // tracking; only the credentials UI writes this, and only for the
+    // two HL private-key rows.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
   },
   (t) => ({
     // Composite PK = (tenant_id, key); same key for two tenants is fine,

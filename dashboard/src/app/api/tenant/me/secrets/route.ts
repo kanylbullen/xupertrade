@@ -24,7 +24,11 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   const rows = await db
-    .select({ key: tenantSecrets.key, updatedAt: tenantSecrets.updatedAt })
+    .select({
+      key: tenantSecrets.key,
+      updatedAt: tenantSecrets.updatedAt,
+      expiresAt: tenantSecrets.expiresAt,
+    })
     .from(tenantSecrets)
     .where(eq(tenantSecrets.tenantId, tenant.id))
     .orderBy(tenantSecrets.key);
