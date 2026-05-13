@@ -59,6 +59,17 @@ dashboard.
 
    Without this policy, *any* Authentik user can sign in. With
    it, only group members can.
+3. Set `OIDC_REQUIRED_GROUP=hypertrade-users` on the dashboard
+   container (security audit M-3). This makes the dashboard verify
+   the `groups` claim on first sign-in and refuse to autocreate a
+   tenant row when the claim doesn't include the expected group.
+   Defense in depth alongside the Authentik-side policy: if the
+   IdP policy is misconfigured (or the operator federates a new
+   IdP that bypasses it), the dashboard still won't auto-onboard
+   strangers. Empty/unset = no enforcement (any successful OIDC
+   auth autocreates a tenant — pre-M-3 behavior). Group check
+   fires only on autocreate; existing tenants are NOT re-checked
+   on login.
 
 ### Inviting a new user
 

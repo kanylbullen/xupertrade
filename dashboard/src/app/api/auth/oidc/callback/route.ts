@@ -68,13 +68,21 @@ export async function GET(req: Request) {
       "oidc-user",
   );
 
+  // M-3: extract `groups` claim. Authentik exposes this natively as a
+  // JSON array of group names when the OIDC provider's scope includes
+  // it (default scope mapping). Some IdPs may emit a single string or
+  // omit the claim entirely — accept both shapes, ignore the rest.
+  // The session payload will use this in the tenant resolver to gate
+  // autocreate against `OIDC_REQUIRED_GROUP`.
+  const groups = extractGroupsClaim(claims.groups);
+
   // Sign the session cookie. Secret comes from the API_KEY-gated bot
   // endpoint so it's never publicly exposed. Fail closed if unavailable.
   const secret = await getSessionSecret(true);
   if (!secret) {
     return loginError(url, "oidc-session-secret-unavailable");
   }
-  const sessionValue = signSession(newSessionPayload(sub), secret);
+  const sessionValue = signSession(newSessionPayload(sub, groups), secret);
 
   // Use PUBLIC_URL (or DASHBOARD_URL) as the base for the post-login
   // redirect so users land on the public hostname, not the docker
@@ -108,6 +116,32 @@ function publicLoginUrl(reqUrl: URL): URL {
   return publicBase
     ? new URL("/login", publicBase + "/")
     : new URL("/login", reqUrl);
+}
+
+/**
+ * Normalize an OIDC `groups` claim into a string[] or undefined.
+ * Authentik returns a JSON array; some other IdPs return a single
+ * string. We accept exactly two shapes:
+ *
+ *   - JSON array of strings → kept as-is, non-string entries dropped
+ *   - single non-empty string → wrapped in `[raw]` (treated as ONE
+ *     group; we do NOT split on commas/spaces because both characters
+ *     are legal inside group names and splitting would silently turn
+ *     "ops, admins" into two membership lookups)
+ *
+ * Anything else → undefined (treated as "no groups" downstream — fine
+ * because group enforcement is opt-in via OIDC_REQUIRED_GROUP).
+ *
+ * Copilot review fix on PR #94: docstring previously claimed "space/
+ * comma-separated value" support; the implementation never did that.
+ */
+function extractGroupsClaim(raw: unknown): string[] | undefined {
+  if (Array.isArray(raw)) {
+    const out = raw.filter((v): v is string => typeof v === "string");
+    return out.length > 0 ? out : undefined;
+  }
+  if (typeof raw === "string" && raw.length > 0) return [raw];
+  return undefined;
 }
 
 function loginError(url: URL, code: string): NextResponse {

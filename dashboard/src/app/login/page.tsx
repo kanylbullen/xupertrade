@@ -16,6 +16,8 @@ const ERROR_MESSAGES: Record<string, string> = {
     "Sign-in succeeded but the dashboard couldn't fetch its cookie-signing key — check API_KEY is set on both bot and dashboard",
   "tenant-disabled":
     "Your account has been disabled — contact the operator if you believe this is in error",
+  "oidc-not-in-required-group":
+    "Sign-in succeeded but your account isn't in the operator-approved group — ask the operator to grant access",
 };
 
 export default async function LoginPage({
