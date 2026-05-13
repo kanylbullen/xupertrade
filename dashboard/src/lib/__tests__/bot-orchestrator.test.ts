@@ -303,6 +303,75 @@ describe("getOrchestratorSystemEnv", () => {
     expect(env.DASHBOARD_URL).toBe("https://example.com");
   });
 
+  it("includes C-1 operator-policy caps with documented defaults", () => {
+    // Clear all relevant overrides so we exercise defaults.
+    for (const k of [
+      "HYPERTRADE_BOT_MAINNET_ENABLED_STRATEGIES",
+      "HYPERTRADE_BOT_MAX_TOTAL_EXPOSURE_USD",
+      "HYPERTRADE_BOT_SIGNAL_SIZE_MAX_MULTIPLIER",
+      "HYPERTRADE_BOT_TAKER_FEE_RATE",
+      "HYPERTRADE_BOT_TRADE_RATE_ALARM_ENABLED",
+      "HYPERTRADE_BOT_TRADE_RATE_ALARM_BASELINE_MULTIPLIER",
+      "HYPERTRADE_BOT_TRADE_RATE_ALARM_MIN_HOURLY_FLOOR",
+      "HYPERTRADE_BOT_TRADE_RATE_ALARM_ABSOLUTE_CEILING",
+      "HYPERTRADE_BOT_TRADE_RATE_ALARM_CHECK_INTERVAL_SECONDS",
+      "HYPERTRADE_BOT_HL_READ_TIMEOUT_SECONDS",
+      "HYPERTRADE_BOT_HL_ORDER_TIMEOUT_SECONDS",
+      "HYPERTRADE_BOT_HL_INIT_RETRY_ATTEMPTS",
+      "HYPERTRADE_BOT_HL_INIT_RETRY_BACKOFF_SECONDS",
+    ]) {
+      delete process.env[k];
+    }
+    const env = getOrchestratorSystemEnv();
+    expect(env.MAINNET_ENABLED_STRATEGIES).toBe("");
+    expect(env.MAX_TOTAL_EXPOSURE_USD).toBe("5000");
+    expect(env.SIGNAL_SIZE_MAX_MULTIPLIER).toBe("10");
+    expect(env.TAKER_FEE_RATE).toBe("0.00045");
+    expect(env.TRADE_RATE_ALARM_ENABLED).toBe("true");
+    expect(env.TRADE_RATE_ALARM_BASELINE_MULTIPLIER).toBe("5.0");
+    expect(env.TRADE_RATE_ALARM_MIN_HOURLY_FLOOR).toBe("5");
+    expect(env.TRADE_RATE_ALARM_ABSOLUTE_CEILING).toBe("20");
+    expect(env.TRADE_RATE_ALARM_CHECK_INTERVAL_SECONDS).toBe("300");
+    expect(env.HL_READ_TIMEOUT_SECONDS).toBe("5.0");
+    expect(env.HL_ORDER_TIMEOUT_SECONDS).toBe("15.0");
+    expect(env.HL_INIT_RETRY_ATTEMPTS).toBe("5");
+    expect(env.HL_INIT_RETRY_BACKOFF_SECONDS).toBe("2.0");
+  });
+
+  it("respects HYPERTRADE_BOT_* overrides for the C-1 policy caps", () => {
+    process.env.HYPERTRADE_BOT_MAINNET_ENABLED_STRATEGIES = "bb_short,moon_phases";
+    process.env.HYPERTRADE_BOT_MAX_TOTAL_EXPOSURE_USD = "12345";
+    process.env.HYPERTRADE_BOT_HL_ORDER_TIMEOUT_SECONDS = "30.0";
+    const env = getOrchestratorSystemEnv();
+    expect(env.MAINNET_ENABLED_STRATEGIES).toBe("bb_short,moon_phases");
+    expect(env.MAX_TOTAL_EXPOSURE_USD).toBe("12345");
+    expect(env.HL_ORDER_TIMEOUT_SECONDS).toBe("30.0");
+  });
+
+  it.each([
+    "MAINNET_ENABLED_STRATEGIES",
+    "MAX_TOTAL_EXPOSURE_USD",
+    "SIGNAL_SIZE_MAX_MULTIPLIER",
+    "TAKER_FEE_RATE",
+    "TRADE_RATE_ALARM_ENABLED",
+    "HL_ORDER_TIMEOUT_SECONDS",
+    "MAX_POSITION_SIZE_USD",
+  ])(
+    "buildSpec: tenant decryptedSecrets cannot override systemEnv key %s",
+    (policyKey) => {
+      const spec = buildSpec({
+        botId: BOT_ID,
+        tenantId: TENANT_ID,
+        mode: "mainnet",
+        decryptedSecrets: { [policyKey]: "TENANT_SPOOF_VALUE" },
+        systemEnv: getOrchestratorSystemEnv(),
+      });
+      const entries = spec.env.filter((e) => e.startsWith(`${policyKey}=`));
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).not.toContain("TENANT_SPOOF_VALUE");
+    },
+  );
+
   it("buildSpec puts systemEnv AFTER decryptedSecrets — tenant can't override API_KEY", () => {
     const sysKey = "real-sys-key";
     const spoofKey = "spoof-key";

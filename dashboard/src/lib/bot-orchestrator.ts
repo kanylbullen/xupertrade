@@ -108,14 +108,22 @@ export function containerName(tenantId: string, mode: BotMode): string {
  * setting a bogus `API_KEY` via the secret CRUD API to escape the
  * dashboard's auth gate.
  *
+ * **Operator-policy env vars (security audit C-1, 2026-05-12).**
+ * Every env var below this comment is here specifically so that even
+ * if the secret-CRUD allowlist is loosened or bypassed, the
+ * orchestrator's value wins (buildSpec puts systemEnv AFTER
+ * decryptedSecrets). These caps and timeouts encode operator policy
+ * — not tenant preference — so they must NOT be tenant-overridable.
+ *
  * **What's intentionally NOT here**:
  *   - DATABASE_URL — caller-supplied per-tenant (`tenantDbUrl`)
  *     so each tenant connects under its own Postgres role for
  *     RLS isolation (Phase 5b).
  *   - TENANT_ID, BOT_ID, EXCHANGE_MODE, API_PORT — set by
  *     `buildSpec` directly (stable per-bot identifiers).
- *   - HYPERLIQUID_*, TELEGRAM_* — per-tenant secrets via
- *     `decryptedSecrets`, not system-managed.
+ *   - HYPERLIQUID_*, TELEGRAM_*, VAULT_TRACKING_ADDRESS — per-tenant
+ *     secrets via `decryptedSecrets`, not system-managed (and gated
+ *     by `TENANT_ALLOWED_SECRETS` at the secret-CRUD boundary).
  *   - AUTH_MODE, OIDC_*, TLS_* — owned exclusively by the dashboard
  *     (read directly from Redis via `lib/auth-config.ts` +
  *     `lib/tls-config.ts`). Bots have nothing to do with auth/TLS config.
@@ -140,6 +148,35 @@ export function getOrchestratorSystemEnv(): Record<string, string> {
     // AFTER decryptedSecrets so a tenant can't smuggle their own
     // API_KEY in via secret CRUD to bypass auth.
     API_KEY: process.env.API_KEY ?? "",
+    // --- C-1 operator-policy caps (must not be tenant-overridable) ---
+    // Empty default = audit-C3 fail-closed allowlist (no strategies
+    // allowed on mainnet unless operator explicitly opts in).
+    MAINNET_ENABLED_STRATEGIES:
+      process.env.HYPERTRADE_BOT_MAINNET_ENABLED_STRATEGIES ?? "",
+    MAX_TOTAL_EXPOSURE_USD:
+      process.env.HYPERTRADE_BOT_MAX_TOTAL_EXPOSURE_USD ?? "5000",
+    SIGNAL_SIZE_MAX_MULTIPLIER:
+      process.env.HYPERTRADE_BOT_SIGNAL_SIZE_MAX_MULTIPLIER ?? "10",
+    TAKER_FEE_RATE: process.env.HYPERTRADE_BOT_TAKER_FEE_RATE ?? "0.00045",
+    TRADE_RATE_ALARM_ENABLED:
+      process.env.HYPERTRADE_BOT_TRADE_RATE_ALARM_ENABLED ?? "true",
+    TRADE_RATE_ALARM_BASELINE_MULTIPLIER:
+      process.env.HYPERTRADE_BOT_TRADE_RATE_ALARM_BASELINE_MULTIPLIER ?? "5.0",
+    TRADE_RATE_ALARM_MIN_HOURLY_FLOOR:
+      process.env.HYPERTRADE_BOT_TRADE_RATE_ALARM_MIN_HOURLY_FLOOR ?? "5",
+    TRADE_RATE_ALARM_ABSOLUTE_CEILING:
+      process.env.HYPERTRADE_BOT_TRADE_RATE_ALARM_ABSOLUTE_CEILING ?? "20",
+    TRADE_RATE_ALARM_CHECK_INTERVAL_SECONDS:
+      process.env.HYPERTRADE_BOT_TRADE_RATE_ALARM_CHECK_INTERVAL_SECONDS ??
+      "300",
+    HL_READ_TIMEOUT_SECONDS:
+      process.env.HYPERTRADE_BOT_HL_READ_TIMEOUT_SECONDS ?? "5.0",
+    HL_ORDER_TIMEOUT_SECONDS:
+      process.env.HYPERTRADE_BOT_HL_ORDER_TIMEOUT_SECONDS ?? "15.0",
+    HL_INIT_RETRY_ATTEMPTS:
+      process.env.HYPERTRADE_BOT_HL_INIT_RETRY_ATTEMPTS ?? "5",
+    HL_INIT_RETRY_BACKOFF_SECONDS:
+      process.env.HYPERTRADE_BOT_HL_INIT_RETRY_BACKOFF_SECONDS ?? "2.0",
   };
 }
 
