@@ -41,16 +41,6 @@ const SLOTS: ReadonlyArray<{
   hint: string;
 }> = [
   {
-    key: "HYPERLIQUID_PRIVATE_KEY",
-    label: "HyperLiquid private key (testnet)",
-    hint: "0x + 64 hex characters. From the HL testnet API wallet.",
-  },
-  {
-    key: "HYPERLIQUID_ACCOUNT_ADDRESS",
-    label: "HyperLiquid account address (testnet)",
-    hint: "0x + 40 hex characters. The wallet that owns the API key.",
-  },
-  {
     key: "HYPERLIQUID_MAINNET_PRIVATE_KEY",
     label: "HyperLiquid private key (mainnet)",
     hint: "Optional. Required only if you trade on mainnet.",
@@ -59,6 +49,16 @@ const SLOTS: ReadonlyArray<{
     key: "HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS",
     label: "HyperLiquid account address (mainnet)",
     hint: "Optional. Required only if you trade on mainnet.",
+  },
+  {
+    key: "HYPERLIQUID_PRIVATE_KEY",
+    label: "HyperLiquid private key (testnet)",
+    hint: "0x + 64 hex characters. From the HL testnet API wallet.",
+  },
+  {
+    key: "HYPERLIQUID_ACCOUNT_ADDRESS",
+    label: "HyperLiquid account address (testnet)",
+    hint: "0x + 40 hex characters. The wallet that owns the API key.",
   },
   {
     key: "TELEGRAM_BOT_TOKEN",
