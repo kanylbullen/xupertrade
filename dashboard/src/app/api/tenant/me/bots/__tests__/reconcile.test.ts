@@ -156,6 +156,45 @@ describe("POST /api/tenant/me/bots/[id]/reconcile", () => {
     expect(res.status).toBe(502);
   });
 
+  it("maps bot 5xx to a generic 502 and does not forward raw body", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    selectChain.limit.mockResolvedValueOnce([
+      {
+        id: BOT_ID,
+        tenantId: TENANT_ID,
+        mode: "testnet",
+        isRunning: true,
+        containerName: "x",
+      },
+    ]);
+    mockedGetBotApiUrl.mockReturnValueOnce("http://x:8001");
+
+    // Bot returns a 500 with a sensitive traceback in the body —
+    // route must squash to a generic 502 and NOT include the body.
+    const leakyBody = JSON.stringify({
+      error:
+        "Traceback (most recent call last): asyncpg.exceptions.UndefinedColumnError at internal-host:5432",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(leakyBody, {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    const res = await POST(makeReq(), makeCtx());
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("Bot API returned 500");
+    // The raw body / traceback must not leak through.
+    expect(JSON.stringify(body)).not.toContain("Traceback");
+    expect(JSON.stringify(body)).not.toContain("UndefinedColumnError");
+    expect(JSON.stringify(body)).not.toContain("internal-host");
+  });
+
   it("propagates 401 from requireTenant", async () => {
     mockedRequireTenant.mockRejectedValueOnce(
       new Response(JSON.stringify({ error: "not authenticated" }), {

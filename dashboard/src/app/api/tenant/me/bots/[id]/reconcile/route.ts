@@ -70,6 +70,21 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
       headers,
       body: bodyText || "{}",
     });
+    // Squash bot 5xx to a generic 502 — matches the pattern in
+    // lib/bot-api.ts:_doBotFetch. Don't forward raw bot error
+    // bodies to the browser (may leak internal traceback / hostnames).
+    if (res.status >= 500) {
+      const detail = await res.text().catch(() => "");
+      console.warn("[reconcile] bot returned 5xx", {
+        botId,
+        status: res.status,
+        detail: detail.slice(0, 500),
+      });
+      return Response.json(
+        { error: `Bot API returned ${res.status}` },
+        { status: 502 },
+      );
+    }
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("application/json")) {
       const data = await res.json().catch(() => ({}));

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from hypertrade.db.models import Trade
 from hypertrade.exchange.base import Exchange
@@ -128,15 +129,27 @@ async def reconcile_fills_from_hl(
                 mode=repo._mode,
                 timestamp=executed_at,
             )
-            session.add(trade)
+            # Wrap each insert in a SAVEPOINT so a unique-violation
+            # (concurrent insert / dedup race) rolls back ONLY that
+            # row instead of nuking every previously-flushed insert
+            # in this run. session.commit() at the end then persists
+            # only the savepoints that succeeded.
             try:
-                await session.flush()
-            except Exception:
-                # Concurrent insert or unique-violation — count as skip.
+                async with session.begin_nested():
+                    session.add(trade)
+                    await session.flush()
+            except IntegrityError:
                 logger.warning(
-                    "reconcile-fills: flush failed for oid=%s — skipping", order_id,
+                    "reconcile-fills: integrity error for oid=%s — skipping",
+                    order_id,
                 )
-                await session.rollback()
+                report.skipped += 1
+                continue
+            except SQLAlchemyError:
+                logger.exception(
+                    "reconcile-fills: db error for oid=%s — skipping", order_id,
+                )
+                report.skipped += 1
                 continue
             report.inserted += 1
             existing.add(order_id)

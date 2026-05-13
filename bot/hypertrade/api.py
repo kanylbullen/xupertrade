@@ -431,9 +431,9 @@ def _control_routes(
             report = await reconcile_fills_from_hl(
                 exchange=exchange, repo=repo, since_ms=since_ms,
             )
-        except Exception as e:
+        except Exception:
             logger.exception("reconcile-fills failed")
-            return _cors({"error": str(e)}, status=500)
+            return _cors({"error": "internal_error"}, status=500)
         return _cors(report.to_dict())
 
     async def options_handler(_request: web.Request) -> web.Response:

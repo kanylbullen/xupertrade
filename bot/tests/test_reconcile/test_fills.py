@@ -151,6 +151,64 @@ async def test_empty_fills_is_noop(in_memory_repo):
 
 
 @pytest.mark.asyncio
+async def test_savepoint_isolates_failed_insert(in_memory_repo, monkeypatch):
+    """If one fill raises IntegrityError on flush, the surrounding
+    SAVEPOINT must roll back only that row; previously-flushed
+    inserts in the same run still commit. Regression test for the
+    pre-fix behavior where ``session.rollback()`` wiped EVERY
+    flushed insert in the loop."""
+    from sqlalchemy.exc import IntegrityError
+
+    repo = in_memory_repo
+    fills = [_fill(1), _fill(2), _fill(3)]
+    ex = FakeExchange(fills)
+
+    # Make the *second* insert fail at flush time, leave 1 and 3 alone.
+    import hypertrade.reconcile.fills as fills_mod
+
+    original_trade_cls = fills_mod.Trade
+    call_state = {"n": 0}
+
+    class FlakyTrade(original_trade_cls):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            call_state["n"] += 1
+            self._should_fail = call_state["n"] == 2
+
+    # Patch flush so the 2nd row raises IntegrityError.
+    real_flush = None
+
+    async def fake_flush(self, *a, **kw):
+        # Walk pending objects; if any is FlakyTrade with _should_fail, raise.
+        for obj in list(self.new):
+            if isinstance(obj, FlakyTrade) and getattr(obj, "_should_fail", False):
+                raise IntegrityError("forced", params=None, orig=Exception("dup"))
+        return await real_flush(self, *a, **kw)
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    real_flush = AsyncSession.flush
+    monkeypatch.setattr(fills_mod, "Trade", FlakyTrade)
+    monkeypatch.setattr(AsyncSession, "flush", fake_flush)
+
+    report = await reconcile_fills_from_hl(exchange=ex, repo=repo)
+
+    assert report.examined == 3
+    assert report.inserted == 2  # rows 1 and 3 survived
+    assert report.skipped == 1   # row 2 rolled back
+    assert len(report.inserted_ids) == 2
+
+    async with repo._session_factory() as session:
+        rows = list(
+            (await session.execute(
+                select(models.Trade).order_by(models.Trade.order_id)
+            )).scalars().all()
+        )
+    # Critically: rows 1 and 3 must have COMMITTED despite row 2 failing.
+    assert sorted(r.order_id for r in rows) == ["1", "3"]
+
+
+@pytest.mark.asyncio
 async def test_dedup_is_string_match_on_oid(in_memory_repo):
     """oid comes back as int from HL; we store as string. Make sure
     dedup compares string-to-string so an existing '7' matches int 7."""
