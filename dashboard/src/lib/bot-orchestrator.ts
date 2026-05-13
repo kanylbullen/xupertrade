@@ -212,14 +212,16 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   //   1. fixed system identifiers (TENANT_ID, BOT_ID, EXCHANGE_MODE)
   //   2. decryptedSecrets (user-supplied)
   //   3. systemEnv (orchestrator-supplied; wins over user)
-  //   4. API_PORT (mode-pinned, wins over EVERYTHING else)
-  // Steps 2 and 3 collisions: orchestrator wins, so a malicious
-  // user can't override DATABASE_URL via the secret CRUD API. Step 4
-  // is set explicitly AFTER the spread so a caller can't accidentally
-  // override the routing convention either — bots must listen on the
-  // port their mode dictates (paper=8000, testnet=8001, mainnet=8002)
-  // so a single getBotApiUrl helper (lib/bot-api.ts) works for both
-  // operator's compose-defined bots and per-tenant orchestrator bots.
+  //   4. API_PORT (mode-pinned)
+  //   5. TELEGRAM_ENABLED (mode-pinned; PR #99)
+  // Steps 4 and 5 are mode-derived final overrides — they're set
+  // explicitly AFTER the spread so neither a tenant-supplied secret
+  // nor a stale orchestrator-system value can win over them. API_PORT
+  // pins the routing convention (bots must listen on the port their
+  // mode dictates: paper=8000, testnet=8001, mainnet=8002 — so a single
+  // getBotApiUrl helper in lib/bot-api.ts works for everything).
+  // TELEGRAM_ENABLED pins the single-Telegram-owner convention (only
+  // testnet posts; see the comment on that key below).
   const envMap: Record<string, string> = {
     TENANT_ID: params.tenantId,
     BOT_ID: params.botId,
@@ -227,6 +229,34 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     ...params.decryptedSecrets,
     ...(params.systemEnv ?? {}),
     API_PORT: String(API_PORT_BY_MODE[params.mode]),
+    // Mode-gate Telegram so only ONE bot per tenant posts notifications.
+    // The legacy compose model hardcoded `TELEGRAM_ENABLED=false` on
+    // bot-paper and bot-mainnet; only bot-testnet posted (and
+    // subscribed to all 3 modes' event channels for routing). After
+    // PR 4c retired the compose-bot model, every orchestrator-spawned
+    // bot inherited `Settings.telegram_enabled=True` (the bot config
+    // default) — so paper + testnet both fired notifiers and the
+    // operator saw EVERY trade.executed twice (once paper-tagged,
+    // once testnet-tagged). This restores the legacy single-owner
+    // convention by setting TELEGRAM_ENABLED=true only on testnet:
+    //   - testnet is the canonical Telegram owner (matches the legacy
+    //     compose convention; testnet bot's notifier already
+    //     subscribes to paper+testnet+mainnet event channels for
+    //     cross-mode routing).
+    //   - paper is silenced (would just spam duplicates of every
+    //     testnet trade.executed since both bots' notifiers receive
+    //     the same pubsub messages).
+    //   - mainnet is silenced (operator policy: avoid noise on the
+    //     real-money side; paper+testnet activity vastly outnumbers
+    //     mainnet, so a mainnet-side notifier would either drown in
+    //     paper noise or require channel-filtering work we haven't
+    //     built).
+    // Placed AFTER the `...systemEnv` spread (and AFTER
+    // `...decryptedSecrets`) so neither tenant-supplied
+    // TELEGRAM_ENABLED nor a stale orchestrator-system value can win
+    // over the mode-derived gate. Same pattern as API_PORT — the
+    // value is mode-pinned and not operator-overridable per-bot.
+    TELEGRAM_ENABLED: params.mode === "testnet" ? "true" : "false",
   };
   const env = Object.entries(envMap).map(([k, v]) => `${k}=${v}`);
   return {
