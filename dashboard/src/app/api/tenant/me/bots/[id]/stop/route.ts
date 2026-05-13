@@ -40,8 +40,17 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     return Response.json({ error: "bot not found" }, { status: 404 });
   }
 
-  // Already stopped — nothing to do, just return current state.
-  if (!bot.isRunning && bot.containerId === null) {
+  // Already stopped AND no stale routing data — nothing to do.
+  // Copilot review fix on PR #101: previously we returned early when
+  // `!isRunning && containerId === null`, which let a stale
+  // containerName from before the persist-on-stop fix sit in the row
+  // forever. Now we also require containerName to be cleared before
+  // skipping the reconciliation UPDATE.
+  if (
+    !bot.isRunning &&
+    bot.containerId === null &&
+    bot.containerName === null
+  ) {
     return Response.json({ bot });
   }
 
@@ -68,6 +77,11 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     .set({
       isRunning: false,
       containerId: null,
+      // Clear container_name too — the container is gone after
+      // stopAndRemove(), so the routing target is no longer valid.
+      // Keeping a stale name here would let `getBotApiUrl` resolve to
+      // a hostname that no longer exists, masking real failures.
+      containerName: null,
       lastStoppedAt: sql`now()`,
     })
     .where(

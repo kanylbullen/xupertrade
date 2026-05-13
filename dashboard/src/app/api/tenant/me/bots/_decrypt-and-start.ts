@@ -120,13 +120,25 @@ export async function decryptAndStart(args: Args): Promise<Result> {
     };
   }
 
-  // 4. Persist the container_id. If THIS fails, compensate by
-  // stopping the container so we don't leave it orphaned.
+  // 4. Persist the container_id AND container_name. If THIS fails,
+  // compensate by stopping the container so we don't leave it
+  // orphaned.
+  //
+  // container_name is required for dashboard→bot routing: the
+  // dashboard's `lib/bot-api.ts:getBotApiUrl` derives the in-network
+  // hostname from `container_name`. If we only persist container_id
+  // (the long sha256 docker handle, not addressable on the docker
+  // network), every `tenantBotFetch` call 404s and the UI shows
+  // "Offline" even though the container is healthy and running.
+  // (Live incident 2026-05-13.) Use the name returned by docker
+  // inspect — single source of truth — rather than re-deriving via
+  // `containerName(...)` so we can never drift.
   try {
     const updated = await db
       .update(tenantBots)
       .set({
         containerId: started.id,
+        containerName: started.name,
         isRunning: true,
         lastStartedAt: sql`now()`,
         // Clear lastStoppedAt so the timeline reads "started at X"
