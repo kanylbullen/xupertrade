@@ -194,27 +194,87 @@ The Phase instance URL itself (operator's hostname for their Phase web
 UI) is treated as private operator info — see § 0. Use `$PHASE_URL`
 as a placeholder if a doc example needs to refer to it.
 
+### Host-side cron jobs
+
+These are installed manually on `$DEPLOY_HOST` (root crontab); they live
+on the host, NOT in the repo. Documented here so a future agent knows
+what's expected to be running and why.
+
+| Schedule | Command | Why |
+|---|---|---|
+| `0 4 * * *` | `docker builder prune -af > /var/log/docker-prune.log 2>&1` | Docker's builder cache grows unbounded between deploys and fills the 30G root partition after ~5–10 dashboard rebuilds. Without this, deploys eventually fail with disk-full errors mid-COPY (see the cache-trap warning below). 04:00 UTC is well outside trading-hours volatility windows. |
+
+To install:
+
+```bash
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "( crontab -l 2>/dev/null; echo '0 4 * * * docker builder prune -af > /var/log/docker-prune.log 2>&1' ) | crontab -"
+```
+
+To verify after install: `ssh root@$DEPLOY_HOST 'crontab -l'`.
+
 ### Standard deploy command
 
+**Always split build from `up -d` and verify image age between them.** The
+chained one-liner (`build && up -d`) hit the layer cache and silently
+produced stale images on three back-to-back PR deploys in a 24h window
+(2026-05-12) — the chained command exited 0, dashboard "deployed", and
+live behavior matched the pre-PR state because `--force-recreate` then
+brought the container up off an unchanged image SHA. See the cache-trap
+warning below for the underlying mechanic.
+
+```bash
+# 1. Pull master + check disk + build with --no-cache --pull
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && \
+   git fetch origin && git reset --hard origin/master && \
+   df -h / | tail -1 && \
+   phase run -- docker compose --profile build build --no-cache --pull bot-image dashboard"
+
+# 2. Verify image age — both timestamps must be newer than your commit
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "docker image inspect hypertrade-dashboard -f 'built: {{.Created}}' && \
+   docker image inspect hypertrade-bot:latest -f 'built: {{.Created}}'"
+
+# 3. Only THEN recreate the containers
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && phase run -- docker compose up -d --force-recreate dashboard"
+```
+
+> ⚠️ **`up -d --force-recreate dashboard` only refreshes the dashboard
+> container.** Tenant-bots are orchestrator-spawned (separate Docker
+> containers, not in `docker-compose.yml` post-PR-4c) and the orchestrator
+> does NOT auto-restart them when `hypertrade-bot:latest` updates. So a
+> bot code change ships the new image into the registry but already-running
+> tenant bots keep using the read-only layers from the image they spawned
+> against until the dashboard explicitly recreates them.
+>
+> When the bot code itself changed (not just the dashboard), the
+> operator must trigger a tenant-bot restart per running bot via the
+> dashboard UI's `Settings → Bots → restart`. Or via API:
+> `POST /api/tenant/me/bots/<bot_id>/stop` then `/start`. Until that
+> happens, the new bot logic only applies to bots STARTED after the
+> deploy — not to ones already running.
+
+For mainnet (opt-in via `--profile mainnet`), the same three-step shape
+applies — substitute the mainnet profile/services into steps 1 and 3:
+
 ```bash
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && \
    git fetch origin && git reset --hard origin/master && \
-   phase run -- bash -c 'docker compose build --pull && docker compose up -d'"
-```
-
-For mainnet (opt-in via `--profile mainnet`):
-
-```bash
+   df -h / | tail -1 && \
+   phase run -- docker compose --profile mainnet build --no-cache --pull bot-mainnet"
+# verify image age (as step 2 above), then:
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "cd /opt/hypertrade && \
-   git fetch origin && git reset --hard origin/master && \
-   phase run -- bash -c 'docker compose --profile mainnet build --pull && \
-                          docker compose --profile mainnet up -d'"
+  "cd /opt/hypertrade && phase run -- docker compose --profile mainnet up -d --force-recreate bot-mainnet"
 ```
 
-`--pull` forces docker to refetch the base image so a stale base layer
-doesn't quietly survive multiple deploys.
+`--no-cache --pull` together force a full rebuild from current sources
+*and* refresh the base image, so neither a stale local layer nor a stale
+base layer can quietly survive a deploy. `df -h /` upfront surfaces disk
+pressure before the build crashes mid-COPY (see the disk-full bullet
+under the cache-trap warning below).
 
 > ⚠️ **Cache trap on first build of a profile-gated service.**
 > If a service has never been built before (e.g. bot-mainnet on a
@@ -257,9 +317,28 @@ doesn't quietly survive multiple deploys.
 > ```
 >
 > If the timestamp pre-dates your commit, force a no-cache rebuild.
+>
+> **Disk-full mid-build is the silent corollary.** The 30G root partition
+> fills up after ~5–10 dashboard rebuilds because docker's builder cache
+> grows unbounded. When the disk fills mid-COPY, `docker compose build`
+> emits a confusing error and may still exit 0 in the chained
+> `build && up -d` form, leaving a half-baked or missing image. Run
+> `docker builder prune -af` before deploying when `df -h /` shows the
+> root partition above 80%. A daily host-side cron (see
+> "Host-side cron jobs" above) keeps this from accumulating between
+> deploys.
 
-Build only what changed for speed (e.g.
-`phase run -- bash -c 'docker compose build --pull bot-testnet bot-paper dashboard'`).
+Build only what changed for speed — but keep `--no-cache --pull` and
+the standalone build step (no chained `&& up -d`):
+
+```bash
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && phase run -- docker compose --profile build build --no-cache --pull dashboard"
+```
+
+Then verify image age and recreate per the three-step shape above. The
+old `bash -c 'build --pull && up -d'` form is what bit us with the
+cache-trap — don't reintroduce it.
 
 ### Standard "is the bot OK?" check
 
@@ -271,9 +350,21 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    docker compose exec -T postgres psql -U postgres -d hypertrade \
    -c \"SELECT strategy_name, symbol, side, size, entry_price FROM positions WHERE mode='testnet' AND is_open=true;\""
 
-# Recent errors
+# Recent errors — post-PR-4c the bots are tenant-scoped, so the legacy
+# `hypertrade-bot-testnet` container no longer exists. Container names
+# follow `hypertrade-bot-<short_id>-<mode>` (e.g.
+# `hypertrade-bot-0000000000000000-testnet` for the operator's tenant);
+# discover the right one before grepping logs.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "docker logs hypertrade-bot-testnet --since 1h 2>&1 | grep -iE 'error|warning' | tail -50"
+  "matches=\$(docker ps --format '{{.Names}}' | grep -E '^hypertrade-bot-.*-testnet\$'); \
+   case \$(echo \"\$matches\" | grep -c .) in \
+     0) echo 'no testnet bot container running' >&2; exit 1 ;; \
+     1) container=\$matches ;; \
+     *) echo 'multiple testnet bots — pick one explicitly:' >&2; \
+        echo \"\$matches\" >&2; exit 1 ;; \
+   esac; \
+   echo \"=== \$container ===\"; \
+   docker logs \"\$container\" --since 1h 2>&1 | grep -iE 'error|warning' | tail -50"
 ```
 
 ---
