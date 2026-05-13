@@ -343,7 +343,7 @@ None currently.
 - [ ] **Drop direct port exposure once HTTPS is verified.** Dashboard `:3000` and bot `:8001/:8002` are still bound on the host. Caddy is the only path that should be reachable externally. Remove the host-port mappings from `docker-compose.yml` for those services and let Caddy handle all ingress.
 - [ ] **Make `/strategies` page data-driven.** Currently a hardcoded array of 21 strategy descriptors. Should pull names+symbol+timeframe from the bot's `/strategies` endpoint and read description/strengths/weaknesses from a metadata file colocated with each strategy module.
 - [ ] **Surface backtest history in dashboard.** `backtest_runs` table now persists every CLI run. A `/backtests` page would let users compare runs, filter by strategy, and see how parameter changes affect APR/Sharpe over time.
-- [ ] **Suppress Telegram noise on transient HL-fetch failures.** Bot currently emits `ErrorOccurred` on every strategy tick whose `fetch_candles` fails after retries — this spams Telegram during HL outages even though the bot recovers automatically. Filter by error type before publishing.
+- [ ] **Suppress Telegram noise on transient HL-fetch failures (strategy ticks).** Bot currently emits `ErrorOccurred` on every strategy tick whose `fetch_candles` fails after retries — this spams Telegram during HL outages even though the bot recovers automatically. Filter by error type before publishing. (Companion fix landed for HODL verdict-recovery noise on `fix/vault-picks-error-event` — strategy-tick path still TODO.)
 
 ### Done
 

@@ -17,6 +17,7 @@ from hypertrade.events.bus import EventBus
 from hypertrade.events.types import (
     BotHeartbeat,
     ErrorOccurred,
+    HodlVerdictChanged,
     LogEntry,
     SignalGenerated,
     TickCompleted,
@@ -60,6 +61,20 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     if name in ("ConnectionError", "ConnectTimeout", "ReadTimeout"):
         return True
     return False
+
+
+def _is_transient_unknown_verdict(verdict: str | None) -> bool:
+    """Return True if `verdict` looks like the transient "evaluation
+    failed" sentinel produced by hodl.base.Signal.evaluate() when an
+    upstream fetch raised. Used to suppress recovery-noise notifications:
+    if we never pinged the user about the failure, we shouldn't ping
+    them about the recovery either.
+    """
+    if not verdict:
+        return False
+    v = verdict.lower()
+    return v.startswith("unknown") or "evaluation failed" in v
+
 
 _start_time = time.time()
 
@@ -1209,16 +1224,33 @@ class EngineRunner:
             if prev is None or prev == state.verdict:
                 continue
 
-            # Verdict changed → emit event so Telegram forwards it
+            # Recovery-noise filter: when prev is the transient "Unknown
+            # — evaluation failed" sentinel, the follow-up normal verdict
+            # is just recovery from a fetch hiccup. The original failure
+            # didn't notify (it's caught at sig.evaluate() and logged),
+            # so the recovery shouldn't either. Still log the transition
+            # to runner so the timeline survives.
+            if _is_transient_unknown_verdict(prev):
+                logger.info(
+                    "[hodl/%s] verdict recovery (suppressed notify): "
+                    "%r → %r (score %.2f)",
+                    sig.name, prev, state.verdict, state.score,
+                )
+                continue
+
+            # Verdict changed → emit info event so Telegram forwards it
+            # without an ⚠️ ERROR prefix. A new Unknown-shaped verdict
+            # IS published — the user wants to know when something just
+            # broke (the prev==Unknown short-circuit above prevents
+            # double-publishing on consecutive failures).
             if self.event_bus:
                 try:
                     await self.event_bus.publish(
-                        ErrorOccurred(
+                        HodlVerdictChanged(
                             strategy=f"hodl/{sig.name}",
-                            message=(
-                                f"HODL verdict changed for {sig.asset}: "
-                                f"{prev} → {state.verdict}"
-                            ),
+                            asset=sig.asset,
+                            prev_verdict=prev,
+                            new_verdict=state.verdict,
                         )
                     )
                 except Exception:
