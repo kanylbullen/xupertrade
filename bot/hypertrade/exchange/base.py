@@ -88,6 +88,12 @@ class Exchange(ABC):
         """Fetch funding events. Default no-op for paper / non-perpetual."""
         return []
 
+    async def fetch_user_fills(
+        self, address: str | None = None, since_ms: int | None = None,
+    ) -> list[dict]:
+        """Fetch raw exchange fill records. Default no-op for paper."""
+        return []
+
     def get_size_precision(self, symbol: str) -> int:
         """Return szDecimals (size-precision) for a coin. Drives the
         parity-check tolerance — anything within `10**(-szDecimals)` is

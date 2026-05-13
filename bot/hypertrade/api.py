@@ -407,6 +407,35 @@ def _control_routes(
         await exchange.update_leverage(strat.symbol, per_coin[strat.symbol], is_cross=True)
         return _cors({"strategy": name, "leverage": strat.leverage, "reset": True})
 
+    async def reconcile_fills(request: web.Request) -> web.Response:
+        """POST /api/control/reconcile — backfill missing trade rows
+        from HL fill history. Body: optional {"since_ms": <int>}.
+        Returns the ReconcileReport JSON. Manual operator-triggered."""
+        if (err := _require_auth(request)) is not None:
+            return err
+        repo: Repository | None = request.app.get("repo")
+        if repo is None:
+            return _cors({"error": "repository not available"}, status=500)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        since_ms = body.get("since_ms") if isinstance(body, dict) else None
+        if since_ms is not None:
+            try:
+                since_ms = int(since_ms)
+            except (TypeError, ValueError):
+                return _cors({"error": "since_ms must be an integer"}, status=400)
+        try:
+            from hypertrade.reconcile import reconcile_fills_from_hl
+            report = await reconcile_fills_from_hl(
+                exchange=exchange, repo=repo, since_ms=since_ms,
+            )
+        except Exception as e:
+            logger.exception("reconcile-fills failed")
+            return _cors({"error": str(e)}, status=500)
+        return _cors(report.to_dict())
+
     async def options_handler(_request: web.Request) -> web.Response:
         return _cors({})
 
@@ -723,6 +752,7 @@ def _control_routes(
     app.router.add_post("/api/control/strategy/{name}/leverage", set_leverage)
     app.router.add_post("/api/control/strategy/{name}/leverage/reset", reset_leverage)
     app.router.add_post("/api/control/allow-multi-coin", set_allow_multi_coin)
+    app.router.add_post("/api/control/reconcile", reconcile_fills)
     app.router.add_route("OPTIONS", "/api/control/{tail:.*}", options_handler)
 
 
