@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/sidebar";
 import { BotStatusIndicator } from "@/components/bot-status-indicator";
 import { UserMenu } from "@/components/user-menu";
+import type { Mode } from "@/lib/mode";
 
 /**
  * Dashboard sidebar — sole nav surface after the cutover (PR B + C of
@@ -23,20 +24,27 @@ import { UserMenu } from "@/components/user-menu";
  * mode-agnostic everywhere else.
  *
  * Layout:
- * - Header: brand + BotStatusIndicator (reads `/overview/<mode>` from
- *   the pathname; defaults to testnet on mode-agnostic routes).
- * - Overview group: 3 mode-bound links → /overview/{paper,testnet,mainnet}.
+ * - Header: brand only. (The global `BotStatusIndicator` used to live
+ *   here too — replaced by per-mode dots in the Overview group below
+ *   so the operator can see all three bots' state at once.)
+ * - Overview group: 3 mode-bound links → /overview/{mainnet,testnet,paper}.
+ *   Real-money first, scratch last (operator preference). Each row has
+ *   its own status dot (green/yellow/red/muted) polled independently.
  * - Pages group: bare paths (no `?mode=`) — Trades is mode-agnostic
  *   with its own filter pill, Strategies is hardcoded descriptive
  *   cards, HODL + Vaults are mainnet-only by design.
  * - Footer: `<UserMenu />` — Credentials / Bots / Settings / Sign out.
  */
 
-const overviewModes = [
-  { href: "/overview/paper", label: "Paper" },
-  { href: "/overview/testnet", label: "Testnet" },
-  { href: "/overview/mainnet", label: "Mainnet" },
-] as const;
+const overviewModes: ReadonlyArray<{
+  href: string;
+  label: string;
+  mode: Mode;
+}> = [
+  { href: "/overview/mainnet", label: "Mainnet", mode: "mainnet" },
+  { href: "/overview/testnet", label: "Testnet", mode: "testnet" },
+  { href: "/overview/paper", label: "Paper", mode: "paper" },
+];
 
 const pageLinks = [
   { href: "/trades", label: "Trades" },
@@ -56,7 +64,6 @@ export function AppSidebar() {
       <SidebarHeader>
         <div className="flex items-center gap-2 px-2 py-1 text-lg font-bold tracking-tight">
           <span>Xupertrade</span>
-          <BotStatusIndicator />
         </div>
       </SidebarHeader>
       <SidebarContent>
@@ -70,6 +77,10 @@ export function AppSidebar() {
                   tooltip={link.label}
                   render={
                     <Link href={link.href}>
+                      <BotStatusIndicator
+                        mode={link.mode}
+                        variant="dot"
+                      />
                       <span>{link.label}</span>
                     </Link>
                   }
