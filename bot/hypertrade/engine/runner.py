@@ -927,50 +927,99 @@ class EngineRunner:
         # so a SIGTERM / crash between them left a Trade row with no
         # matching PositionRecord (or vice versa for close), which the
         # next reconcile loop would treat as a divergence and force-close.
+        #
+        # 2026-05-13 fix: this write must NEVER be allowed to silently
+        # fail while the order has already been placed. The order side
+        # (HL place_order) returns success → we log "Executed:" → if the
+        # DB write then raises (e.g. asyncpg InvalidPasswordError after
+        # a tenant role-password rotation by a sibling bot start), the
+        # exception used to bubble up to `_run_strategy`'s catch-all
+        # which logged a traceback and continued the next tick. The bot
+        # would keep placing orders the DB never saw — exact divergence
+        # mode that hit testnet 05:00–10:00 UTC. We now **pause the bot
+        # via Redis** on any DB-write failure so subsequent ticks can't
+        # add more divergent orders. Operator must restart the bot
+        # (which provisions a fresh DATABASE_URL via the orchestrator)
+        # then un-pause.
         if self.repo:
-            if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
-                import json as _json
-                side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
-                strat = next(
-                    (s for s in self.strategies if s.name == signal.strategy_name),
-                    None,
+            try:
+                if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
+                    import json as _json
+                    side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+                    strat = next(
+                        (s for s in self.strategies if s.name == signal.strategy_name),
+                        None,
+                    )
+                    state_json = None
+                    if strat is not None:
+                        try:
+                            state = strat.export_state()
+                            if state is not None:
+                                state_json = _json.dumps(state)
+                        except Exception:
+                            logger.exception(
+                                "[%s] export_state failed (continuing without)",
+                                signal.strategy_name,
+                            )
+                    await self.repo.record_trade_and_open_position(
+                        order_id=order.id,
+                        strategy_name=signal.strategy_name,
+                        symbol=signal.symbol,
+                        trade_side=order.side,
+                        position_side=side,
+                        size=size,
+                        price=filled_price,
+                        fee=fee,
+                        reason=signal.reason,
+                        state_json=state_json,
+                    )
+                elif signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
+                    await self.repo.record_trade_and_close_position(
+                        order_id=order.id,
+                        strategy_name=signal.strategy_name,
+                        symbol=signal.symbol,
+                        trade_side=order.side,
+                        size=size,
+                        price=filled_price,
+                        fee=fee,
+                        pnl=realized_pnl or 0,
+                        reason=signal.reason,
+                    )
+                    await self.portfolio.record_pnl(realized_pnl or 0)
+            except Exception as db_exc:
+                # The order is already on the exchange. We failed to
+                # record it. STOP TRADING so we don't open more
+                # untracked positions. Operator must intervene.
+                logger.exception(
+                    "[%s] CRITICAL: trade executed on exchange (order_id=%s) "
+                    "but DB write FAILED — auto-pausing bot to prevent further "
+                    "divergence. Resolve the underlying DB error, restart the "
+                    "bot to pick up fresh credentials, then un-pause.",
+                    signal.strategy_name,
+                    order.id,
                 )
-                state_json = None
-                if strat is not None:
+                if self.control:
                     try:
-                        state = strat.export_state()
-                        if state is not None:
-                            state_json = _json.dumps(state)
+                        await self.control.set_paused(True)
                     except Exception:
-                        logger.exception(
-                            "[%s] export_state failed (continuing without)",
-                            signal.strategy_name,
+                        logger.exception("Failed to set paused flag")
+                if self.event_bus:
+                    try:
+                        await self.event_bus.publish(
+                            ErrorOccurred(
+                                strategy=signal.strategy_name,
+                                message=(
+                                    f"DB-write divergence: order {order.id} "
+                                    f"placed but trades-table insert failed "
+                                    f"({type(db_exc).__name__}: {db_exc}). "
+                                    f"Bot paused — restart to refresh DB credentials."
+                                ),
+                            )
                         )
-                await self.repo.record_trade_and_open_position(
-                    order_id=order.id,
-                    strategy_name=signal.strategy_name,
-                    symbol=signal.symbol,
-                    trade_side=order.side,
-                    position_side=side,
-                    size=size,
-                    price=filled_price,
-                    fee=fee,
-                    reason=signal.reason,
-                    state_json=state_json,
-                )
-            elif signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
-                await self.repo.record_trade_and_close_position(
-                    order_id=order.id,
-                    strategy_name=signal.strategy_name,
-                    symbol=signal.symbol,
-                    trade_side=order.side,
-                    size=size,
-                    price=filled_price,
-                    fee=fee,
-                    pnl=realized_pnl or 0,
-                    reason=signal.reason,
-                )
-                await self.portfolio.record_pnl(realized_pnl or 0)
+                    except Exception:
+                        logger.exception("Failed to publish divergence event")
+                # Re-raise so _run_strategy logs the full traceback for forensics.
+                raise
 
         # Snapshot post-signal strategy state to Redis. Covers the
         # cooldown-after-close gap (audit M6 / PR #19 review): position
