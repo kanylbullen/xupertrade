@@ -194,6 +194,79 @@ The Phase instance URL itself (operator's hostname for their Phase web
 UI) is treated as private operator info — see § 0. Use `$PHASE_URL`
 as a placeholder if a doc example needs to refer to it.
 
+### Rotating POSTGRES_PASSWORD
+
+`POSTGRES_PASSWORD` lives in Phase (app `xupertrade`, env `Development`).
+Postgres only reads that env on **container init** — updating it in Phase
+does NOT change the password inside an already-initialized database. Full
+rotation is therefore a two-step dance: update the live DB user with
+`ALTER USER` (authenticating with the OLD password, which is still active
+in the running cluster), then recreate every container that has a
+`DATABASE_URL` baked into its env so they pick up the new value.
+
+> Heads-up before doing this: as of `a49a95b`, `docker-compose.yml`
+> hardcodes `POSTGRES_PASSWORD: postgres` and
+> `DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hypertrade`
+> on the postgres + dashboard services (no `${VAR}` interpolation). Phase's
+> injected `POSTGRES_PASSWORD` therefore does NOT reach those services
+> today. Either:
+> 1. Land a follow-up that changes the compose lines to
+>    `${POSTGRES_PASSWORD:?}` and
+>    `postgresql://postgres:${POSTGRES_PASSWORD:?}@postgres:5432/hypertrade`
+>    BEFORE rotating, OR
+> 2. Edit the literal value in the compose file on the host alongside
+>    the rotation (and keep it out of git).
+>
+> Tenant-bot containers spawned by the dashboard read `DATABASE_URL` from
+> the dashboard's environment, so they inherit whatever the dashboard
+> sees at spawn time.
+
+Steps:
+
+1. **Generate a fresh secret locally** (don't commit, don't paste in chat):
+   ```bash
+   openssl rand -base64 36 | tr -d '/+=\n'
+   ```
+
+2. **Update Phase**: web UI → app `xupertrade` → env `Development` → key
+   `POSTGRES_PASSWORD` → save.
+
+3. **ALTER inside the running postgres container**, authenticating with
+   the OLD password (still active in `pg_authid` until you change it):
+   ```bash
+   ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+     "docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade \
+      -c \"ALTER USER postgres WITH PASSWORD '<paste new>';\""
+   ```
+
+4. **Recreate consumers** so they pick up the new env-injected
+   `DATABASE_URL`:
+   ```bash
+   ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+     "cd /opt/hypertrade && phase run -- docker compose up -d --no-deps --force-recreate dashboard"
+   ```
+   Each tenant bot must be Stop+Started via the dashboard UI
+   (Settings → Bots → restart) so its container is respawned with the
+   new env. Until that happens, already-running tenant bots keep using
+   the OLD `DATABASE_URL` from their spawn-time env and will start
+   failing auth on the next reconnect.
+
+5. **Verify**:
+   ```bash
+   ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+     "docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c '\\du'"
+   ```
+   Should list the `postgres` role without auth error. Spot-check that
+   the dashboard `/` and a tenant bot's `/api/positions` still respond.
+
+The postgres CONTAINER itself does NOT need to be recreated — the user
+password lives in `pg_authid` (durable WAL state) and `ALTER USER`
+updates it in place. Recreating postgres would mean a
+volume-preserving down/up, which is more disruption than needed and
+risks DB downtime during active trading.
+
+---
+
 ### Host-side cron jobs
 
 These are installed manually on `$DEPLOY_HOST` (root crontab); they live
