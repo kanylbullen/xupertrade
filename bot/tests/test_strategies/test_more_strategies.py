@@ -1188,6 +1188,62 @@ class TestOlegAryukovStrategy:
             )
         assert result.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
 
+    def test_reset_state_clears_all_position_attrs(self):
+        """reset_state() must null EVERY per-trade attribute. Without this,
+        a stale _stop_loss / _trail_extreme / _entry_price from a previous
+        trade can leak into the next position's exit logic."""
+        strat = OlegAryukovStrategy()
+        strat.restore_state("short", 2286.10)
+        # All position attrs are now populated
+        assert strat._position_side == "short"
+        assert strat._entry_price == 2286.10
+        assert strat._stop_loss is not None
+        assert strat._take_profit is not None
+        assert strat._trail_extreme is not None
+
+        strat.reset_state()
+        assert strat._position_side is None
+        assert strat._entry_price is None
+        assert strat._stop_loss is None
+        assert strat._take_profit is None
+        assert strat._trail_extreme is None
+
+    @pytest.mark.asyncio
+    async def test_new_entry_does_not_inherit_old_position_state(self):
+        """Open short A → SL hit (auto-resets) → open short B at a different
+        price level. B's SL/entry/trail must reflect B's price, not A's."""
+        strat = OlegAryukovStrategy(use_trailing=False)
+
+        # --- Position A: short at 2300 ---
+        strat.restore_state("short", 2300.0)
+        a_sl = strat._stop_loss
+        a_entry = strat._entry_price
+        assert a_sl is not None and a_entry == 2300.0
+
+        # Drive SL hit: high >= sl
+        df = _flat_df(self.WARMUP + 5, price=2300.0)
+        df.at[df.index[-1], "high"] = a_sl + 5.0
+        df.at[df.index[-1], "low"] = 2295.0
+        df.at[df.index[-1], "close"] = a_sl + 1.0
+        result = await strat.on_candle(df)
+        assert result is not None
+        assert result.action == SignalAction.CLOSE_SHORT
+        # reset_state must have fired
+        assert strat._position_side is None
+        assert strat._stop_loss is None
+        assert strat._entry_price is None
+        assert strat._trail_extreme is None
+
+        # --- Position B: short at 2100 (very different price) ---
+        strat.restore_state("short", 2100.0)
+        assert strat._entry_price == 2100.0
+        assert strat._stop_loss == pytest.approx(
+            2100.0 * (1 + strat.stop_loss_percent / 100.0)
+        )
+        # Critical: NEW SL must be < OLD SL — proves no leak
+        assert strat._stop_loss < a_sl
+        assert strat._trail_extreme == 2100.0
+
 
 # ===========================================================================
 # Qullamaggie breakout (Loose / Intraday preset)
