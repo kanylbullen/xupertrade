@@ -282,6 +282,7 @@ function CredentialsList({ onLocked }: { onLocked: () => void }) {
 
   return (
     <div className="space-y-4">
+      <SecurityInfo />
       <TelegramLinkCard />
       {SLOTS.map((slot) => (
         <SecretSlot
@@ -538,6 +539,110 @@ function SecretSlot({
           </div>
         </form>
       )}
+    </div>
+  );
+}
+
+function SecurityInfo() {
+  return (
+    <div className="rounded-lg border border-blue-500/40 bg-blue-500/5 p-4 text-sm">
+      <div className="flex items-start gap-3">
+        <span aria-hidden className="text-base">🔒</span>
+        <div className="space-y-2">
+          <p className="font-medium">
+            Your private keys are encrypted under a key only your
+            passphrase can unlock &mdash; never written to disk, never
+            visible to the database or to logs.
+          </p>
+          <p className="text-muted-foreground">
+            The keys travel from your browser to the dashboard server
+            over TLS. The server encrypts them in memory using a key
+            derived from the passphrase you entered when you unlocked
+            this page, and only the encrypted blob hits the database.
+            Plaintext never touches durable storage &mdash; not the
+            DB, not the log files, not Phase. If you forget the
+            passphrase the keys are unrecoverable; there is no reset.
+            If someone steals the database, they still need to crack
+            your passphrase through Argon2id before they get anything
+            usable, which is intentionally tuned to take years on
+            dedicated hardware for any decent passphrase.
+          </p>
+          <details className="group mt-2">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
+              For the technically curious &mdash; how it actually works
+            </summary>
+            <div className="mt-3 space-y-3 text-xs text-muted-foreground">
+              <p>
+                <strong className="text-foreground">Key derivation.</strong>{" "}
+                Your passphrase is fed through{" "}
+                <code className="rounded bg-muted px-1">Argon2id</code>{" "}
+                (memory-hard KDF, parameters: 64&nbsp;MiB, 3 iterations,
+                4-way parallelism) together with a 16-byte random salt
+                that&rsquo;s unique per tenant. Output is a 32-byte
+                key&nbsp;<code className="rounded bg-muted px-1">K</code>.
+                These parameters mean an attacker with a stolen
+                database needs ~hundreds of milliseconds per guess on a
+                modern CPU and can&rsquo;t shortcut it on a GPU/ASIC the
+                way they could with bcrypt or PBKDF2.
+              </p>
+              <p>
+                <strong className="text-foreground">At-rest encryption.</strong>{" "}
+                Each secret value is encrypted with{" "}
+                <code className="rounded bg-muted px-1">AES-256-GCM</code>{" "}
+                under&nbsp;<code className="rounded bg-muted px-1">K</code>,
+                using a fresh 12-byte nonce per write. The database
+                stores only the ciphertext + nonce; the key is never
+                persisted to disk. Two encryptions of the same
+                plaintext produce different ciphertexts (so a DB-read
+                alone doesn&rsquo;t even reveal which secrets share a
+                value). GCM authenticates the ciphertext &mdash; any
+                tampering or wrong-key decryption attempt fails loudly
+                rather than returning garbage.
+              </p>
+              <p>
+                <strong className="text-foreground">Verifier, not password storage.</strong>{" "}
+                We never store your passphrase, not even hashed. What
+                we store is an{" "}
+                <code className="rounded bg-muted px-1">HMAC-SHA-256</code>{" "}
+                of&nbsp;<code className="rounded bg-muted px-1">K</code>{" "}
+                over a fixed domain string. On unlock we re-derive K
+                from your typed passphrase and compare in constant
+                time. Wrong passphrase → verifier mismatch → we
+                don&rsquo;t even attempt decryption.
+              </p>
+              <p>
+                <strong className="text-foreground">Session cache.</strong>{" "}
+                After unlock,&nbsp;<code className="rounded bg-muted px-1">K</code>{" "}
+                lives in Redis under a key tied to your session
+                ID&nbsp;with a 24-hour TTL, so you don&rsquo;t have to
+                re-enter the passphrase on every action. Logging out or
+                hitting Lock clears it immediately. Key length is
+                checked on read &mdash; corrupted entries are dropped
+                and you get re-prompted.
+              </p>
+              <p>
+                <strong className="text-foreground">Threat boundaries
+                we don&rsquo;t cover.</strong> An operator with root
+                access to the host running the bot containers could
+                read decrypted secrets out of running-process memory or
+                container env vars (the bot needs the plaintext key to
+                place orders &mdash; that&rsquo;s unavoidable). The
+                relevant property is that no decrypted secret ever
+                touches durable storage, no operator can read your
+                secrets without your passphrase before bot start, and
+                rotating a compromised key invalidates the old
+                ciphertext on next save.
+              </p>
+              <p className="text-[11px]">
+                Source:{" "}
+                <code className="rounded bg-muted px-1">
+                  dashboard/src/lib/crypto/&#123;passphrase,secrets,k-cache&#125;.ts
+                </code>
+              </p>
+            </div>
+          </details>
+        </div>
+      </div>
     </div>
   );
 }
