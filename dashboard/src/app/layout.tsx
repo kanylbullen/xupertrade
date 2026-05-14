@@ -22,7 +22,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Xupertrade Dashboard",
+  title: "xupertrade Dashboard",
   description: "Trading bot monitoring dashboard",
 };
 
@@ -64,7 +64,7 @@ export default async function RootLayout({
               <header className="sticky top-0 z-30 flex h-12 items-center gap-2 border-b bg-background/80 px-3 backdrop-blur md:hidden">
                 <SidebarTrigger />
                 <span className="text-sm font-semibold tracking-tight">
-                  Xupertrade
+                  xupertrade
                 </span>
               </header>
               <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">

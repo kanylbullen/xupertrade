@@ -72,7 +72,7 @@ export function AppSidebar() {
     <Sidebar collapsible="icon">
       <SidebarHeader>
         <div className="flex items-center gap-2 px-2 py-1 text-lg font-bold tracking-tight">
-          <span>Xupertrade</span>
+          <span>xupertrade</span>
         </div>
       </SidebarHeader>
       <SidebarContent>

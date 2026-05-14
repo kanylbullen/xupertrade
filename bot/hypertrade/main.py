@@ -183,7 +183,7 @@ async def main() -> None:
         if telegram.configured:
             from hypertrade.notify.telegram import MODE_BADGE
             badge = MODE_BADGE.get(settings.exchange_mode, settings.exchange_mode.upper())
-            await telegram.send(f"{badge} 🚀 <b>Xupertrade started</b>")
+            await telegram.send(f"{badge} 🚀 <b>xupertrade started</b>")
     except Exception:
         logger.exception("Telegram notifier failed to start")
 
