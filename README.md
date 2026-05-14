@@ -1,11 +1,11 @@
-# Xupertrade
+# xupertrade
 
 Automated crypto trading bot targeting [HyperLiquid](https://hyperliquid.xyz) with a real-time monitoring dashboard, multi-environment support (paper / testnet / mainnet), and Telegram control.
 
 > The internal codename `hypertrade` is still used in container
 > names, the Postgres database name, the Phase secrets app, the
 > source-tree path, and most code references. Only the user-facing
-> brand is **Xupertrade** — kept distinct from HyperLiquid's name to
+> brand is **xupertrade** (lowercase) — kept distinct from HyperLiquid's name to
 > avoid confusion. No internal rename was done because moving every
 > container + volume + secret exceeds the benefit.
 
@@ -213,7 +213,7 @@ The bot pushes notifications **and** accepts interactive commands.
    TELEGRAM_BOT_TOKEN=<paste-from-botfather>
    TELEGRAM_CHAT_ID=<your-numeric-chat-id>
    ```
-4. Restart the testnet bot (which is the one that owns Telegram): `docker compose up -d --force-recreate bot-testnet`. You should receive a startup ping within ~10 seconds: `🔵 TESTNET 🚀 Xupertrade started`.
+4. Restart the testnet bot (which is the one that owns Telegram): `docker compose up -d --force-recreate bot-testnet`. You should receive a startup ping within ~10 seconds: `🔵 TESTNET 🚀 xupertrade started`.
 
 ### Notifications
 
