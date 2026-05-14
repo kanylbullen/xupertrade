@@ -33,7 +33,11 @@ services:
       # than silently defaulting to the literal `postgres` (which is what
       # this file did pre-2026-05-14 and which leaked the DB to anyone
       # who could reach :5432).
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (use phase run -- docker compose ...)}
+      #
+      # POSTGRES_PASSWORD must be URL-safe (no @ : / ? # =) — embedded in
+      # DATABASE_URL below without URL-encoding. The recommended generator
+      # `openssl rand -base64 36 | tr -d '/+='` produces compliant output.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (use 'phase run -- docker compose ...')}
     ports:
       - "5432:5432"
     volumes:
@@ -70,7 +74,7 @@ services:
       # in-container healthcheck (`wget localhost:3000/...`) fails with
       # "connection refused".
       HOSTNAME: "0.0.0.0"
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/hypertrade
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (use 'phase run -- docker compose ...')}@postgres:5432/hypertrade
       REDIS_URL: redis://redis:6379/0
       # Dashboard routes to bots via the `tenant_bots` table
       # (container_name + mode), not via per-mode URL env vars.
