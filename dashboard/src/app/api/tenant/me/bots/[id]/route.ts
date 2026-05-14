@@ -9,6 +9,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { db, tenantBots } from "@/lib/db";
 import { statusBot, stopBot } from "@/lib/bot-orchestrator";
+import { clearBotApiKey } from "@/lib/bot-api-key";
 import { requireTenant } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
@@ -113,5 +114,11 @@ export async function DELETE(req: Request, ctx: Params): Promise<Response> {
     .where(
       and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
     );
+
+  // Wipe the per-bot API key (security audit H-1). Idempotent.
+  await clearBotApiKey(botId).catch((err) => {
+    console.warn("[bots] clearBotApiKey failed (continuing)", { botId, err });
+  });
+
   return Response.json({ id: botId, deleted: true });
 }

@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
+import { loadBotApiKey } from "@/lib/bot-api-key";
 import { and, eq } from "drizzle-orm";
 
 type Vault = {
@@ -77,10 +78,9 @@ export default async function VaultsPage() {
     .limit(1);
   const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
 
-  // /api/vaults/mine is auth-gated when API_KEY is set on the bot.
-  // We're server-side rendering so it's safe to read API_KEY from env
-  // and forward it. Without the key, only public /api/vaults works.
-  const apiKey = process.env.API_KEY || "";
+  // /api/vaults/mine is auth-gated. Per security audit H-1 the
+  // dashboard looks up each bot's per-bot API key from Redis.
+  const apiKey = botRows[0] ? (await loadBotApiKey(botRows[0].id)) || "" : "";
   const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
   let vaults: Vault[] = [];

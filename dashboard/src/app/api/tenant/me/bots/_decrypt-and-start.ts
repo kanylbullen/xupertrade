@@ -28,6 +28,11 @@ import {
   stopBot,
 } from "@/lib/bot-orchestrator";
 import {
+  clearBotApiKey,
+  generateBotApiKey,
+  persistBotApiKey,
+} from "@/lib/bot-api-key";
+import {
   getOrCreatePgRolePassword,
   provisionRole,
   tenantDatabaseUrl,
@@ -104,7 +109,27 @@ export async function decryptAndStart(args: Args): Promise<Result> {
     };
   }
 
-  // 3. Start the container.
+  // 3. Generate + persist a per-bot API key (security audit H-1)
+  //    BEFORE starting the container. Persist first so a crash
+  //    between persist and container-up doesn't leave the dashboard
+  //    unable to talk to a bot that booted with a key it doesn't
+  //    know. Worst case on persist failure: we never start the
+  //    container.
+  const apiKey = generateBotApiKey();
+  try {
+    await persistBotApiKey(botId, apiKey);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown redis error";
+    return {
+      kind: "response",
+      response: Response.json(
+        { error: `failed to persist bot API key: ${message}` },
+        { status: 500 },
+      ),
+    };
+  }
+
+  // 4. Start the container.
   let started: Awaited<ReturnType<typeof startBot>>;
   try {
     started = await startBot({
@@ -112,12 +137,15 @@ export async function decryptAndStart(args: Args): Promise<Result> {
       tenantId: tenant.id,
       mode,
       decryptedSecrets,
+      apiKey,
       systemEnv: {
         ...getOrchestratorSystemEnv(),
         DATABASE_URL: tenantDbUrl,
       },
     });
   } catch (err) {
+    // Wipe the just-persisted key — no container will ever use it.
+    await clearBotApiKey(botId).catch(() => undefined);
     const message = err instanceof Error ? err.message : "unknown docker error";
     return {
       kind: "response",
@@ -169,6 +197,7 @@ export async function decryptAndStart(args: Args): Promise<Result> {
           stopErr,
         );
       }
+      await clearBotApiKey(botId).catch(() => undefined);
       return {
         kind: "response",
         response: Response.json(

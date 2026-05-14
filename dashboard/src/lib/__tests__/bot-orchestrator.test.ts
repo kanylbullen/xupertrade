@@ -29,6 +29,9 @@ import {
 
 const TENANT_ID = "3a2f1e4c-aaaa-bbbb-cccc-111122223333";
 const BOT_ID = "11111111-2222-3333-4444-555566667777";
+// H-1: every buildSpec/startBot call needs an apiKey now. Tests use a
+// fixed value because they exercise envMap shape, not key generation.
+const TEST_API_KEY = "test-api-key";
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -87,6 +90,7 @@ describe("buildSpec", () => {
         HYPERLIQUID_PRIVATE_KEY: "0xdead",
         TELEGRAM_BOT_TOKEN: "12345:abc",
       },
+      apiKey: TEST_API_KEY,
     });
     expect(spec.env[0]).toBe(`TENANT_ID=${TENANT_ID}`);
     expect(spec.env[1]).toBe(`BOT_ID=${BOT_ID}`);
@@ -101,6 +105,7 @@ describe("buildSpec", () => {
       botId: BOT_ID,
       mode: "paper",
       decryptedSecrets: {},
+      apiKey: TEST_API_KEY,
     });
     expect(spec.memoryBytes).toBe(512 * 1024 * 1024);
     expect(spec.nanoCpus).toBe(1_000_000_000);
@@ -113,6 +118,7 @@ describe("buildSpec", () => {
       botId: BOT_ID,
       mode: "testnet",
       decryptedSecrets: {},
+      apiKey: TEST_API_KEY,
     });
     expect(spec.labels).toEqual({
       "hypertrade.tenant_id": TENANT_ID,
@@ -127,6 +133,7 @@ describe("buildSpec", () => {
       botId: BOT_ID,
       mode: "paper",
       decryptedSecrets: {},
+      apiKey: TEST_API_KEY,
     });
     expect(spec.name).toBe(containerName(TENANT_ID, "paper"));
   });
@@ -151,7 +158,8 @@ describe("buildSpec", () => {
         decryptedSecrets: { API_PORT: "9999" },
         // systemEnv tries to override too — must also NOT win.
         systemEnv: { API_PORT: "7777" },
-      });
+        apiKey: TEST_API_KEY,
+    });
       expect(spec.env).toContain(`API_PORT=${expectedPort}`);
       // Also verify only one API_PORT entry — POSIX duplicates are
       // unsafe (getenv() impl-defined).
@@ -171,6 +179,7 @@ describe("buildSpec", () => {
       mode: "paper",
       decryptedSecrets: { DATABASE_URL: "postgresql://attacker@evil/db" },
       systemEnv: { DATABASE_URL: "postgresql://tenant_x@postgres/hypertrade" },
+      apiKey: TEST_API_KEY,
     });
     const databaseUrlEntries = spec.env.filter((e) =>
       e.startsWith("DATABASE_URL="),
@@ -196,7 +205,8 @@ describe("buildSpec", () => {
         botId: BOT_ID,
         mode: "mainnet",
         decryptedSecrets: {},
-      });
+        apiKey: TEST_API_KEY,
+    });
       const entries = spec.env.filter((e) => e.startsWith("TELEGRAM_ENABLED="));
       expect(entries).toEqual(["TELEGRAM_ENABLED=true"]);
     });
@@ -209,7 +219,8 @@ describe("buildSpec", () => {
           botId: BOT_ID,
           mode,
           decryptedSecrets: {},
-        });
+          apiKey: TEST_API_KEY,
+    });
         const entries = spec.env.filter((e) =>
           e.startsWith("TELEGRAM_ENABLED="),
         );
@@ -228,7 +239,8 @@ describe("buildSpec", () => {
           botId: BOT_ID,
           mode,
           decryptedSecrets: { TELEGRAM_ENABLED: "true" },
-        });
+          apiKey: TEST_API_KEY,
+    });
         const entries = spec.env.filter((e) =>
           e.startsWith("TELEGRAM_ENABLED="),
         );
@@ -249,7 +261,8 @@ describe("buildSpec", () => {
         mode: "paper",
         decryptedSecrets: {},
         systemEnv: { TELEGRAM_ENABLED: "true" },
-      });
+        apiKey: TEST_API_KEY,
+    });
       const entries = spec.env.filter((e) =>
         e.startsWith("TELEGRAM_ENABLED="),
       );
@@ -267,7 +280,8 @@ describe("buildSpec", () => {
         botId: BOT_ID,
         mode: "mainnet",
         decryptedSecrets: { TELEGRAM_ENABLED: "false" },
-      });
+        apiKey: TEST_API_KEY,
+    });
       const entries = spec.env.filter((e) =>
         e.startsWith("TELEGRAM_ENABLED="),
       );
@@ -284,7 +298,8 @@ describe("buildSpec", () => {
         mode: "mainnet",
         decryptedSecrets: {},
         systemEnv: { TELEGRAM_ENABLED: "false" },
-      });
+        apiKey: TEST_API_KEY,
+    });
       const entries = spec.env.filter((e) =>
         e.startsWith("TELEGRAM_ENABLED="),
       );
@@ -298,6 +313,7 @@ describe("buildSpec", () => {
       botId: BOT_ID,
       mode: "paper",
       decryptedSecrets: { FOO: "bar" },
+      apiKey: TEST_API_KEY,
     });
     expect(spec.env).toContain("FOO=bar");
     expect(spec.env.some((e) => e.startsWith("DATABASE_URL="))).toBe(false);
@@ -321,6 +337,7 @@ describe("startBot delegation", () => {
       botId: BOT_ID,
       mode: "paper",
       decryptedSecrets: {},
+      apiKey: TEST_API_KEY,
     });
 
     expect(mockedCreate).toHaveBeenCalledOnce();
@@ -392,7 +409,9 @@ describe("getOrchestratorSystemEnv", () => {
     expect(env.MAX_DAILY_LOSS_USD).toBe("100");
     expect(env.KILL_SWITCH).toBe("false");
     expect(env.DASHBOARD_URL).toBe("http://localhost:3000");
-    expect(env.API_KEY).toBe("");
+    // H-1: API_KEY is per-bot, NOT in systemEnv. Anything per-bot
+    // is supplied via BotStartParams.apiKey and applied by buildSpec.
+    expect(env.API_KEY).toBeUndefined();
   });
 
   it("respects HYPERTRADE_BOT_* env overrides", () => {
@@ -405,12 +424,12 @@ describe("getOrchestratorSystemEnv", () => {
     expect(env.POLL_INTERVAL_SECONDS).toBe("60");
   });
 
-  it("forwards dashboard's API_KEY + DASHBOARD_URL to tenant bots", () => {
-    const sysKey = "test-key-abc";
-    process.env.API_KEY = sysKey;
+  it("forwards DASHBOARD_URL to tenant bots; API_KEY is per-bot (H-1)", () => {
+    process.env.API_KEY = "should-be-ignored-by-systemEnv";
     process.env.DASHBOARD_URL = "https://example.com";
     const env = getOrchestratorSystemEnv();
-    expect(env.API_KEY).toBe(sysKey);
+    // H-1: process.env.API_KEY no longer participates in systemEnv.
+    expect(env.API_KEY).toBeUndefined();
     expect(env.DASHBOARD_URL).toBe("https://example.com");
   });
 
@@ -476,6 +495,7 @@ describe("getOrchestratorSystemEnv", () => {
         mode: "mainnet",
         decryptedSecrets: { [policyKey]: "TENANT_SPOOF_VALUE" },
         systemEnv: getOrchestratorSystemEnv(),
+        apiKey: TEST_API_KEY,
       });
       const entries = spec.env.filter((e) => e.startsWith(`${policyKey}=`));
       expect(entries).toHaveLength(1);
@@ -483,20 +503,32 @@ describe("getOrchestratorSystemEnv", () => {
     },
   );
 
-  it("buildSpec puts systemEnv AFTER decryptedSecrets — tenant can't override API_KEY", () => {
-    const sysKey = "real-sys-key";
+  it("buildSpec — per-bot apiKey wins over decryptedSecrets API_KEY (H-1)", () => {
+    const perBotKey = "per-bot-key-abc";
     const spoofKey = "spoof-key";
-    process.env.API_KEY = sysKey;
     const spec = buildSpec({
       botId: BOT_ID,
       tenantId: TENANT_ID,
       mode: "paper",
       decryptedSecrets: { API_KEY: spoofKey },
       systemEnv: getOrchestratorSystemEnv(),
+      apiKey: perBotKey,
     });
-    // Find all API_KEY entries; envMap dedupes so there should be
-    // exactly one — the system one wins.
     const apiKeyEntries = spec.env.filter((e) => e.startsWith("API_KEY="));
-    expect(apiKeyEntries).toEqual([`API_KEY=${sysKey}`]);
+    expect(apiKeyEntries).toEqual([`API_KEY=${perBotKey}`]);
+  });
+
+  it("buildSpec — per-bot apiKey wins even if systemEnv tries to set API_KEY", () => {
+    const perBotKey = "per-bot-key-xyz";
+    const spec = buildSpec({
+      botId: BOT_ID,
+      tenantId: TENANT_ID,
+      mode: "paper",
+      decryptedSecrets: {},
+      systemEnv: { API_KEY: "stale-system-value" },
+      apiKey: perBotKey,
+    });
+    const apiKeyEntries = spec.env.filter((e) => e.startsWith("API_KEY="));
+    expect(apiKeyEntries).toEqual([`API_KEY=${perBotKey}`]);
   });
 });

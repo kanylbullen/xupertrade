@@ -14,6 +14,7 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { db, tenantBots } from "@/lib/db";
 import { stopBot } from "@/lib/bot-orchestrator";
+import { clearBotApiKey } from "@/lib/bot-api-key";
 import { requireTenant } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
@@ -68,6 +69,12 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
       );
     }
   }
+
+  // Wipe the per-bot API key (security audit H-1). Restart will
+  // generate a fresh one. clearBotApiKey is idempotent.
+  await clearBotApiKey(botId).catch((err) => {
+    console.warn("[bots] clearBotApiKey failed (continuing)", { botId, err });
+  });
 
   // Reconcile DB row regardless — container is either stopped or
   // was already gone. Defense-in-depth: scope by tenant_id even

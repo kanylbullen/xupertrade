@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 
 import { API_PORT_BY_MODE, isValidMode, type BotMode } from "./bot-orchestrator";
+import { loadBotApiKey } from "./bot-api-key";
 import { db, tenantBots } from "./db";
 import { requireTenant } from "./tenant";
 
@@ -48,24 +49,23 @@ async function _doBotFetch(
   base: string,
   path: string,
   mode: Mode,
+  botId: string,
   init?: RequestInit,
 ): Promise<Response> {
-  // Forward the dashboard's API_KEY as X-Api-Key so the bot's
+  // Forward the per-bot API_KEY as X-Api-Key so the bot's
   // _require_auth gate accepts our control-route POSTs (pause, flat-all,
   // strategy toggle, leverage, tls/configure, auth/configure, ...).
-  // Two failure modes if we DON'T send it:
-  //   • API_KEY set on the bot → those routes return 401 and the
-  //     dashboard buttons silently break.
-  //   • API_KEY empty on the bot (the .env.example default) → auth is
-  //     globally disabled bot-side and anyone reachable to the bot's
-  //     host-bound port can hit those endpoints unauthenticated.
-  // Forwarding is harmless in both cases (no-op when the bot has no
-  // API_KEY) and makes the gate actually effective once API_KEY is set.
+  //
+  // Per security audit H-1: each tenant bot has a unique random key
+  // generated at start time and persisted in Redis. Looking it up by
+  // botId here means knowing the dashboard's own API_KEY (or one
+  // tenant's bot key) gives an attacker access to that bot only,
+  // not all bots on the docker network.
   //
   // Caller-supplied headers in `init.headers` take precedence so a
   // route can override (e.g. for endpoints that explicitly require a
   // different auth scheme).
-  const apiKey = process.env.API_KEY || "";
+  const apiKey = (await loadBotApiKey(botId)) || "";
   const baseHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
   const headers = init?.headers
     ? { ...baseHeaders, ...Object.fromEntries(new Headers(init.headers)) }
@@ -223,5 +223,5 @@ export async function tenantBotFetch(
     );
   }
 
-  return _doBotFetch(base, path, mode, init);
+  return _doBotFetch(base, path, mode, rows[0].id, init);
 }

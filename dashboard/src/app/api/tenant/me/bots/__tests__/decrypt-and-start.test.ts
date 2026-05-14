@@ -35,6 +35,13 @@ vi.mock("@/lib/bot-orchestrator", async () => {
     getOrchestratorSystemEnv: vi.fn(() => ({})),
   };
 });
+// H-1: per-bot API key is generated/persisted/cleared inside the
+// helper. Mock so tests don't hit Redis.
+vi.mock("@/lib/bot-api-key", () => ({
+  generateBotApiKey: vi.fn(() => "test-api-key"),
+  persistBotApiKey: vi.fn().mockResolvedValue(undefined),
+  clearBotApiKey: vi.fn().mockResolvedValue(undefined),
+}));
 
 const selectChain = {
   from: vi.fn().mockReturnThis(),
@@ -120,6 +127,16 @@ describe("decryptAndStart", () => {
         containerName: CONTAINER_NAME,
         isRunning: true,
       }),
+    );
+    // H-1: apiKey must be generated, persisted, and forwarded to
+    // startBot in the same flow.
+    const { generateBotApiKey, persistBotApiKey } = await import(
+      "@/lib/bot-api-key"
+    );
+    expect(generateBotApiKey).toHaveBeenCalled();
+    expect(persistBotApiKey).toHaveBeenCalledWith(BOT_ID, "test-api-key");
+    expect(mockedStartBot).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: "test-api-key" }),
     );
   });
 
