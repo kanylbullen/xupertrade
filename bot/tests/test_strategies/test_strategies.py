@@ -428,7 +428,11 @@ class TestVolatilityBreakout:
 
     @pytest.mark.asyncio
     async def test_sl_exit_closes_long(self):
-        """After restore_state, a candle with low far below SL fires CLOSE_LONG."""
+        """After restore_state, a CLOSED bar with low far below SL fires CLOSE_LONG.
+
+        SL/TP checks operate on iloc[-2] (last closed bar); iloc[-1] is the
+        live partial bar and must not drive exits.
+        """
         entry_price = 100.0
         strat = VolatilityBreakoutStrategy()
         strat.restore_state("long", entry_price)
@@ -449,12 +453,48 @@ class TestVolatilityBreakout:
                 "timestamp": [_ts(i) for i in range(n)],
             }
         )
-        # Force last candle low to crash far below entry (15% drop guaranteed
-        # to breach entry - ATR*4 for any sane ATR)
-        df.at[df.index[-1], "low"] = entry_price * 0.80
-        df.at[df.index[-1], "close"] = entry_price * 0.82
-        df.at[df.index[-1], "high"] = entry_price * 0.84
+        # Breach SL on the last CLOSED bar (-2); keep live bar (-1) benign.
+        df.at[df.index[-2], "low"] = entry_price * 0.80
+        df.at[df.index[-2], "close"] = entry_price * 0.82
+        df.at[df.index[-2], "high"] = entry_price * 0.84
 
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_LONG
+
+    @pytest.mark.asyncio
+    async def test_partial_bar_low_does_not_stop_out_long(self):
+        """Regression: live partial bar (iloc[-1]) low must NOT trigger SL.
+
+        Mirrors the PR #127 fix in oleg_aryukov: live bar high/low spans
+        every tick since bar open and must not drive exits.
+        """
+        entry_price = 100.0
+        strat = VolatilityBreakoutStrategy()
+        strat.restore_state("long", entry_price)
+        n = self.WARMUP + 5
+        df = _flat_df(n, price=entry_price)
+        # Live partial bar (-1) "would have" stopped us out under the bug.
+        df.at[df.index[-1], "low"] = entry_price * 0.50
+        df.at[df.index[-1], "high"] = entry_price
+        df.at[df.index[-1], "close"] = entry_price * 0.95
+        result = await strat.on_candle(df)
+        assert result is None, (
+            f"partial bar low must not stop out, but got {result}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_bar_high_does_not_stop_out_short(self):
+        """Symmetric short-side partial-bar regression."""
+        entry_price = 100.0
+        strat = VolatilityBreakoutStrategy()
+        strat.restore_state("short", entry_price)
+        n = self.WARMUP + 5
+        df = _flat_df(n, price=entry_price)
+        df.at[df.index[-1], "high"] = entry_price * 1.50
+        df.at[df.index[-1], "low"] = entry_price
+        df.at[df.index[-1], "close"] = entry_price * 1.05
+        result = await strat.on_candle(df)
+        assert result is None, (
+            f"partial bar high must not stop out, but got {result}"
+        )

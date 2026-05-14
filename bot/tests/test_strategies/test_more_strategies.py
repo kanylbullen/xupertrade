@@ -865,10 +865,10 @@ class TestSuperTrendStrategy:
 
     @pytest.mark.asyncio
     async def test_sl_exit_closes_long(self):
-        """A direct SL hit (manual SL set) fires CLOSE_LONG.
+        """A direct SL hit on the last CLOSED bar fires CLOSE_LONG.
 
-        We bypass restore_state's broken ATR-based SL recompute by setting
-        SL/TP directly so the SL exit path can be exercised.
+        SL/TP checks operate on iloc[-2] (last closed bar); iloc[-1] is the
+        live partial bar and must not drive exits.
         """
         strat = SuperTrendStrategy()
         strat._position_side = "long"
@@ -876,14 +876,53 @@ class TestSuperTrendStrategy:
         strat._stop_loss = 95.0
         strat._take_profit = 110.0
         df = _flat_df(self.WARMUP + 5, price=100.0)
-        # Last candle low far below SL
-        df.at[df.index[-1], "low"] = 90.0
-        df.at[df.index[-1], "close"] = 92.0
-        df.at[df.index[-1], "high"] = 96.0
+        # Breach SL on the last CLOSED bar (-2); keep live bar (-1) benign.
+        df.at[df.index[-2], "low"] = 90.0
+        df.at[df.index[-2], "close"] = 92.0
+        df.at[df.index[-2], "high"] = 96.0
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_LONG
         assert "SL hit" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_partial_bar_low_does_not_stop_out_long(self):
+        """Regression: live partial bar (iloc[-1]) low must NOT trigger SL.
+
+        Mirrors the PR #127 fix in oleg_aryukov: live bar high/low spans
+        every tick since bar open and must not drive exits.
+        """
+        strat = SuperTrendStrategy()
+        strat._position_side = "long"
+        strat._entry_price = 100.0
+        strat._stop_loss = 95.0
+        strat._take_profit = 110.0
+        df = _flat_df(self.WARMUP + 5, price=100.0)
+        # Live partial bar (-1) "would have" stopped us out under the bug.
+        df.at[df.index[-1], "low"] = 50.0
+        df.at[df.index[-1], "high"] = 100.0
+        df.at[df.index[-1], "close"] = 92.0
+        result = await strat.on_candle(df)
+        assert result is None, (
+            f"partial bar low must not stop out, but got {result}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_bar_high_does_not_stop_out_short(self):
+        """Symmetric short-side partial-bar regression."""
+        strat = SuperTrendStrategy()
+        strat._position_side = "short"
+        strat._entry_price = 100.0
+        strat._stop_loss = 105.0
+        strat._take_profit = 90.0
+        df = _flat_df(self.WARMUP + 5, price=100.0)
+        df.at[df.index[-1], "high"] = 150.0
+        df.at[df.index[-1], "low"] = 100.0
+        df.at[df.index[-1], "close"] = 110.0
+        result = await strat.on_candle(df)
+        assert result is None, (
+            f"partial bar high must not stop out, but got {result}"
+        )
 
 
 # ===========================================================================

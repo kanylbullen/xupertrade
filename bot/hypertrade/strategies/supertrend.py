@@ -287,8 +287,6 @@ class SuperTrendStrategy(Strategy):
 
         df = candles.copy()
         latest = df.iloc[-1]
-        high = float(latest["high"])
-        low = float(latest["low"])
         close = float(latest["close"])
         bar_time = latest["timestamp"] if "timestamp" in df.columns else df.index[-1]
         if not isinstance(bar_time, datetime):
@@ -300,7 +298,17 @@ class SuperTrendStrategy(Strategy):
             bar_time = bar_time.replace(tzinfo=timezone.utc)
 
         # ----- Manage open position first -----
+        # Use the LAST CLOSED bar (iloc[-2]) for trailing-SL updates and SL/TP
+        # hit checks. The live (in-progress) bar at iloc[-1] has high/low
+        # spanning all ticks since the bar opened — including ticks BEFORE a
+        # mid-bar entry — which would otherwise instantly ratchet the trail
+        # and stop us out on entry. See PR #127 (oleg_aryukov).
         if self._position_side is not None and self._entry_price is not None:
+            if len(df) < 2:
+                return None
+            closed = df.iloc[-2]
+            high = float(closed["high"])
+            low = float(closed["low"])
             # After restore_state, SL and TP are None — lazily recompute
             # them from the current ATR. Best approximation since we don't
             # store entry-time ATR. Without this, restored positions run
