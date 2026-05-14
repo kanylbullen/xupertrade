@@ -140,6 +140,33 @@ describe("decryptAndStart", () => {
     );
   });
 
+  it("clears the per-bot API key when the persist UPDATE throws (H-1 compensation)", async () => {
+    // Copilot review on PR #119: the catch block around
+    // db.update(...).returning() stops the orphaned container but
+    // previously left the just-persisted Redis key behind. Both
+    // sides of the compensation path must run together.
+    mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32));
+    mockedStartBot.mockResolvedValueOnce({
+      id: CONTAINER_ID,
+      name: CONTAINER_NAME,
+      image: "hypertrade-bot:latest",
+      state: "running",
+      status: "Up 1 second",
+      labels: {},
+    });
+    updateChain.returning.mockRejectedValueOnce(new Error("db gone"));
+    const { stopBot } = await import("@/lib/bot-orchestrator");
+    const mockedStopBot = vi.mocked(stopBot);
+    const { clearBotApiKey } = await import("@/lib/bot-api-key");
+
+    const result = await decryptAndStart(makeArgs());
+
+    expect(result.kind).toBe("response");
+    if (result.kind === "response") expect(result.response.status).toBe(500);
+    expect(mockedStopBot).toHaveBeenCalledWith(CONTAINER_ID);
+    expect(clearBotApiKey).toHaveBeenCalledWith(BOT_ID);
+  });
+
   it("compensates by stopping the container if the persist UPDATE returns 0 rows", async () => {
     mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32));
     mockedStartBot.mockResolvedValueOnce({

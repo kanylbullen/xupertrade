@@ -52,6 +52,13 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     bot.containerId === null &&
     bot.containerName === null
   ) {
+    // H-1: wipe any stale per-bot API key even on the early-return
+    // path. Without this, calling /stop on an already-stopped row
+    // (e.g. after a crash that skipped the normal cleanup) would
+    // leave the key behind in Redis. clearBotApiKey is idempotent.
+    await clearBotApiKey(botId).catch((err) => {
+      console.warn("[bots] clearBotApiKey failed (continuing)", { botId, err });
+    });
     return Response.json({ bot });
   }
 

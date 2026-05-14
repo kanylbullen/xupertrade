@@ -26,6 +26,8 @@
  * `loadBotApiKey` as part of the same fix.
  */
 
+import "server-only";
+
 import { randomBytes } from "node:crypto";
 
 import type { Redis } from "ioredis";

@@ -217,6 +217,11 @@ export async function decryptAndStart(args: Args): Promise<Result> {
         stopErr,
       );
     }
+    // H-1: also wipe the per-bot API key on the DB-error compensation
+    // path. Without this, a thrown `db.update(...).returning()` would
+    // stop the orphaned container but leave its (now-unreachable) key
+    // in Redis until the next successful start rotated it.
+    await clearBotApiKey(botId).catch(() => undefined);
     const message = err instanceof Error ? err.message : "unknown DB error";
     return {
       kind: "response",

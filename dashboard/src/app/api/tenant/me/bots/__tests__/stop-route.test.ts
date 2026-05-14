@@ -102,6 +102,30 @@ describe("POST /api/tenant/me/bots/[id]/stop", () => {
     expect(mockedStopBot).not.toHaveBeenCalled();
   });
 
+  it("clears per-bot API key on the already-stopped early-return path (H-1)", async () => {
+    // Copilot review on PR #119: previously the early-return at the
+    // top of the handler skipped clearBotApiKey, so a stale key from
+    // a previous start could outlive the row's stopped state. Stop
+    // must be idempotent w.r.t. the key lifecycle.
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    selectChain.limit.mockResolvedValueOnce([
+      {
+        id: BOT_ID,
+        tenantId: TENANT_ID,
+        mode: "paper",
+        isRunning: false,
+        containerId: null,
+        containerName: null,
+      },
+    ]);
+
+    const { clearBotApiKey } = await import("@/lib/bot-api-key");
+    const res = await POST(makeReq(), makeCtx());
+    expect(res.status).toBe(200);
+    expect(mockedStopBot).not.toHaveBeenCalled();
+    expect(clearBotApiKey).toHaveBeenCalledWith(BOT_ID);
+  });
+
   it("reconciles a stopped row with a stale containerName (Copilot fix on PR #101)", async () => {
     // Pre-fix incident: a row with isRunning=false + containerId=null
     // could still hold a stale containerName from before the
