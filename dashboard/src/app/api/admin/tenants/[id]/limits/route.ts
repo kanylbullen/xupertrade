@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
 
-import { db, tenants } from "@/lib/db";
-import { computeLimitsWarnings } from "@/lib/admin/limits";
+import { db, tenantBots, tenants } from "@/lib/db";
+import type { OverCapWarning } from "@/lib/admin/limits";
 import { requireOperator } from "@/lib/operator";
 
 export const dynamic = "force-dynamic";
@@ -73,21 +73,30 @@ export async function PATCH(req: Request, ctx: Params): Promise<Response> {
     }
   }
 
-  await db
+  const updated = await db
     .update(tenants)
     .set({ maxActiveBots, maxActiveStrategies, allowedStrategies })
-    .where(eq(tenants.id, id));
+    .where(eq(tenants.id, id))
+    .returning({ id: tenants.id });
+  if (updated.length === 0) {
+    return Response.json({ error: "tenant_not_found" }, { status: 404 });
+  }
 
-  // Warnings: compute against an empty "current active strategies"
-  // list — the dashboard doesn't know which strategies are live on the
-  // bot side without an API call to each bot. Future work could fetch
-  // /api/control/config from each active bot; today we report only
-  // bot-count over-cap which is cheap and accurate.
-  const warnings = await computeLimitsWarnings(
-    id,
-    { maxActiveBots, maxActiveStrategies, allowedStrategies },
-    [],
-  );
+  // WHY: only compute bots_over_cap directly here — strategy warnings
+  // (strategies_over_cap, active_strategies_outside_allowlist) are
+  // deferred until the proxy enforcement PR supplies the
+  // running-strategies list per bot.
+  const warnings: OverCapWarning[] = [];
+  if (maxActiveBots !== null) {
+    const rows = await db
+      .select({ n: count() })
+      .from(tenantBots)
+      .where(and(eq(tenantBots.tenantId, id), eq(tenantBots.isRunning, true)));
+    const current = Number(rows[0]?.n ?? 0);
+    if (current > maxActiveBots) {
+      warnings.push({ kind: "bots_over_cap", current, limit: maxActiveBots });
+    }
+  }
 
   return Response.json({
     limits: { maxActiveBots, maxActiveStrategies, allowedStrategies },

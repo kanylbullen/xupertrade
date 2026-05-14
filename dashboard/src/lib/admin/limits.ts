@@ -5,7 +5,7 @@
  * startup as defense-in-depth.
  */
 
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, sql } from "drizzle-orm";
 
 import { db, tenantBots, tenants, type tenants as tenantsTable } from "@/lib/db";
 
@@ -31,23 +31,35 @@ export class LimitExceededError extends Error {
 }
 
 /** Throws LimitExceededError when starting another bot would exceed
- * the tenant's max_active_bots cap. NULL cap = no-op. */
+ * the tenant's max_active_bots cap. NULL cap = no-op.
+ *
+ * Race-safe: takes a tenant-row lock (`SELECT ... FOR UPDATE`) inside
+ * a transaction so two concurrent /start calls for the SAME tenant
+ * serialize on the cap check. Different tenants don't contend (each
+ * locks its own row).
+ */
 export async function assertCanStartBot(
   tenant: Pick<TenantRow, "id" | "maxActiveBots">,
 ): Promise<void> {
   if (tenant.maxActiveBots === null || tenant.maxActiveBots === undefined) {
     return;
   }
-  const rows = await db
-    .select({ n: count() })
-    .from(tenantBots)
-    .where(
-      and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.isRunning, true)),
+  const cap = tenant.maxActiveBots;
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT 1 FROM ${tenants} WHERE ${tenants.id} = ${tenant.id} FOR UPDATE`,
     );
-  const current = Number(rows[0]?.n ?? 0);
-  if (current >= tenant.maxActiveBots) {
-    throw new LimitExceededError("bots_over_cap", current, tenant.maxActiveBots);
-  }
+    const rows = await tx
+      .select({ n: count() })
+      .from(tenantBots)
+      .where(
+        and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.isRunning, true)),
+      );
+    const current = Number(rows[0]?.n ?? 0);
+    if (current >= cap) {
+      throw new LimitExceededError("bots_over_cap", current, cap);
+    }
+  });
 }
 
 /** Throws when a strategy is not in the tenant's allowlist (NULL =
@@ -82,7 +94,10 @@ export function assertCanEnableStrategy(
 
 /** Computes warnings for a proposed limits PATCH — used by the API to
  * tell the operator how many existing rows are now over-cap. Does not
- * mutate anything. */
+ * mutate anything. The `strategies_over_cap` and
+ * `active_strategies_outside_allowlist` branches require a populated
+ * `currentActiveStrategies` list and are designed for a future caller
+ * (proxy enforcement PR) that has the running-strategies list per bot. */
 export async function computeLimitsWarnings(
   tenantId: string,
   proposed: {

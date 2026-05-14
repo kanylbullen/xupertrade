@@ -18,7 +18,8 @@ type Warning =
 function parseIntOrNull(s: string): number | null {
   if (s.trim() === "") return null;
   const n = Number(s);
-  return Number.isInteger(n) && n >= 0 ? n : NaN as unknown as number;
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
 }
 
 export function LimitsForm({
@@ -59,7 +60,10 @@ export function LimitsForm({
     setWarnings([]);
     const mb = parseIntOrNull(bots);
     const ms = parseIntOrNull(strats);
-    if (Number.isNaN(mb) || Number.isNaN(ms)) {
+    // Empty string is the legitimate "unlimited" sentinel; only flag
+    // when the user typed something that didn't parse to a non-negative
+    // integer.
+    if ((bots.trim() !== "" && mb === null) || (strats.trim() !== "" && ms === null)) {
       setError("Limits must be non-negative integers or empty for unlimited.");
       setSaving(false);
       return;

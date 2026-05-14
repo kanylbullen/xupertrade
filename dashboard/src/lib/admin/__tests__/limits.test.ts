@@ -1,13 +1,20 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // Mock db so we don't need a live postgres connection. vi.mock is
-// hoisted above imports — use vi.hoisted to keep the mock fn in scope.
-const { selectMock } = vi.hoisted(() => ({ selectMock: vi.fn() }));
+// hoisted above imports — use vi.hoisted to keep the mock fns in scope.
+const { selectMock, transactionMock, executeMock, txSelectMock } = vi.hoisted(
+  () => ({
+    selectMock: vi.fn(),
+    transactionMock: vi.fn(),
+    executeMock: vi.fn(),
+    txSelectMock: vi.fn(),
+  }),
+);
 vi.mock("@/lib/db", () => {
   return {
-    db: { select: selectMock },
+    db: { select: selectMock, transaction: transactionMock },
     tenantBots: {} as unknown,
-    tenants: {} as unknown,
+    tenants: { id: "id" } as unknown,
   };
 });
 
@@ -21,6 +28,9 @@ import {
 
 beforeEach(() => {
   selectMock.mockReset();
+  transactionMock.mockReset();
+  executeMock.mockReset();
+  txSelectMock.mockReset();
 });
 
 function mockBotCount(n: number) {
@@ -31,26 +41,88 @@ function mockBotCount(n: number) {
   });
 }
 
+// For assertCanStartBot — mocks db.transaction(cb) and the tx.execute
+// + tx.select(...).from().where() chain that runs inside it. Each
+// call queues one bot-count to return.
+function mockTxBotCount(n: number) {
+  transactionMock.mockImplementationOnce(async (cb: (tx: unknown) => unknown) => {
+    const tx = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn().mockReturnValue({
+        from: () => ({
+          where: () => Promise.resolve([{ n }]),
+        }),
+      }),
+    };
+    return cb(tx);
+  });
+}
+
 describe("assertCanStartBot", () => {
   it("is a no-op when maxActiveBots is null", async () => {
     await expect(
       assertCanStartBot({ id: "x", maxActiveBots: null }),
     ).resolves.toBeUndefined();
-    expect(selectMock).not.toHaveBeenCalled();
+    expect(transactionMock).not.toHaveBeenCalled();
   });
 
   it("passes when running bots are below cap", async () => {
-    mockBotCount(2);
+    mockTxBotCount(2);
     await expect(
       assertCanStartBot({ id: "x", maxActiveBots: 3 }),
     ).resolves.toBeUndefined();
   });
 
   it("throws LimitExceededError at cap", async () => {
-    mockBotCount(3);
+    mockTxBotCount(3);
     await expect(
       assertCanStartBot({ id: "x", maxActiveBots: 3 }),
     ).rejects.toBeInstanceOf(LimitExceededError);
+  });
+
+  it("serializes concurrent calls for the same tenant at-cap-minus-one", async () => {
+    // Simulate the FOR UPDATE lock: the second transaction's callback
+    // doesn't start running until the first one has completed (which
+    // is how `SELECT ... FOR UPDATE` behaves at the DB level). After
+    // the first call passes, the bot count seen by the second call is
+    // one higher, so the cap check trips.
+    let firstDone = false;
+    let observedCount = 2;
+    transactionMock.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+      // Lock: wait until the previous in-flight tx (if any) finished.
+      while (transactionMock.mock.calls.length > 1 && !firstDone) {
+        await new Promise((r) => setTimeout(r, 1));
+      }
+      const tx = {
+        execute: vi.fn().mockResolvedValue(undefined),
+        select: vi.fn().mockReturnValue({
+          from: () => ({
+            where: () => Promise.resolve([{ n: observedCount }]),
+          }),
+        }),
+      };
+      try {
+        const r = await cb(tx);
+        // First call passed — bump the simulated running count so a
+        // racing second call sees the new state.
+        observedCount += 1;
+        return r;
+      } finally {
+        firstDone = true;
+      }
+    });
+
+    const results = await Promise.allSettled([
+      assertCanStartBot({ id: "tid", maxActiveBots: 3 }),
+      assertCanStartBot({ id: "tid", maxActiveBots: 3 }),
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      LimitExceededError,
+    );
   });
 });
 
