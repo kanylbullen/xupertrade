@@ -47,3 +47,18 @@ def apply_mainnet_allowlist(
             sorted(unknown),
         )
     return [n for n in all_names if n in requested]
+
+
+def apply_tenant_allowlist(
+    names: list[str],
+    tenant_allowlist: list[str] | None,
+) -> list[str]:
+    """Filter `names` against the operator-set per-tenant allowlist
+    (alembic 0016). NULL allowlist (None) = no filter (legacy
+    behavior); empty list = no strategies allowed; otherwise return
+    the intersection preserving input order.
+    """
+    if tenant_allowlist is None:
+        return list(names)
+    allow = set(tenant_allowlist)
+    return [n for n in names if n in allow]

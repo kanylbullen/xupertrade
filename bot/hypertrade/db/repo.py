@@ -1079,6 +1079,25 @@ class Repository:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
+    # ----- Operator admin: per-tenant policy (alembic 0016) -----
+
+    async def get_tenant_allowed_strategies(
+        self, tenant_id: uuid.UUID
+    ) -> list[str] | None:
+        """Read the operator-set allowlist for a tenant. Returns None
+        when no allowlist is set (= all strategies allowed) or the
+        tenant row doesn't exist; returns the list (possibly empty)
+        when an allowlist is set.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Tenant.allowed_strategies).where(Tenant.id == tenant_id)
+            )
+            row = result.first()
+            if row is None:
+                return None
+            return row[0]
+
     # ----- Telegram unlock-link flow (PR 3b) -----
 
     async def get_tenant_id_for_telegram_chat(

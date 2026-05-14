@@ -13,7 +13,10 @@ from hypertrade.engine.runner import EngineRunner
 from hypertrade.notify.telegram import TelegramNotifier
 from hypertrade.events.bus import EventBus, NoOpEventBus
 from hypertrade.exchange.paper import PaperExchange
-from hypertrade.engine.strategy_allowlist import apply_mainnet_allowlist
+from hypertrade.engine.strategy_allowlist import (
+    apply_mainnet_allowlist,
+    apply_tenant_allowlist,
+)
 from hypertrade.strategies.registry import get_strategy, list_strategies, load_all
 
 logging.basicConfig(
@@ -116,6 +119,29 @@ async def main() -> None:
             "MAINNET allowlist active: %d/%d strategies will trade: %s",
             len(allowed_names), len(all_names), allowed_names,
         )
+
+    # Per-tenant operator-set allowlist (alembic 0016). Defense-in-
+    # depth: even if the dashboard's enforcement at strategy-toggle is
+    # bypassed, disallowed strategies are not registered at all here.
+    # NULL = no allowlist (no filtering). Failure to read = log + skip
+    # (fail-open at startup so a transient DB blip doesn't break boot).
+    if repo is not None and settings.tenant_id:
+        try:
+            import uuid as _uuid
+
+            tenant_uuid = _uuid.UUID(settings.tenant_id)
+            tenant_allowlist = await repo.get_tenant_allowed_strategies(tenant_uuid)
+            if tenant_allowlist is not None:
+                before = len(allowed_names)
+                allowed_names = apply_tenant_allowlist(allowed_names, tenant_allowlist)
+                logger.warning(
+                    "Tenant allowlist applied: %d/%d strategies remain: %s",
+                    len(allowed_names), before, allowed_names,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to read tenant allowlist — running with no tenant filter"
+            )
     strategies = [get_strategy(name) for name in allowed_names]
     logger.info("Active strategies: %s", [s.name for s in strategies])
 
