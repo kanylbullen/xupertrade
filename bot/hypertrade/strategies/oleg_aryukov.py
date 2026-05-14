@@ -229,12 +229,21 @@ class OlegAryukovStrategy(Strategy):
 
         df = candles.copy()
         latest = df.iloc[-1]
-        high = float(latest["high"])
-        low = float(latest["low"])
         close = float(latest["close"])
 
         # ----- manage open position first -----
+        # Use the LAST CLOSED bar (iloc[-2]) for trailing-SL updates and SL/TP
+        # checks. The live (in-progress) bar at iloc[-1] has high/low spanning
+        # all ticks since the bar opened — including ticks BEFORE a mid-bar
+        # entry — which would otherwise instantly ratchet the trail and stop
+        # us out on entry. See PR fixing oleg_aryukov instant-stop-out loop.
         if self._position_side is not None and self._entry_price is not None:
+            if len(df) < 2:
+                return None
+            closed = df.iloc[-2]
+            high = float(closed["high"])
+            low = float(closed["low"])
+
             if self.use_trailing and self._trail_extreme is not None:
                 trail_dist = self._entry_price * self.trailing_percent / 100.0
                 if self._position_side == "long":
