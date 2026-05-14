@@ -313,10 +313,17 @@ class EngineRunner:
                 logger.exception("Funding poll failed")
             self._last_funding_poll = time.time()
 
-        # HODL signal evaluation every 6h. Notify Telegram on verdict change
-        # (e.g. green→yellow, yellow→red). Only the testnet bot has Telegram
-        # configured, so other modes evaluate silently.
-        if (time.time() - self._last_hodl_check) > 6 * 3600:
+        # HODL signal evaluation every 6h, owned by the mainnet bot only.
+        # Same rationale as the vault scanner gate below: HODL inputs
+        # (price, RSI, on-chain levels) are mode-agnostic, so running in
+        # every container produced 3× duplicate Telegram notifications
+        # ("MAINNET / PAPER / TESTNET ... HODL hype_accumulation") on each
+        # verdict change. Mainnet is the canonical owner — co-located with
+        # Telegram (PR #114) and vault scanner (PR #113).
+        if (
+            settings.exchange_mode == "mainnet"
+            and (time.time() - self._last_hodl_check) > 6 * 3600
+        ):
             try:
                 await self._evaluate_hodl_signals()
             except Exception:
