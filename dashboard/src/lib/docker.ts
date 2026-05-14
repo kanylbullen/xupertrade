@@ -31,7 +31,7 @@ export function setDockerClient(client: Docker | null): void {
 }
 
 export type ContainerSpec = {
-  /** Container name, e.g. `xupertrade-bot-3a2f1e4c-mainnet`. */
+  /** Container name, e.g. `xupertrade-bot-3a2f1e4caaaabbbb-mainnet`. */
   name: string;
   /** Image to run, e.g. `xupertrade-bot:latest`. */
   image: string;

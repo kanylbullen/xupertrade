@@ -267,9 +267,8 @@ your bot replies only to your configured `TELEGRAM_CHAT_ID`.
 
 **Q: A tenant is spam-trading. How do I stop them?**
 
-A: **Today (manual)**: SSH in and `docker rm -f
-xupertrade-bot-<short_id>-<mode>`. Their bot is dead; their data
-stays. They can recreate via the dashboard if they unlock again,
+A: **Today (manual)**: SSH in and `docker rm -f xupertrade-bot-<short_id>-<mode>`.
+Their bot is dead; their data stays. They can recreate via the dashboard if they unlock again,
 so for repeat offenders also remove their account from the
 `hypertrade-users` Authentik group.
 
