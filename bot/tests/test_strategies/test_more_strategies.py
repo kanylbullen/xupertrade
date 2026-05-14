@@ -1228,7 +1228,7 @@ class TestOlegAryukovStrategy:
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_SHORT
-        # Inline _reset must have fired
+        # reset_state must have fired
         assert strat._position_side is None
         assert strat._stop_loss is None
         assert strat._entry_price is None
@@ -1237,7 +1237,9 @@ class TestOlegAryukovStrategy:
         # --- Position B: short at 2100 (very different price) ---
         strat.restore_state("short", 2100.0)
         assert strat._entry_price == 2100.0
-        assert strat._stop_loss == pytest.approx(2100.0 * 1.02)
+        assert strat._stop_loss == pytest.approx(
+            2100.0 * (1 + strat.stop_loss_percent / 100.0)
+        )
         # Critical: NEW SL must be < OLD SL — proves no leak
         assert strat._stop_loss < a_sl
         assert strat._trail_extreme == 2100.0

@@ -202,13 +202,16 @@ class OlegAryukovStrategy(Strategy):
             self.restore_state(side, entry_price)
 
     def reset_state(self) -> None:
-        # Clear ALL per-trade state. Called inline when SL/TP fires AND by
-        # the engine via runner._reset_strategy_state when reconcile
-        # orphan-closes a DB position. Without an explicit clear, stale
-        # _stop_loss / _trail_extreme from a previous trade can leak into
-        # the next one — observed 2026-05-14 paper, ETH 1h: a freshly
-        # opened short reported a CLOSE-signal SL/entry/high triplet that
-        # didn't match its own OPEN signal's values.
+        """Clear ALL per-trade state.
+
+        Called inline when SL/TP fires AND by the engine via
+        ``runner._reset_strategy_state`` when reconcile orphan-closes a DB
+        position. Without an explicit clear, stale ``_stop_loss`` /
+        ``_trail_extreme`` from a previous trade can leak into the next
+        one — observed 2026-05-14 paper, ETH 1h: a freshly opened short
+        reported a CLOSE-signal SL/entry/high triplet that didn't match
+        its own OPEN signal's values.
+        """
         self._position_side = None
         self._entry_price = None
         self._stop_loss = None
