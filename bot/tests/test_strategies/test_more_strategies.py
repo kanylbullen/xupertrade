@@ -1264,11 +1264,12 @@ class TestOlegAryukovStrategy:
         a_entry = strat._entry_price
         assert a_sl is not None and a_entry == 2300.0
 
-        # Drive SL hit: high >= sl
+        # Drive SL hit on the last CLOSED bar (iloc[-2]) since PR #127
+        # moved trail-update + SL/TP-hit checks to closed-bar semantics.
         df = _flat_df(self.WARMUP + 5, price=2300.0)
-        df.at[df.index[-1], "high"] = a_sl + 5.0
-        df.at[df.index[-1], "low"] = 2295.0
-        df.at[df.index[-1], "close"] = a_sl + 1.0
+        df.at[df.index[-2], "high"] = a_sl + 5.0
+        df.at[df.index[-2], "low"] = 2295.0
+        df.at[df.index[-2], "close"] = a_sl + 1.0
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_SHORT
