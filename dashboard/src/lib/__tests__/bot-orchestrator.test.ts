@@ -425,7 +425,7 @@ describe("getOrchestratorSystemEnv", () => {
   });
 
   it("forwards DASHBOARD_URL to tenant bots; API_KEY is per-bot (H-1)", () => {
-    process.env.API_KEY = "should-be-ignored-by-systemEnv";
+    process.env.API_KEY = "test fixture (ignored by systemEnv)";
     process.env.DASHBOARD_URL = "https://example.com";
     const env = getOrchestratorSystemEnv();
     // H-1: process.env.API_KEY no longer participates in systemEnv.
@@ -525,7 +525,7 @@ describe("getOrchestratorSystemEnv", () => {
       tenantId: TENANT_ID,
       mode: "paper",
       decryptedSecrets: {},
-      systemEnv: { API_KEY: "stale-system-value" },
+      systemEnv: { API_KEY: "stale value (test fixture)" },
       apiKey: perBotKey,
     });
     const apiKeyEntries = spec.env.filter((e) => e.startsWith("API_KEY="));
