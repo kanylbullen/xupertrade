@@ -201,15 +201,19 @@ class OlegAryukovStrategy(Strategy):
         if self._stop_loss is None or self._take_profit is None:
             self.restore_state(side, entry_price)
 
-    def _reset(self) -> None:
+    def reset_state(self) -> None:
+        # Clear ALL per-trade state. Called inline when SL/TP fires AND by
+        # the engine via runner._reset_strategy_state when reconcile
+        # orphan-closes a DB position. Without an explicit clear, stale
+        # _stop_loss / _trail_extreme from a previous trade can leak into
+        # the next one — observed 2026-05-14 paper, ETH 1h: a freshly
+        # opened short reported a CLOSE-signal SL/entry/high triplet that
+        # didn't match its own OPEN signal's values.
         self._position_side = None
         self._entry_price = None
         self._stop_loss = None
         self._take_profit = None
         self._trail_extreme = None
-
-    def reset_state(self) -> None:
-        self._reset()
 
     # ----- main loop --------------------------------------------------------
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
@@ -248,7 +252,7 @@ class OlegAryukovStrategy(Strategy):
             if self._position_side == "long":
                 if sl is not None and low <= sl:
                     entry = self._entry_price
-                    self._reset()
+                    self.reset_state()
                     return Signal(
                         action=SignalAction.CLOSE_LONG, symbol=self.symbol,
                         strategy_name=self.name,
@@ -256,7 +260,7 @@ class OlegAryukovStrategy(Strategy):
                     )
                 if tp is not None and high >= tp:
                     entry = self._entry_price
-                    self._reset()
+                    self.reset_state()
                     return Signal(
                         action=SignalAction.CLOSE_LONG, symbol=self.symbol,
                         strategy_name=self.name, price=tp,
@@ -265,7 +269,7 @@ class OlegAryukovStrategy(Strategy):
             else:
                 if sl is not None and high >= sl:
                     entry = self._entry_price
-                    self._reset()
+                    self.reset_state()
                     return Signal(
                         action=SignalAction.CLOSE_SHORT, symbol=self.symbol,
                         strategy_name=self.name,
@@ -273,7 +277,7 @@ class OlegAryukovStrategy(Strategy):
                     )
                 if tp is not None and low <= tp:
                     entry = self._entry_price
-                    self._reset()
+                    self.reset_state()
                     return Signal(
                         action=SignalAction.CLOSE_SHORT, symbol=self.symbol,
                         strategy_name=self.name, price=tp,
