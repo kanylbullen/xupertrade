@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   Sidebar,
   SidebarContent,
@@ -55,6 +56,14 @@ const pageLinks = [
 
 export function AppSidebar() {
   const pathname = usePathname();
+  const [isOperator, setIsOperator] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/tenant/me", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<{ isOperator?: boolean }>) : null))
+      .then((j) => setIsOperator(j?.isOperator === true))
+      .catch(() => undefined);
+  }, []);
 
   // Mirrors the deleted `nav.tsx:29` — public pages (login) hide nav chrome.
   if (pathname === "/login") return null;
@@ -107,6 +116,35 @@ export function AppSidebar() {
             ))}
           </SidebarMenu>
         </SidebarGroup>
+        {isOperator && (
+          <SidebarGroup>
+            <SidebarGroupLabel>Admin</SidebarGroupLabel>
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={pathname === "/admin" || pathname.startsWith("/admin/")}
+                  tooltip="Admin"
+                  render={
+                    <Link href="/admin">
+                      <span>Tenants</span>
+                    </Link>
+                  }
+                />
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={pathname === "/admin/server"}
+                  tooltip="Server stats"
+                  render={
+                    <Link href="/admin/server">
+                      <span>Server</span>
+                    </Link>
+                  }
+                />
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroup>
+        )}
       </SidebarContent>
       <SidebarFooter>
         <UserMenu />

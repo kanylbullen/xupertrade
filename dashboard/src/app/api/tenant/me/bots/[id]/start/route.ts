@@ -20,6 +20,7 @@ import {
   isValidMode,
   requiredSecretsForMode,
 } from "@/lib/bot-orchestrator";
+import { assertCanStartBot, LimitExceededError } from "@/lib/admin/limits";
 import { requireTenant } from "@/lib/tenant";
 
 import { decryptAndStart } from "../../_decrypt-and-start";
@@ -62,6 +63,25 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     );
   }
   const mode = bot.mode as BotMode;
+
+  // Operator-set per-tenant cap on concurrent running bots
+  // (alembic 0016). NULL = no cap (legacy behavior).
+  try {
+    await assertCanStartBot(tenant);
+  } catch (e) {
+    if (e instanceof LimitExceededError) {
+      return Response.json(
+        {
+          error: "bot-cap-exceeded",
+          kind: e.kind,
+          current: e.current,
+          limit: e.limit,
+        },
+        { status: 409 },
+      );
+    }
+    throw e;
+  }
 
   // Re-validate required secrets for this mode. The user could
   // have deleted a secret since bot creation; without this, /start

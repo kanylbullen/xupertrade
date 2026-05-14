@@ -16,7 +16,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy import Uuid
+from sqlalchemy import JSON, Uuid
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -69,6 +70,13 @@ class Tenant(Base):
     # gates bot-create at the application layer to max 1
     multi_bot_enabled = Column(Boolean, default=False, nullable=False)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
+    # alembic 0016 — operator-set policy controls (NULL = no cap / allowlist).
+    max_active_bots = Column(Integer, nullable=True)
+    max_active_strategies = Column(Integer, nullable=True)
+    # ARRAY on Postgres; JSON variant on SQLite (test runtime only).
+    allowed_strategies = Column(
+        ARRAY(Text).with_variant(JSON, "sqlite"), nullable=True
+    )
 
 
 class TenantBot(Base):

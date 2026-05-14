@@ -11,6 +11,7 @@ import {
   index,
   uniqueIndex,
   bigint,
+  integer,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -167,6 +168,11 @@ export const tenants = pgTable(
     isOperator: boolean("is_operator").notNull().default(false),
     multiBotEnabled: boolean("multi_bot_enabled").notNull().default(false),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+    // alembic 0016 — operator-set policy controls. NULL = no cap / no
+    // allowlist (existing behavior). Validated at the API write site.
+    maxActiveBots: integer("max_active_bots"),
+    maxActiveStrategies: integer("max_active_strategies"),
+    allowedStrategies: text("allowed_strategies").array(),
   },
   (t) => ({
     authentikSubIdx: uniqueIndex("idx_tenants_authentik_sub").on(t.authentikSub),
