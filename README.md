@@ -87,6 +87,40 @@ Six strategies implemented from [Minara AI's backtesting study](https://x.com/mi
 
 Leverage defaults are chosen by historical max drawdown and whether the strategy has a hard stop loss. They can be overridden per-mode from the dashboard or Telegram. The bot computes the maximum leverage needed per coin across active strategies and pushes that to HyperLiquid at startup (HyperLiquid leverage is per-coin, not per-position).
 
+## Security model — credentials at rest
+
+Tenants paste HyperLiquid private keys (and Telegram tokens) into the dashboard. Those values are encrypted under a key derived from a passphrase the tenant sets the first time they visit Settings → Credentials. Nothing on the server — not the database, not the logs, not an operator with DB access — can read those secrets without that passphrase.
+
+If a tenant forgets the passphrase, the keys are unrecoverable: there is no reset, no recovery email. They re-enter the keys (and rotate the wallets, since their plaintext was last seen on whichever device they used originally).
+
+If an attacker steals the database, they hold ciphertext that can only be cracked by brute-forcing the passphrase through Argon2id — intentionally tuned so that takes years on dedicated hardware for any decent passphrase.
+
+### How it works (technical detail)
+
+| Layer | Primitive | Notes |
+|---|---|---|
+| **Key derivation** | Argon2id, 64 MiB memory, 3 iterations, 4-way parallelism, 16-byte per-tenant salt | Output is a 32-byte key `K`. Memory-hard so GPUs/ASICs don't help an attacker. Salt is per-tenant, persisted on the `tenants` row. |
+| **At-rest encryption** | AES-256-GCM, fresh 12-byte nonce per write | Stored in `tenant_secrets(ciphertext, nonce)`. K never persisted. Same plaintext encrypts to different ciphertexts. GCM auth tag fails loudly on tamper or wrong key. |
+| **Verifier** | HMAC-SHA-256(K, fixed domain string) | Stored in `tenants.passphrase_verifier`. Lets us check "did the user type the right passphrase?" without decrypting any actual secret, in constant time. We never store the passphrase itself, hashed or otherwise. |
+| **Session cache** | Redis `dashboard:k-cache:<tenant>:<session>`, 24h TTL | After unlock, K lives in Redis tied to the session ID so subsequent actions in the same session don't re-prompt. Cleared on logout / explicit Lock / TTL expiry. |
+| **In transit** | TLS terminated at Caddy (Let's Encrypt via Cloudflare DNS-01, or self-signed bootstrap) | Plaintext passphrase only crosses the wire once during set/unlock; it never reaches durable storage. |
+
+**What this does not protect against.** An operator with root access to the host running the bot containers can read decrypted secrets out of running-process memory or container env vars. The bot needs the plaintext private key to sign HyperLiquid orders — that's unavoidable for any non-custodial trading system. The relevant guarantees are:
+
+1. No decrypted secret ever touches durable storage (DB, Phase, log files, container images).
+2. No operator can read secrets without the tenant's passphrase before bot start.
+3. Rotating a compromised key invalidates the old ciphertext on the next save (each value is independently re-encrypted with a fresh nonce).
+4. A 24-hour cache TTL on K means a stolen session cookie buys at most 24h of decryption capability before the next passphrase prompt.
+
+Source of truth (read it):
+
+- `dashboard/src/lib/crypto/passphrase.ts` — Argon2id parameters + verifier construction
+- `dashboard/src/lib/crypto/secrets.ts` — AES-256-GCM encrypt/decrypt
+- `dashboard/src/lib/crypto/k-cache.ts` — Redis-backed session cache for K
+- `dashboard/src/app/api/tenant/me/secrets/[key]/route.ts` — the only place plaintext touches the encrypt/decrypt boundary
+
+The Argon2id parameters are immutable once a tenant has set their passphrase (they're not encoded in the verifier, so changing them would lock everyone out). A future hardening pass could add a `kdf_version` column and a re-encrypt-on-unlock migration path; the [security audit from 2026-05-12](docs/security-audit-2026-05-12.md) tracks this and other deferred items.
+
 ## Quick Start
 
 ### Prerequisites
