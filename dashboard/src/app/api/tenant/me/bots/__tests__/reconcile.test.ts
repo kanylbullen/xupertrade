@@ -103,10 +103,10 @@ describe("POST /api/tenant/me/bots/[id]/reconcile", () => {
         tenantId: TENANT_ID,
         mode: "testnet",
         isRunning: true,
-        containerName: "hypertrade-bot-x-testnet",
+        containerName: "xupertrade-bot-x-testnet",
       },
     ]);
-    mockedGetBotApiUrl.mockReturnValueOnce("http://hypertrade-bot-x-testnet:8001");
+    mockedGetBotApiUrl.mockReturnValueOnce("http://xupertrade-bot-x-testnet:8001");
 
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
@@ -127,7 +127,7 @@ describe("POST /api/tenant/me/bots/[id]/reconcile", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://hypertrade-bot-x-testnet:8001/api/control/reconcile",
+      "http://xupertrade-bot-x-testnet:8001/api/control/reconcile",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ since_ms: 1700000000000 }),

@@ -110,7 +110,7 @@ describe("POST /api/tenant/me/bots/[id]/stop", () => {
         mode: "paper",
         isRunning: false,
         containerId: null,
-        containerName: "hypertrade-bot-stale-paper",
+        containerName: "xupertrade-bot-stale-paper",
       },
     ]);
     updateChain.returning.mockResolvedValueOnce([

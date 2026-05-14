@@ -65,7 +65,7 @@ const mockedRequireUnlockedKey = vi.mocked(requireUnlockedKey);
 const TENANT_ID = "3a2f1e4c-aaaa-bbbb-cccc-111122223333";
 const BOT_ID = "11111111-2222-3333-4444-555566667777";
 const CONTAINER_ID = "deadbeefcafebabe1234";
-const CONTAINER_NAME = "hypertrade-bot-3a2f1e4caaaabbbb-paper";
+const CONTAINER_NAME = "xupertrade-bot-3a2f1e4caaaabbbb-paper";
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -93,7 +93,7 @@ describe("decryptAndStart", () => {
     mockedStartBot.mockResolvedValueOnce({
       id: CONTAINER_ID,
       name: CONTAINER_NAME,
-      image: "hypertrade-bot:latest",
+      image: "xupertrade-bot:latest",
       state: "running",
       status: "Up 1 second",
       labels: {},
@@ -128,7 +128,7 @@ describe("decryptAndStart", () => {
     mockedStartBot.mockResolvedValueOnce({
       id: CONTAINER_ID,
       name: CONTAINER_NAME,
-      image: "hypertrade-bot:latest",
+      image: "xupertrade-bot:latest",
       state: "running",
       status: "Up 1 second",
       labels: {},

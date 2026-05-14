@@ -38,7 +38,7 @@ function fakeRow(overrides: Partial<TenantBotRow> = {}): TenantBotRow {
     tenantId: "00000000-0000-0000-0000-000000000001",
     mode: "paper",
     containerId: "abc123",
-    containerName: "hypertrade-bot-paper",
+    containerName: "xupertrade-bot-paper",
     isRunning: true,
     telegramWebhookSecret: null,
     createdAt: new Date(),
@@ -64,29 +64,29 @@ describe("API_PORT_BY_MODE", () => {
 
 describe("getBotApiUrl", () => {
   it("builds host:port from container_name + mode (paper)", () => {
-    expect(getBotApiUrl(fakeRow({ mode: "paper", containerName: "hypertrade-bot-paper" })))
-      .toBe("http://hypertrade-bot-paper:8000");
+    expect(getBotApiUrl(fakeRow({ mode: "paper", containerName: "xupertrade-bot-paper" })))
+      .toBe("http://xupertrade-bot-paper:8000");
   });
 
   it("builds host:port from container_name + mode (testnet)", () => {
-    expect(getBotApiUrl(fakeRow({ mode: "testnet", containerName: "hypertrade-bot-testnet" })))
-      .toBe("http://hypertrade-bot-testnet:8001");
+    expect(getBotApiUrl(fakeRow({ mode: "testnet", containerName: "xupertrade-bot-testnet" })))
+      .toBe("http://xupertrade-bot-testnet:8001");
   });
 
   it("builds host:port from container_name + mode (mainnet)", () => {
-    expect(getBotApiUrl(fakeRow({ mode: "mainnet", containerName: "hypertrade-bot-mainnet" })))
-      .toBe("http://hypertrade-bot-mainnet:8002");
+    expect(getBotApiUrl(fakeRow({ mode: "mainnet", containerName: "xupertrade-bot-mainnet" })))
+      .toBe("http://xupertrade-bot-mainnet:8002");
   });
 
   it("works for orchestrator-spawned per-tenant bot names", () => {
-    // Orchestrator-spawned bots use the pattern hypertrade-bot-<short16>-<mode>
+    // Orchestrator-spawned bots use the pattern xupertrade-bot-<short16>-<mode>
     // (per bot-orchestrator.ts:containerName). Same routing applies.
     expect(
       getBotApiUrl(fakeRow({
         mode: "testnet",
-        containerName: "hypertrade-bot-3a2f1e4caaaa1111-testnet",
+        containerName: "xupertrade-bot-3a2f1e4caaaa1111-testnet",
       })),
-    ).toBe("http://hypertrade-bot-3a2f1e4caaaa1111-testnet:8001");
+    ).toBe("http://xupertrade-bot-3a2f1e4caaaa1111-testnet:8001");
   });
 
   it("returns null when container_name is null (bot provisioned but not started)", () => {
@@ -259,7 +259,7 @@ describe("tenantBotFetch", () => {
       tenantId: "y",
       mode,
       containerId: "abc",
-      containerName: `hypertrade-bot-${mode}`,
+      containerName: `xupertrade-bot-${mode}`,
       isRunning: true,
       telegramWebhookSecret: null,
       createdAt: new Date(),
@@ -285,7 +285,7 @@ describe("tenantBotFetch", () => {
     expect(res.status).toBe(200);
     expect(fetchSpy).toHaveBeenCalledOnce();
     const calledUrl = fetchSpy.mock.calls[0][0] as string;
-    expect(calledUrl).toBe("http://hypertrade-bot-testnet:8001/api/positions");
+    expect(calledUrl).toBe("http://xupertrade-bot-testnet:8001/api/positions");
   });
 
   it("passes through 4xx from the bot with the JSON error body", async () => {
@@ -350,7 +350,7 @@ describe("tenantBotFetch", () => {
     mockedRequireTenant.mockResolvedValue(tenant());
     chainSelect([liveBotRow("testnet")]);
     const sensitive =
-      "connect ECONNREFUSED 172.18.0.5:8001 (hypertrade-bot-testnet)";
+      "connect ECONNREFUSED 172.18.0.5:8001 (xupertrade-bot-testnet)";
     fetchSpy.mockRejectedValue(new Error(sensitive));
 
     const res = await tenantBotFetch(
@@ -363,7 +363,7 @@ describe("tenantBotFetch", () => {
     // Critical: the raw message (with IP + container name) must
     // not leak into the response.
     expect(JSON.stringify(body)).not.toContain("172.18.0.5");
-    expect(JSON.stringify(body)).not.toContain("hypertrade-bot");
+    expect(JSON.stringify(body)).not.toContain("xupertrade-bot");
     expect(JSON.stringify(body)).not.toContain("ECONNREFUSED");
   });
 
@@ -371,7 +371,7 @@ describe("tenantBotFetch", () => {
     mockedRequireTenant.mockResolvedValue(tenant());
     chainSelect([liveBotRow("testnet")]);
     fetchSpy.mockRejectedValue(
-      new Error("getaddrinfo ENOTFOUND hypertrade-bot-testnet"),
+      new Error("getaddrinfo ENOTFOUND xupertrade-bot-testnet"),
     );
     const res = await tenantBotFetch(
       new Request("https://x/api/positions?mode=testnet"),
