@@ -27,6 +27,7 @@ import { and, eq } from "drizzle-orm";
 
 import { appendAuditLog } from "@/lib/audit-log";
 import { getBotApiUrl } from "@/lib/bot-api";
+import { loadBotApiKey } from "@/lib/bot-api-key";
 import { db, tenantBots, tenantTelegramLinks } from "@/lib/db";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { requireTenant } from "@/lib/tenant";
@@ -139,7 +140,8 @@ export async function POST(req: Request): Promise<Response> {
   const url = `${publicBase}/unlock?token=${encodeURIComponent(token)}`;
 
   // 4. Forward to the bot's internal endpoint.
-  const apiKey = process.env.API_KEY || "";
+  // Per security audit H-1: per-bot API key, not shared env var.
+  const apiKey = (await loadBotApiKey(bot.id)) || "";
   let res: Response;
   try {
     res = await fetch(`${base}/api/internal/send-unlock-link`, {

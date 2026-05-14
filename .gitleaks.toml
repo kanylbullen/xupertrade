@@ -93,4 +93,23 @@ regexes = [
   '''(?i)\b(auth|phase|secrets|console|admin|api)\.(example|invalid|localhost|test)\b''',
   # `your-actual-domain.com`, `<your-domain>` style placeholders.
   '''(?i)\b(auth|phase|secrets|console|admin|api)\.(your|my|the)-?[a-z0-9-]*-?domain\.[a-z]{2,4}\b''',
+  # Self-describing test-fixture strings (per-bot API_KEY tests, PR #119).
+  # Fail-safe shape: any literal containing "should-be-ignored" or
+  # "stale-system-value" or matching the gitleaks-fixture-marker pattern
+  # is by construction not a real secret — no real key would ever
+  # contain those substrings.
+  '''should-be-ignored-by-systemEnv''',
+  '''stale-system-value''',
+]
+# Allowlist git commits whose findings are known false positives but
+# can't be removed without history rewrite. PR #119 (per-bot API_KEY)
+# introduced two test fixture strings that match the
+# hardcoded-secret-assignment rule; later commits on the branch
+# replaced them, but gitleaks scans full history so the originals
+# still trigger. Force-pushing the branch would require coordination
+# with reviewers; safer to allowlist by SHA.
+commits = [
+  "e2c669a4707c5acebe462e692bbc8782bec49d06",
+  "b9c1e859f866db1f62928be13ec2106b6f4747da",
+  "6494efcc9b509c0fe0d878e16f1a334fbad4952d",
 ]

@@ -6,6 +6,7 @@ import { Separator } from "@/components/ui/separator";
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
+import { loadBotApiKey } from "@/lib/bot-api-key";
 import { and, eq } from "drizzle-orm";
 
 type Check = {
@@ -72,9 +73,9 @@ export default async function HodlPage() {
     .limit(1);
   const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
 
-  // /api/hodl/* are auth-gated when API_KEY is set on the bot. Server-side
-  // render forwards the dashboard's API_KEY so we don't 401 ourselves.
-  const apiKey = process.env.API_KEY || "";
+  // /api/hodl/* are auth-gated. Per security audit H-1 the dashboard
+  // looks up each bot's per-bot API key from Redis (no shared secret).
+  const apiKey = botRows[0] ? (await loadBotApiKey(botRows[0].id)) || "" : "";
   const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
   let signals: SignalState[] = [];

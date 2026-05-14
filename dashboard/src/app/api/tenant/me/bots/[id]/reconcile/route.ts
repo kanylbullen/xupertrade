@@ -11,6 +11,7 @@
 import { and, eq } from "drizzle-orm";
 
 import { getBotApiUrl } from "@/lib/bot-api";
+import { loadBotApiKey } from "@/lib/bot-api-key";
 import { db, tenantBots } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
 
@@ -59,7 +60,9 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     bodyText = "";
   }
 
-  const apiKey = process.env.API_KEY || "";
+  // Per security audit H-1: per-bot API key, not the dashboard's
+  // shared env var. Looked up from Redis by botId.
+  const apiKey = (await loadBotApiKey(botId)) || "";
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (apiKey) headers["X-Api-Key"] = apiKey;
 

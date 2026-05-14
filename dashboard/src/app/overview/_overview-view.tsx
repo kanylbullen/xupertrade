@@ -18,6 +18,7 @@ import {
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
+import { loadBotApiKey } from "@/lib/bot-api-key";
 import { and, eq } from "drizzle-orm";
 import type { PositionRow } from "@/components/position-card";
 import {
@@ -96,7 +97,8 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
   let positionRows: PositionRow[] = [];
   let positionsFromExchange = false;
 
-  const apiKey = process.env.API_KEY || "";
+  // Per-bot API key (security audit H-1) — null when no bot row.
+  const apiKey = botRows[0] ? (await loadBotApiKey(botRows[0].id)) || "" : "";
   const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
   if (!botApiUrl) {

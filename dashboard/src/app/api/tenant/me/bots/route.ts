@@ -22,7 +22,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db, tenantBots, tenantSecrets } from "@/lib/db";
 import {
   type BotMode,
-  buildSpec,
+  containerName,
   isValidMode,
   requiredSecretsForMode,
 } from "@/lib/bot-orchestrator";
@@ -124,12 +124,10 @@ export async function POST(req: Request): Promise<Response> {
   // uniqueness at the DB layer — if we lose the race we map ONLY
   // the postgres unique-violation (23505) to 409.
   const botId = randomUUID();
-  const containerNameStub = buildSpec({
-    botId,
-    tenantId: tenant.id,
-    mode: mode as BotMode,
-    decryptedSecrets: {},
-  }).name;
+  // Derive the container-name stub without going through buildSpec —
+  // we don't have an API key yet (decryptAndStart generates one) and
+  // buildSpec now requires it.
+  const containerNameStub = containerName(tenant.id, mode as BotMode);
   try {
     await db.insert(tenantBots).values({
       id: botId,

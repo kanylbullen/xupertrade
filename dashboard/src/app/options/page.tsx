@@ -9,6 +9,7 @@ import { OptionsModePicker } from "@/components/options-mode-picker";
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
+import { loadBotApiKey } from "@/lib/bot-api-key";
 import { and, eq } from "drizzle-orm";
 
 export default async function OptionsPage({
@@ -29,9 +30,9 @@ export default async function OptionsPage({
     .limit(1);
   const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
 
-  // /strategies is auth-gated when API_KEY is set on the bot. Forward the
-  // dashboard's API_KEY from server-side env so SSR doesn't 401.
-  const apiKey = process.env.API_KEY || "";
+  // /strategies is auth-gated. Per security audit H-1 we look up the
+  // per-bot API key from Redis (each bot has its own).
+  const apiKey = botRows[0] ? (await loadBotApiKey(botRows[0].id)) || "" : "";
   const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
   type StrategyMeta = { name: string; symbol: string; timeframe: string };

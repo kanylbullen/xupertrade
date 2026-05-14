@@ -21,6 +21,10 @@ vi.mock("@/lib/unlock-token", () => ({
 vi.mock("@/lib/bot-api", () => ({
   getBotApiUrl: vi.fn(),
 }));
+// H-1: per-bot API key replaces process.env.API_KEY for proxy auth.
+vi.mock("@/lib/bot-api-key", () => ({
+  loadBotApiKey: vi.fn().mockResolvedValue("test-key"),
+}));
 vi.mock("@/lib/rate-limit", () => ({
   checkRateLimit: vi.fn(),
 }));

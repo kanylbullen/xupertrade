@@ -23,6 +23,12 @@ vi.mock("../tenant", () => ({
   requireTenant: vi.fn(),
 }));
 
+// H-1: tenantBotFetch now looks up the per-bot API key via Redis.
+// Mock the lookup so we don't need a live Redis in unit tests.
+vi.mock("../bot-api-key", () => ({
+  loadBotApiKey: vi.fn().mockResolvedValue(null),
+}));
+
 import { API_PORT_BY_MODE } from "../bot-orchestrator";
 import { getBotApiUrl, tenantBotFetch } from "../bot-api";
 import { db, tenantBots } from "../db";
