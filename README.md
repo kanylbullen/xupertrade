@@ -89,11 +89,13 @@ Leverage defaults are chosen by historical max drawdown and whether the strategy
 
 ## Security model — credentials at rest
 
-Tenants paste HyperLiquid private keys (and Telegram tokens) into the dashboard. Those values are encrypted under a key derived from a passphrase the tenant sets the first time they visit Settings → Credentials. Nothing on the server — not the database, not the logs, not an operator with DB access — can read those secrets without that passphrase.
+Tenants paste HyperLiquid private keys (and Telegram tokens) into the dashboard. The plaintext travels from the browser to the dashboard server over TLS, the server encrypts it in memory under a key `K` derived from the tenant's passphrase, and only the encrypted blob (ciphertext + nonce) hits the database. Plaintext never touches durable storage — not the DB, not Phase, not the log files, not container images. An operator with DB-only access (Postgres credentials but no host shell) cannot read tenant secrets without also knowing each tenant's passphrase.
 
 If a tenant forgets the passphrase, the keys are unrecoverable: there is no reset, no recovery email. They re-enter the keys (and rotate the wallets, since their plaintext was last seen on whichever device they used originally).
 
 If an attacker steals the database, they hold ciphertext that can only be cracked by brute-forcing the passphrase through Argon2id — intentionally tuned so that takes years on dedicated hardware for any decent passphrase.
+
+> **Trust model boundary.** This is not end-to-end encryption. The dashboard server sees plaintext during write (to encrypt) and during decrypt (to hand the bot its key). Anyone with root on the dashboard host can read those values out of memory while a tenant is unlocked. What we protect against is data-at-rest exposure: stolen DB dumps, stolen Phase exports, log scrapes, and operators whose access is bounded to durable storage rather than running processes.
 
 ### How it works (technical detail)
 
@@ -103,7 +105,7 @@ If an attacker steals the database, they hold ciphertext that can only be cracke
 | **At-rest encryption** | AES-256-GCM, fresh 12-byte nonce per write | Stored in `tenant_secrets(ciphertext, nonce)`. K never persisted. Same plaintext encrypts to different ciphertexts. GCM auth tag fails loudly on tamper or wrong key. |
 | **Verifier** | HMAC-SHA-256(K, fixed domain string) | Stored in `tenants.passphrase_verifier`. Lets us check "did the user type the right passphrase?" without decrypting any actual secret, in constant time. We never store the passphrase itself, hashed or otherwise. |
 | **Session cache** | Redis `dashboard:k-cache:<tenant>:<session>`, 24h TTL | After unlock, K lives in Redis tied to the session ID so subsequent actions in the same session don't re-prompt. Cleared on logout / explicit Lock / TTL expiry. |
-| **In transit** | TLS terminated at Caddy (Let's Encrypt via Cloudflare DNS-01, or self-signed bootstrap) | Plaintext passphrase only crosses the wire once during set/unlock; it never reaches durable storage. |
+| **In transit** | TLS terminated at Caddy (Let's Encrypt via Cloudflare DNS-01, or self-signed bootstrap) | The passphrase crosses the wire on initial setup (once to `/api/tenant/me/passphrase` to register the salt + verifier, then once to `/api/tenant/me/unlock` to derive and cache K) and again on each subsequent unlock after the K-cache TTL expires. Secret values cross the wire on each Save. None of these reach durable storage in plaintext. |
 
 **What this does not protect against.** An operator with root access to the host running the bot containers can read decrypted secrets out of running-process memory or container env vars. The bot needs the plaintext private key to sign HyperLiquid orders — that's unavoidable for any non-custodial trading system. The relevant guarantees are:
 

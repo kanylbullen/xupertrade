@@ -550,18 +550,22 @@ function SecurityInfo() {
         <span aria-hidden className="text-base">🔒</span>
         <div className="space-y-2">
           <p className="font-medium">
-            Your private keys are encrypted with your passphrase before
-            they leave your browser&rsquo;s tab.
+            Your private keys are encrypted under a key only your
+            passphrase can unlock &mdash; never written to disk, never
+            visible to the database or to logs.
           </p>
           <p className="text-muted-foreground">
-            Nothing on the server &mdash; not the database, not the logs,
-            not the operator &mdash; can read them without a passphrase
-            you typed yourself in this session. If you forget the
-            passphrase, the keys are gone for good; we can&rsquo;t reset
-            it for you. If someone steals the encrypted database, they
-            still need to crack your passphrase before they get
-            anything usable, and the encryption is intentionally tuned
-            so that takes years on dedicated hardware.
+            The keys travel from your browser to the dashboard server
+            over TLS. The server encrypts them in memory using a key
+            derived from the passphrase you entered when you unlocked
+            this page, and only the encrypted blob hits the database.
+            Plaintext never touches durable storage &mdash; not the
+            DB, not the log files, not Phase. If you forget the
+            passphrase the keys are unrecoverable; there is no reset.
+            If someone steals the database, they still need to crack
+            your passphrase through Argon2id before they get anything
+            usable, which is intentionally tuned to take years on
+            dedicated hardware for any decent passphrase.
           </p>
           <details className="group mt-2">
             <summary className="cursor-pointer text-xs font-medium text-muted-foreground transition-colors hover:text-foreground">
