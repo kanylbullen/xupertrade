@@ -307,7 +307,7 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 # 2. Verify image age — both timestamps must be newer than your commit
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "docker image inspect hypertrade-dashboard -f 'built: {{.Created}}' && \
-   docker image inspect hypertrade-bot:latest -f 'built: {{.Created}}'"
+   docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}'"
 
 # 3. Only THEN recreate the containers
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
@@ -317,7 +317,7 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 > ⚠️ **`up -d --force-recreate dashboard` only refreshes the dashboard
 > container.** Tenant-bots are orchestrator-spawned (separate Docker
 > containers, not in `docker-compose.yml` post-PR-4c) and the orchestrator
-> does NOT auto-restart them when `hypertrade-bot:latest` updates. So a
+> does NOT auto-restart them when `xupertrade-bot:latest` updates. So a
 > bot code change ships the new image into the registry but already-running
 > tenant bots keep using the read-only layers from the image they spawned
 > against until the dashboard explicitly recreates them.
@@ -425,11 +425,11 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 
 # Recent errors — post-PR-4c the bots are tenant-scoped, so the legacy
 # `hypertrade-bot-testnet` container no longer exists. Container names
-# follow `hypertrade-bot-<short_id>-<mode>` (e.g.
-# `hypertrade-bot-0000000000000000-testnet` for the operator's tenant);
+# follow `xupertrade-bot-<short_id>-<mode>` (e.g.
+# `xupertrade-bot-0000000000000000-testnet` for the operator's tenant);
 # discover the right one before grepping logs.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "matches=\$(docker ps --format '{{.Names}}' | grep -E '^hypertrade-bot-.*-testnet\$'); \
+  "matches=\$(docker ps --format '{{.Names}}' | grep -E '^xupertrade-bot-.*-testnet\$'); \
    case \$(echo \"\$matches\" | grep -c .) in \
      0) echo 'no testnet bot container running' >&2; exit 1 ;; \
      1) container=\$matches ;; \

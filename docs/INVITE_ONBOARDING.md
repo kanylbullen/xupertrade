@@ -97,7 +97,7 @@ in.
    # Find the container
    ssh root@$DEPLOY_HOST 'docker ps --filter label=hypertrade.tenant_id=<uuid>'
    # Stop + remove
-   ssh root@$DEPLOY_HOST 'docker rm -f hypertrade-bot-<short_id>-<mode>'
+   ssh root@$DEPLOY_HOST 'docker rm -f xupertrade-bot-<short_id>-<mode>'
    ```
 2. Optional: remove their Authentik account from the
    `hypertrade-users` group — revokes future sign-ins; their DB
@@ -267,9 +267,8 @@ your bot replies only to your configured `TELEGRAM_CHAT_ID`.
 
 **Q: A tenant is spam-trading. How do I stop them?**
 
-A: **Today (manual)**: SSH in and `docker rm -f
-hypertrade-bot-<short_id>-<mode>`. Their bot is dead; their data
-stays. They can recreate via the dashboard if they unlock again,
+A: **Today (manual)**: SSH in and `docker rm -f xupertrade-bot-<short_id>-<mode>`.
+Their bot is dead; their data stays. They can recreate via the dashboard if they unlock again,
 so for repeat offenders also remove their account from the
 `hypertrade-users` Authentik group.
 

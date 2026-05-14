@@ -52,13 +52,13 @@ describe("containerName", () => {
     // 16 hex chars = 64 bits of entropy → cross-tenant collision
     // effectively impossible (PR #43 review fix; 8 chars too short).
     expect(containerName(TENANT_ID, "mainnet")).toBe(
-      "hypertrade-bot-3a2f1e4caaaabbbb-mainnet",
+      "xupertrade-bot-3a2f1e4caaaabbbb-mainnet",
     );
   });
 
   it("strips dashes from the tenant uuid", () => {
     const name = containerName("00000000-1111-2222-3333-444444444444", "paper");
-    expect(name).toBe("hypertrade-bot-0000000011112222-paper");
+    expect(name).toBe("xupertrade-bot-0000000011112222-paper");
   });
 
   it("name fits Docker's 63-char limit", () => {
@@ -309,8 +309,8 @@ describe("startBot delegation", () => {
     const mockedCreate = vi.mocked(docker.createAndStart);
     mockedCreate.mockResolvedValueOnce({
       id: "abc123",
-      name: "hypertrade-bot-3a2f1e4c-paper",
-      image: "hypertrade-bot:latest",
+      name: "xupertrade-bot-3a2f1e4c-paper",
+      image: "xupertrade-bot:latest",
       state: "running",
       status: "Up 1 second",
       labels: {},
@@ -326,7 +326,7 @@ describe("startBot delegation", () => {
     expect(mockedCreate).toHaveBeenCalledOnce();
     expect(info.id).toBe("abc123");
     const passedSpec = mockedCreate.mock.calls[0][0];
-    expect(passedSpec.name).toBe("hypertrade-bot-3a2f1e4caaaabbbb-paper");
+    expect(passedSpec.name).toBe("xupertrade-bot-3a2f1e4caaaabbbb-paper");
   });
 });
 

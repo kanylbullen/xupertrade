@@ -1,5 +1,5 @@
 services:
-  # Build-only service. Produces the `hypertrade-bot:latest` image that
+  # Build-only service. Produces the `xupertrade-bot:latest` image that
   # the dashboard's bot-orchestrator (lib/bot-orchestrator.ts) spawns
   # per-tenant bot containers from. The image tag is overridable via
   # HYPERTRADE_BOT_IMAGE on the dashboard service.
@@ -16,7 +16,7 @@ services:
   bot-image:
     profiles: [build]
     build: ./bot
-    image: hypertrade-bot:latest
+    image: xupertrade-bot:latest
     # No-op command + restart=no — this entry exists only so compose
     # knows how to build the image; running it just exits cleanly.
     command: ["true"]
@@ -94,7 +94,7 @@ services:
       # name lets bots reach postgres + redis on the internal docker
       # network without exposing extra ports.
       HYPERTRADE_DOCKER_NETWORK: "${HYPERTRADE_DOCKER_NETWORK:-hypertrade_default}"
-      HYPERTRADE_BOT_IMAGE: "${HYPERTRADE_BOT_IMAGE:-hypertrade-bot:latest}"
+      HYPERTRADE_BOT_IMAGE: "${HYPERTRADE_BOT_IMAGE:-xupertrade-bot:latest}"
     volumes:
       # Multi-tenancy Phase 3a: dashboard binds the host's docker
       # socket so it can create/start/stop per-tenant bot containers

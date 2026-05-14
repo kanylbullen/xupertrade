@@ -67,7 +67,7 @@ export type BotStartParams = {
   systemEnv?: Record<string, string>;
 };
 
-const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "hypertrade-bot:latest";
+const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "xupertrade-bot:latest";
 const NETWORK = process.env.HYPERTRADE_DOCKER_NETWORK ?? "hypertrade_default";
 const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024;     // 512 MiB
 const DEFAULT_NANO_CPUS = 1_000_000_000;            // 1 CPU
@@ -77,13 +77,13 @@ const DEFAULT_NANO_CPUS = 1_000_000_000;            // 1 CPU
  * (64 bits) of the tenant UUID to make accidental cross-tenant
  * collisions effectively impossible — 8 chars (32 bits) is too
  * short, full 32 chars is overkill. Total name length:
- *   "hypertrade-bot-" (15) + 16 + "-" (1) + "mainnet" (7) = 39
+ *   "xupertrade-bot-" (15) + 16 + "-" (1) + "mainnet" (7) = 39
  * comfortably under Docker's 63-char limit.
- *   hypertrade-bot-3a2f1e4caaaa1111-mainnet
+ *   xupertrade-bot-3a2f1e4caaaa1111-mainnet
  */
 export function containerName(tenantId: string, mode: BotMode): string {
   const short = tenantId.replace(/-/g, "").slice(0, 16);
-  return `hypertrade-bot-${short}-${mode}`;
+  return `xupertrade-bot-${short}-${mode}`;
 }
 
 /**
