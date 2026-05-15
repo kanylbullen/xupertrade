@@ -1144,62 +1144,18 @@ class TestOlegAryukovStrategy:
 
     @pytest.mark.asyncio
     async def test_sl_exit_closes_long(self):
-        """A CLOSED bar with low <= SL fires CLOSE_LONG (trailing disabled).
-
-        SL/TP checks operate on iloc[-2] (last closed bar); iloc[-1] is the
-        live partial bar and must not drive exits.
-        """
+        """A bar with low <= SL fires CLOSE_LONG (trailing disabled)."""
         strat = OlegAryukovStrategy(use_trailing=False)
         entry = 100.0
         strat.restore_state("long", entry)
         df = _flat_df(self.WARMUP + 5, price=entry)
-        # Breach SL on the last CLOSED bar (-2), keep the live bar (-1) benign.
-        df.at[df.index[-2], "low"] = 90.0  # < SL=98
-        df.at[df.index[-2], "high"] = 99.0
-        df.at[df.index[-2], "close"] = 92.0
+        df.at[df.index[-1], "low"] = 90.0  # < SL=98
+        df.at[df.index[-1], "high"] = 99.0
+        df.at[df.index[-1], "close"] = 92.0
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_LONG
         assert "SL" in result.reason
-
-    @pytest.mark.asyncio
-    async def test_partial_bar_low_does_not_stop_out_long(self):
-        """Regression: live partial bar (iloc[-1]) low must NOT trigger SL.
-
-        Bug 2026-05-14: a 1h short opened at minute :01 was instantly SL'd
-        because the live bar's low/high already spanned the whole hour and
-        ratcheted the trailing stop within ~1% of price. Fix: SL/TP and
-        trailing-extreme updates only consider the last CLOSED bar.
-        """
-        strat = OlegAryukovStrategy(use_trailing=True, trailing_percent=1.0)
-        entry = 100.0
-        strat.restore_state("long", entry)
-        df = _flat_df(self.WARMUP + 5, price=entry)
-        # Live partial bar (-1) "would have" stopped us out under the bug.
-        df.at[df.index[-1], "low"] = 50.0  # way below SL=98
-        df.at[df.index[-1], "high"] = entry
-        df.at[df.index[-1], "close"] = 95.0
-        # Last CLOSED bar (-2) is benign — must not produce an exit.
-        result = await strat.on_candle(df)
-        assert result is None, (
-            f"partial bar low must not stop out, but got {result}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_partial_bar_high_does_not_stop_out_short(self):
-        """Symmetric short-side regression for the 2026-05-14 bug."""
-        strat = OlegAryukovStrategy(use_trailing=True, trailing_percent=1.0)
-        entry = 100.0
-        strat.restore_state("short", entry)
-        df = _flat_df(self.WARMUP + 5, price=entry)
-        # Live partial bar high above SL=102 — must be ignored.
-        df.at[df.index[-1], "high"] = 150.0
-        df.at[df.index[-1], "low"] = entry
-        df.at[df.index[-1], "close"] = 105.0
-        result = await strat.on_candle(df)
-        assert result is None, (
-            f"partial bar high must not stop out, but got {result}"
-        )
 
     @pytest.mark.asyncio
     async def test_entry_signal_xfail_on_synthetic(self):
@@ -1264,12 +1220,13 @@ class TestOlegAryukovStrategy:
         a_entry = strat._entry_price
         assert a_sl is not None and a_entry == 2300.0
 
-        # Drive SL hit on the last CLOSED bar (iloc[-2]) since PR #127
-        # moved trail-update + SL/TP-hit checks to closed-bar semantics.
+        # Drive SL hit on iloc[-1]. The runner already strips the live
+        # partial bar before calling on_candle (runner.py:608), so the
+        # strategy's iloc[-1] IS the latest closed bar.
         df = _flat_df(self.WARMUP + 5, price=2300.0)
-        df.at[df.index[-2], "high"] = a_sl + 5.0
-        df.at[df.index[-2], "low"] = 2295.0
-        df.at[df.index[-2], "close"] = a_sl + 1.0
+        df.at[df.index[-1], "high"] = a_sl + 5.0
+        df.at[df.index[-1], "low"] = 2295.0
+        df.at[df.index[-1], "close"] = a_sl + 1.0
         result = await strat.on_candle(df)
         assert result is not None
         assert result.action == SignalAction.CLOSE_SHORT
