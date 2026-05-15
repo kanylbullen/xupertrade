@@ -72,9 +72,15 @@ async def test_short_open_does_not_instant_stopout_from_pre_entry_bar() -> None:
         stop_loss_percent=2.0,
     )
     df = _flat_df(WARMUP + 5, price=entry)
-    df.at[df.index[-2], "high"] = 2287.80
-    df.at[df.index[-2], "low"] = 2245.10
-    df.at[df.index[-2], "close"] = 2270.00
+    # Place SL-triggering extremes on the LATEST bar (iloc[-1]) — the same
+    # bar that ``_entry_bar_ts`` is stamped to and the only bar
+    # ``on_candle`` actually inspects via ``df.iloc[-1]``. With the guard
+    # in place the manage-open block no-ops on this bar; if the guard
+    # were removed, the high/low here would re-trigger the
+    # instant-stop-out loop and fail the test.
+    df.at[df.index[-1], "high"] = 2287.80
+    df.at[df.index[-1], "low"] = 2245.10
+    df.at[df.index[-1], "close"] = 2270.00
 
     # Simulate the open path's effect on internal state — including
     # the new ``_entry_bar_ts`` stamp on the latest closed bar.
