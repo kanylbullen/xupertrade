@@ -164,6 +164,10 @@ class OlegAryukovStrategy(Strategy):
         self._take_profit: float | None = None
         # trail extreme: highest high since entry (long) / lowest low (short)
         self._trail_extreme: float | None = None
+        # Timestamp of the bar on which the position was opened. Manage-open
+        # block skips bars whose timestamp <= this so trail/SL-hit checks
+        # never consult pre-entry data — see investigations/oleg-paper-loop-2026-05-14.md.
+        self._entry_bar_ts: pd.Timestamp | None = None
 
     # ----- state lifecycle --------------------------------------------------
     def restore_state(self, side: str, entry_price: float) -> None:
@@ -178,6 +182,11 @@ class OlegAryukovStrategy(Strategy):
             self._stop_loss = entry_price * (1 + sl_pct)
             self._take_profit = entry_price * (1 - tp_pct)
         self._trail_extreme = entry_price
+        # Restart loses the entry bar timestamp — treat any bar as post-entry
+        # so trail/SL-hit can fire on the first tick after restore. Better
+        # than the original same-bar loop and matches other state-aware
+        # strategies in this codebase.
+        self._entry_bar_ts = None
 
     def export_state(self) -> dict | None:
         if self._position_side is None:
@@ -188,6 +197,10 @@ class OlegAryukovStrategy(Strategy):
             "stop_loss": self._stop_loss,
             "take_profit": self._take_profit,
             "trail_extreme": self._trail_extreme,
+            "entry_bar_ts": (
+                self._entry_bar_ts.isoformat()
+                if self._entry_bar_ts is not None else None
+            ),
         }
 
     def restore_from_json(
@@ -198,6 +211,14 @@ class OlegAryukovStrategy(Strategy):
         self._stop_loss = state.get("stop_loss")
         self._take_profit = state.get("take_profit")
         self._trail_extreme = state.get("trail_extreme", entry_price)
+        ts_raw = state.get("entry_bar_ts")
+        if ts_raw is not None:
+            try:
+                self._entry_bar_ts = pd.Timestamp(ts_raw)
+            except (ValueError, TypeError):
+                self._entry_bar_ts = None
+        else:
+            self._entry_bar_ts = None
         if self._stop_loss is None or self._take_profit is None:
             self.restore_state(side, entry_price)
 
@@ -217,6 +238,7 @@ class OlegAryukovStrategy(Strategy):
         self._stop_loss = None
         self._take_profit = None
         self._trail_extreme = None
+        self._entry_bar_ts = None
 
     # ----- main loop --------------------------------------------------------
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
@@ -235,6 +257,14 @@ class OlegAryukovStrategy(Strategy):
 
         # ----- manage open position first -----
         if self._position_side is not None and self._entry_price is not None:
+            # Skip manage-open on the same bar we entered on. Without this,
+            # trail/SL-hit checks read pre-entry high/low and instant-stop-out.
+            latest_ts = latest["timestamp"]
+            if (
+                self._entry_bar_ts is not None
+                and latest_ts <= self._entry_bar_ts
+            ):
+                return None
             if self.use_trailing and self._trail_extreme is not None:
                 trail_dist = self._entry_price * self.trailing_percent / 100.0
                 if self._position_side == "long":
@@ -429,6 +459,7 @@ class OlegAryukovStrategy(Strategy):
             self._stop_loss = sl
             self._take_profit = tp
             self._trail_extreme = close
+            self._entry_bar_ts = latest["timestamp"]
             return Signal(
                 action=SignalAction.OPEN_LONG, symbol=self.symbol,
                 strategy_name=self.name,
@@ -447,6 +478,7 @@ class OlegAryukovStrategy(Strategy):
             self._stop_loss = sl
             self._take_profit = tp
             self._trail_extreme = close
+            self._entry_bar_ts = latest["timestamp"]
             return Signal(
                 action=SignalAction.OPEN_SHORT, symbol=self.symbol,
                 strategy_name=self.name,
