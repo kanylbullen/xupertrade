@@ -383,10 +383,28 @@ class EngineRunner:
         paused = False
         disabled: set[str] = set()
         leverage_overrides: dict[str, int] = {}
+        # Per-tenant mainnet allowlist (layer 2). Empty set = nothing
+        # trades on mainnet for this tenant. Re-read every tick so UI
+        # toggles take effect without a bot restart. Outside mainnet,
+        # `mainnet_enabled` stays None and the filter is skipped.
+        mainnet_enabled: set[str] | None = None
         if self.control:
             paused = await self.control.is_paused()
             disabled = await self.control.get_disabled_strategies()
             leverage_overrides = await self.control.get_all_leverage_overrides()
+            if settings.is_mainnet and settings.tenant_id:
+                try:
+                    mainnet_enabled = (
+                        await self.control.get_mainnet_enabled_strategies_for_tenant(
+                            settings.tenant_id,
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to read tenant mainnet allowlist — "
+                        "fail-closed: no strategies trade this tick"
+                    )
+                    mainnet_enabled = set()
             # Apply overrides to strategy instances (used for sizing this tick)
             for s in self.strategies:
                 if s.name in leverage_overrides:
@@ -395,7 +413,11 @@ class EngineRunner:
         if paused:
             logger.info("Tick skipped — bot is paused")
         else:
-            active = [s for s in self.strategies if s.name not in disabled]
+            active = [
+                s for s in self.strategies
+                if s.name not in disabled
+                and (mainnet_enabled is None or s.name in mainnet_enabled)
+            ]
             logger.info(
                 "Tick started — evaluating %d/%d strategies (disabled: %s)",
                 len(active),

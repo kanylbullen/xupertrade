@@ -5,6 +5,7 @@ import { useEffect, useState, useTransition } from "react";
 
 import { UnlockModal } from "@/components/unlock-modal";
 import { LiveLog } from "@/components/live-log";
+import { MainnetStrategiesCard } from "@/components/mainnet-strategies-card";
 
 const MODES = ["mainnet", "testnet", "paper"] as const;
 type Mode = (typeof MODES)[number];
@@ -86,6 +87,7 @@ export function BotsClient() {
           Go to credentials
         </Link>
       </p>
+      <MainnetStrategiesCard />
       {/* Tenant-wide live event stream — was previously the LiveLog
           on the retired /status page (Decision 3 of the sidebar nav
           refactor). One panel because the underlying Redis pub/sub
