@@ -257,6 +257,43 @@ class BotControl:
     # gone. The Redis keys themselves still exist and are managed
     # solely by the dashboard.
 
+    # --- Per-tenant mainnet strategy allowlist (UI-driven, layer 2).
+    # The operator's MAINNET_ENABLED_STRATEGIES env var is the upper cap
+    # (layer 1, applied at boot). This Redis set is the per-tenant
+    # opt-in (layer 2). Effective = intersection. Empty set = no
+    # mainnet trading until tenant explicitly enables a strategy in
+    # the dashboard. Re-read every tick so toggles take effect without
+    # bot restart.
+
+    def _mainnet_enabled_strategies_key(self, tenant_id: str) -> str:
+        return f"hypertrade:mainnet:control:enabled_strategies:{tenant_id}"
+
+    async def get_mainnet_enabled_strategies_for_tenant(
+        self, tenant_id: str,
+    ) -> set[str]:
+        """Return the tenant's enabled-on-mainnet set. Empty = none."""
+        if self._redis is None or not tenant_id:
+            return set()
+        members = await self._redis.smembers(
+            self._mainnet_enabled_strategies_key(tenant_id),
+        )
+        return set(members or [])
+
+    async def set_mainnet_strategy_enabled(
+        self, tenant_id: str, name: str, enabled: bool,
+    ) -> None:
+        if self._redis is None or not tenant_id or not name:
+            return
+        key = self._mainnet_enabled_strategies_key(tenant_id)
+        if enabled:
+            await self._redis.sadd(key, name)
+        else:
+            await self._redis.srem(key, name)
+        logger.info(
+            "Mainnet strategy %s %s for tenant %s",
+            name, "enabled" if enabled else "disabled", tenant_id,
+        )
+
     # --- Per-strategy state snapshot (audit M6 fix completion).
     # The position-table state_json only persists state during in-position
     # windows. Cooldown-after-close needs a separate snapshot store —

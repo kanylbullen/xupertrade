@@ -9,8 +9,45 @@ mainnet honors `MAINNET_ENABLED_STRATEGIES` as a fail-closed allowlist
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING, TypeVar
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 logger = logging.getLogger("hypertrade")
+
+_StrategyT = TypeVar("_StrategyT")
+
+
+def filter_strategies_for_tick(
+    strategies: Iterable[_StrategyT],
+    disabled: set[str],
+    mainnet_enabled: set[str] | None,
+) -> list[_StrategyT]:
+    """Return the subset of `strategies` that should run this tick.
+
+    Each strategy must have a `.name` attribute. The filter applies two
+    layers:
+
+    - `disabled`: strategy names the operator has paused via Redis
+      (`hypertrade:control:disabled_strategies`).
+    - `mainnet_enabled`: when not None, the per-tenant opt-in allowlist
+      (UI-driven layer 2 on mainnet). A strategy must be present here
+      to run; an empty set means no strategies run. Pass None on
+      paper/testnet to skip this layer entirely.
+
+    A strategy runs iff it is NOT in `disabled` AND (`mainnet_enabled`
+    is None OR its name is in `mainnet_enabled`). Input order is
+    preserved.
+    """
+    return [
+        s for s in strategies
+        if s.name not in disabled  # type: ignore[attr-defined]
+        and (
+            mainnet_enabled is None
+            or s.name in mainnet_enabled  # type: ignore[attr-defined]
+        )
+    ]
 
 
 def apply_mainnet_allowlist(
