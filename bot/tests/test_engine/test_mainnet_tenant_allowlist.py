@@ -11,13 +11,32 @@ intersection logic the runner applies each tick.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from unittest.mock import AsyncMock
 
 import pytest
 
 from hypertrade.engine.control import BotControl
+from hypertrade.engine.strategy_allowlist import filter_strategies_for_tick
 
 TENANT = "00000000-0000-0000-0000-00000000aaaa"
+
+
+@dataclass
+class _FakeStrategy:
+    """Minimal stand-in for `Strategy` — the tick filter only reads
+    `.name`, so a dataclass keeps the tests independent of the strategy
+    base class and its dependencies."""
+
+    name: str
+
+
+def _strats(*names: str) -> list[_FakeStrategy]:
+    return [_FakeStrategy(n) for n in names]
+
+
+def _names(strategies: list[_FakeStrategy]) -> list[str]:
+    return [s.name for s in strategies]
 
 
 def _make_control() -> tuple[BotControl, AsyncMock]:
@@ -78,37 +97,73 @@ async def test_set_no_op_when_no_redis():
     await c.set_mainnet_strategy_enabled(TENANT, "bb_short", True)
 
 
-# ---- Intersection logic (mirrors runner per-tick filtering) ----
-
-def _effective(
-    all_strategies: list[str],
-    operator_cap: set[str],
-    tenant_enabled: set[str],
-) -> list[str]:
-    """Mirror of the per-tick filter in runner._tick: a strategy trades
-    iff it's in BOTH the operator cap AND the tenant's opt-in set."""
-    return [
-        n for n in all_strategies
-        if n in operator_cap and n in tenant_enabled
-    ]
+# ---- Intersection logic (exercises runner per-tick filter directly) ----
+#
+# These tests drive `filter_strategies_for_tick`, the same function the
+# runner calls each tick (see runner._tick). The "operator cap" in this
+# context is layer 1 (`MAINNET_ENABLED_STRATEGIES`, enforced at boot
+# via `apply_mainnet_allowlist`) — by the time `_tick` runs, the cap
+# has already removed disallowed strategies from `self.strategies`, so
+# `disabled` is the only runtime knob besides `mainnet_enabled`. We
+# model the cap below by pre-filtering `all_strategies` accordingly.
 
 
 def test_intersection_empty_operator_cap_blocks_everything():
-    assert _effective(["a", "b"], set(), {"a", "b"}) == []
+    # Operator cap is empty -> no strategies even reach the tick.
+    assert _names(
+        filter_strategies_for_tick(_strats(), set(), {"a", "b"})
+    ) == []
 
 
 def test_intersection_empty_tenant_blocks_everything():
-    assert _effective(["a", "b"], {"a", "b"}, set()) == []
+    assert _names(
+        filter_strategies_for_tick(_strats("a", "b"), set(), set())
+    ) == []
 
 
 def test_intersection_tenant_subset_of_cap():
-    assert _effective(["a", "b", "c"], {"a", "b", "c"}, {"a"}) == ["a"]
+    assert _names(
+        filter_strategies_for_tick(_strats("a", "b", "c"), set(), {"a"})
+    ) == ["a"]
 
 
 def test_intersection_tenant_outside_cap_is_dropped():
-    # Tenant tries to enable "x" but operator doesn't allow it.
-    assert _effective(["a", "b", "x"], {"a", "b"}, {"a", "x"}) == ["a"]
+    # Tenant tries to enable "x" but operator cap (applied upstream)
+    # already removed it from the strategy list.
+    assert _names(
+        filter_strategies_for_tick(_strats("a", "b"), set(), {"a", "x"})
+    ) == ["a"]
 
 
 def test_intersection_both_agree():
-    assert _effective(["a", "b", "c"], {"a", "c"}, {"a", "c"}) == ["a", "c"]
+    assert _names(
+        filter_strategies_for_tick(_strats("a", "b", "c"), set(), {"a", "c"})
+    ) == ["a", "c"]
+
+
+def test_filter_skips_disabled_strategies():
+    # `disabled` always applies, regardless of mainnet allowlist state.
+    assert _names(
+        filter_strategies_for_tick(
+            _strats("a", "b", "c"), {"b"}, {"a", "b", "c"},
+        )
+    ) == ["a", "c"]
+
+
+def test_filter_none_mainnet_allowlist_skips_mainnet_layer():
+    # Paper/testnet path: mainnet_enabled=None -> only `disabled`
+    # filters; otherwise every strategy runs.
+    assert _names(
+        filter_strategies_for_tick(_strats("a", "b", "c"), set(), None)
+    ) == ["a", "b", "c"]
+    assert _names(
+        filter_strategies_for_tick(_strats("a", "b", "c"), {"b"}, None)
+    ) == ["a", "c"]
+
+
+def test_filter_preserves_input_order():
+    assert _names(
+        filter_strategies_for_tick(
+            _strats("c", "a", "b"), set(), {"a", "b", "c"},
+        )
+    ) == ["c", "a", "b"]

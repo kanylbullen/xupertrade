@@ -13,6 +13,7 @@ from hypertrade.db.repo import Repository
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.portfolio import PortfolioManager
 from hypertrade.engine.signals import Signal, SignalAction
+from hypertrade.engine.strategy_allowlist import filter_strategies_for_tick
 from hypertrade.events.bus import EventBus
 from hypertrade.events.types import (
     BotHeartbeat,
@@ -413,11 +414,9 @@ class EngineRunner:
         if paused:
             logger.info("Tick skipped — bot is paused")
         else:
-            active = [
-                s for s in self.strategies
-                if s.name not in disabled
-                and (mainnet_enabled is None or s.name in mainnet_enabled)
-            ]
+            active = filter_strategies_for_tick(
+                self.strategies, disabled, mainnet_enabled,
+            )
             logger.info(
                 "Tick started — evaluating %d/%d strategies (disabled: %s)",
                 len(active),

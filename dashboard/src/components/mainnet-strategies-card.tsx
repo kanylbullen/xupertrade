@@ -168,7 +168,7 @@ export function MainnetStrategiesList({
               checked={checked}
               disabled={switchDisabled}
               onCheckedChange={(next: boolean) => onToggle(s.name, next)}
-              aria-label={`Enable ${s.name} on mainnet`}
+              aria-label={`Mainnet trading for ${s.name}`}
             />
           </li>
         );
