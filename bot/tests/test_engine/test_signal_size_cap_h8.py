@@ -93,9 +93,12 @@ async def test_cap_rejection_does_not_publish_error_event(monkeypatch):
     """Safety-cap rejection should be warning-only — NOT routed to
     Telegram via ErrorOccurred. Two simultaneous Telegram alerts (testnet
     + paper) on 2026-05-17 04:00/04:01 UTC triggered this fix: the cap
-    correctly blocked vvv_hedge open_short (400 VVV × ~$7 ≈ $2,790 margin
-    > $2,000 cap), but the ErrorOccurred publish made it look like a bot
-    failure rather than the safety system doing its job."""
+    correctly blocked vvv_hedge open_short (the 4000-VVV bumped size
+    here at $5 gives notional $20,000 and — with this test's `leverage=1`
+    — $20,000 margin, well over the $2,000 cap; in the live incident
+    the same shape held at the stock 400 VVV × ~$7 ≈ $2,790 notional
+    against a lower cap), but the ErrorOccurred publish made it look
+    like a bot failure rather than the safety system doing its job."""
     monkeypatch.setattr(settings, "max_position_size_usd", 200)
     monkeypatch.setattr(settings, "signal_size_max_multiplier", 10.0)
     monkeypatch.setattr(settings, "max_total_exposure_usd", 0)

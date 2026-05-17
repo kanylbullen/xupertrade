@@ -886,9 +886,13 @@ class EngineRunner:
                 # Safety-cap rejection is warning-only and NOT Telegram-routed:
                 # the cap firing means the safety system worked, not that the
                 # bot is broken. Emitting ErrorOccurred here spammed Telegram
-                # on every legitimate cap-block (e.g. vvv_hedge in paper/testnet
-                # where 400 VVV × $7 ≈ $2,790 > $2,000 cap). The warning log
-                # above is sufficient for diagnostics.
+                # on every legitimate cap-block. Example: vvv_hedge emits
+                # Signal(size=400). At VVV $7 the notional is 400 × 7 = $2,800.
+                # Margin = notional / leverage: at the strategy's default
+                # leverage=2 that's $1,400 (under the $2,000 cap → passes),
+                # but at leverage=1 it's $2,800 (over cap → rejected here,
+                # warning logged, no Telegram). The warning log above is
+                # sufficient for diagnostics.
                 return False
 
         if signal.action == SignalAction.OPEN_LONG:
