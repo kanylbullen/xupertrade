@@ -13,8 +13,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from hypertrade.config import settings
 from hypertrade.engine.signals import SignalAction
 from hypertrade.strategies.vvv_hedge import VVVHedgeStrategy
+
+
+@pytest.fixture(autouse=True)
+def _mainnet_mode(monkeypatch):
+    """vvv_hedge is mainnet-only (PR: fix/vvv-hedge-mainnet-only-suppress-cap-error).
+    Existing behavioral tests assume the strategy actually runs; force mainnet
+    so the early-return gate doesn't short-circuit every test."""
+    monkeypatch.setattr(settings, "exchange_mode", "mainnet")
 
 
 def _ts4h(i: int) -> datetime:
@@ -112,6 +121,19 @@ class TestVVVHedge:
         assert result.action == SignalAction.OPEN_SHORT
         assert result.size == s.holding_vvv
         assert "REGIME SHORT" in result.reason
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["paper", "testnet"])
+    async def test_returns_none_when_not_mainnet(self, monkeypatch, mode):
+        """Even with a textbook EMA-bearish + 3-of-4 trend reversal in the
+        candles, on non-mainnet modes the gate must short-circuit to None —
+        there's no real VVV holding to hedge on paper/testnet."""
+        monkeypatch.setattr(settings, "exchange_mode", mode)
+        s = VVVHedgeStrategy()
+        rising = _trend_rows(5.0, 25.0, 250, volume=1000.0)
+        falling = _trend_rows(25.0, 15.0, 30, volume=2500.0)
+        df = _df(rising + falling)
+        assert await s.on_candle(df) is None
 
     @pytest.mark.asyncio
     async def test_size_always_equals_holding(self):

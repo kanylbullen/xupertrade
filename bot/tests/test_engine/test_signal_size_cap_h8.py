@@ -89,6 +89,33 @@ async def test_size_above_cap_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cap_rejection_does_not_publish_error_event(monkeypatch):
+    """Safety-cap rejection should be warning-only — NOT routed to
+    Telegram via ErrorOccurred. Two simultaneous Telegram alerts (testnet
+    + paper) on 2026-05-17 04:00/04:01 UTC triggered this fix: the cap
+    correctly blocked vvv_hedge open_short (400 VVV × ~$7 ≈ $2,790 margin
+    > $2,000 cap), but the ErrorOccurred publish made it look like a bot
+    failure rather than the safety system doing its job."""
+    monkeypatch.setattr(settings, "max_position_size_usd", 200)
+    monkeypatch.setattr(settings, "signal_size_max_multiplier", 10.0)
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 0)
+    runner = _runner()
+    # Attach a recording event bus so we can assert nothing was published.
+    event_bus = MagicMock()
+    event_bus.publish = AsyncMock()
+    runner.event_bus = event_bus
+
+    sig = Signal(
+        action=SignalAction.OPEN_SHORT, symbol="VVV",
+        strategy_name="vvv_hedge", size=4000.0,
+    )
+    ok = await runner._execute_signal(sig, current_price=5.0, leverage=1)
+    assert ok is False
+    runner.exchange.place_order.assert_not_called()
+    event_bus.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_close_signals_unaffected_by_cap(monkeypatch):
     """CLOSE_LONG with a giant signal.size must NOT be cap-blocked —
     closing reduces exposure; the size goes through resolve-close-size

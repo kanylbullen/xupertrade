@@ -3,6 +3,11 @@
 NOT a Pine port. Custom strategy designed for the specific use case of
 hedging a long-term VVV holding (staked for DIEM) against trend reversal.
 
+Mainnet-only: the hedge only makes sense against real staked VVV. On
+paper/testnet there's nothing to hedge, so `on_candle` returns `None`
+immediately to avoid pointless signals (and safety-cap rejections when
+the holding_vvv × price notional exceeds the paper/testnet caps).
+
 Goal: protect spot value when the long-term uptrend breaks. Open a short
 of size = `holding_vvv` (NOT engine's notional sizing) when 3 of 4
 regime-shift indicators turn bearish on 4h. Close the short when 2 of 4
@@ -45,6 +50,7 @@ import logging
 import pandas as pd
 import pandas_ta as pta
 
+from hypertrade.config import settings
 from hypertrade.engine.signals import Signal, SignalAction
 from hypertrade.strategies.base import Strategy
 from hypertrade.strategies.registry import register
@@ -199,6 +205,9 @@ class VVVHedgeStrategy(Strategy):
         return bearish_count, breakdown
 
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
+        # Hedges real staked VVV; only mainnet has actual holdings to hedge
+        if settings.exchange_mode != "mainnet":
+            return None
         # Need enough history for the longest indicator
         warmup = max(
             self.ema_slow_len,
