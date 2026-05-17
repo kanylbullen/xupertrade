@@ -883,21 +883,16 @@ class EngineRunner:
                     settings.signal_size_max_multiplier,
                     max_margin,
                 )
-                if self.event_bus:
-                    try:
-                        await self.event_bus.publish(
-                            ErrorOccurred(
-                                strategy=signal.strategy_name,
-                                message=(
-                                    f"Refused {signal.action.value} {signal.symbol}: "
-                                    f"signal.size margin ${requested_margin:,.0f} "
-                                    f"exceeds {settings.signal_size_max_multiplier}× cap "
-                                    f"${max_margin:,.0f}"
-                                ),
-                            )
-                        )
-                    except Exception:
-                        logger.exception("H8 cap: event publish failed")
+                # Safety-cap rejection is warning-only and NOT Telegram-routed:
+                # the cap firing means the safety system worked, not that the
+                # bot is broken. Emitting ErrorOccurred here spammed Telegram
+                # on every legitimate cap-block. Example: vvv_hedge emits
+                # Signal(size=400). At VVV $7 the notional is 400 × 7 = $2,800.
+                # Margin = notional / leverage: at the strategy's default
+                # leverage=2 that's $1,400 (under the $2,000 cap → passes),
+                # but at leverage=1 it's $2,800 (over cap → rejected here,
+                # warning logged, no Telegram). The warning log above is
+                # sufficient for diagnostics.
                 return False
 
         if signal.action == SignalAction.OPEN_LONG:
