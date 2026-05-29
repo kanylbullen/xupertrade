@@ -99,6 +99,23 @@ services:
       OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
       OIDC_SCOPES: "${OIDC_SCOPES:-}"
       AUTH_MODE: "${AUTH_MODE:-}"
+      # Operator-level Telegram alerting for the heartbeat watchdog
+      # (feat/heartbeat-watchdog). `phase run` injects these; the
+      # watchdog (src/lib/heartbeat-watchdog.ts) sends a DM directly to
+      # the Telegram Bot API when a running tenant bot goes silent — a
+      # dead bot can't alert about its own death. Defaulted empty so a
+      # dashboard launched without Phase still boots; the watchdog logs
+      # a warning and skips alerting (graceful degradation).
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      # Heartbeat-watchdog tuning (src/lib/heartbeat-watchdog.ts).
+      # POLL_SECONDS = how often the watchdog probes running bots;
+      # STALE_SECONDS = heartbeat age past which a bot is "down".
+      # Worst-case detection latency is the sum of the two (default
+      # 60s + 300s = ~6 min). Defaults match the code fallbacks, so a
+      # dashboard launched without Phase still uses the documented values.
+      HEARTBEAT_WATCHDOG_POLL_SECONDS: "${HEARTBEAT_WATCHDOG_POLL_SECONDS:-60}"
+      HEARTBEAT_WATCHDOG_STALE_SECONDS: "${HEARTBEAT_WATCHDOG_STALE_SECONDS:-300}"
       # Multi-tenancy Phase 3a: dashboard creates per-tenant bot
       # containers via the host docker daemon. The shared network
       # name lets bots reach postgres + redis on the internal docker
