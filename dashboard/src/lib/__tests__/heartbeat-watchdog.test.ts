@@ -7,6 +7,8 @@
  *   - bot up + dedup key exists → recovery alert + key deleted
  *   - bot up + no dedup key → nothing
  *   - one bot's probe throwing doesn't prevent checking the others
+ *   - probe hits /api/control/heartbeat with X-Api-Key forwarded
+ *   - non-2xx probe (404/401) → alive, no alert (PR #138 false-alarm fix)
  *   - missing API key → skip (no probe, no alert, no key mutation)
  *   - recovery send fails → dedup key is NOT deleted (retried next sweep)
  *
@@ -122,6 +124,42 @@ describe("runHeartbeatSweep", () => {
     expect(key).toBe("dashboard:heartbeat-alert:b1");
     expect(value).toBe("alerted");
     expect(ttl).toBe(24 * 60 * 60);
+  });
+
+  it("probes /api/control/heartbeat and forwards the X-Api-Key header", async () => {
+    chainSelect([fakeRow("b1")]);
+    fetchSpy.mockResolvedValue(heartbeatResponse({ stale: false, age_seconds: 1 }));
+    const redis = makeRedis();
+    const sendAlert = vi.fn().mockResolvedValue(true);
+
+    await runHeartbeatSweep(redis, sendAlert);
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://bot:8001/api/control/heartbeat");
+    expect(url).not.toContain("/api/heartbeat\"");
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Api-Key"]).toBe("bot-key");
+  });
+
+  it("treats a non-2xx probe (404/401) as alive — no down alert, no key mutation", async () => {
+    chainSelect([fakeRow("b1")]);
+    // A 404 (wrong path) or 401 (auth misconfig) means the bot's HTTP
+    // server answered, so the process is alive. This is the PR #138
+    // false-alarm root cause: non-2xx was treated as down and fired
+    // "offline" for all three live bots. Must NOT alert.
+    fetchSpy.mockResolvedValue(
+      new Response("not found", { status: 404 }),
+    );
+    const redis = makeRedis();
+    const sendAlert = vi.fn().mockResolvedValue(true);
+
+    await runHeartbeatSweep(redis, sendAlert);
+
+    expect(sendAlert).not.toHaveBeenCalled();
+    expect(redis.get).not.toHaveBeenCalled();
+    expect(redis.set).not.toHaveBeenCalled();
+    expect(redis.del).not.toHaveBeenCalled();
   });
 
   it("treats a failed fetch (connection refused) as down and alerts", async () => {
