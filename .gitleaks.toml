@@ -93,6 +93,11 @@ regexes = [
   '''(?i)\b(auth|phase|secrets|console|admin|api)\.(example|invalid|localhost|test)\b''',
   # `your-actual-domain.com`, `<your-domain>` style placeholders.
   '''(?i)\b(auth|phase|secrets|console|admin|api)\.(your|my|the)-?[a-z0-9-]*-?domain\.[a-z]{2,4}\b''',
+  # Public third-party API endpoints that match the operator-service-
+  # subdomain shape (`api.<domain>.<tld>`) but are NOT operator infra —
+  # they're well-known public services referenced in source. Telegram's
+  # bot API host is hardcoded in the heartbeat watchdog (PR #138).
+  '''api\.telegram\.org''',
   # Self-describing test-fixture strings (per-bot API_KEY tests, PR #119).
   # Fail-safe shape: any literal containing "should-be-ignored" or
   # "stale-system-value" or matching the gitleaks-fixture-marker pattern
