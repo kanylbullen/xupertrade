@@ -11,9 +11,13 @@
  * moment a bot's heartbeat goes stale.
  *
  * How: every poll interval, for each `tenant_bots` row with
- * `is_running = true`, fetch the bot's `GET /api/heartbeat`. A bot is
- * "down" when the fetch fails, OR the bot reports `stale = true`, OR
- * `age_seconds` exceeds the staleness threshold. The bot writes its
+ * `is_running = true`, fetch the bot's `GET /api/control/heartbeat`
+ * (auth-gated — the per-bot `X-Api-Key` is forwarded). A bot is "down"
+ * only when the fetch THROWS (connection refused / DNS / timeout), OR the
+ * bot's 2xx body reports `stale = true`, OR `age_seconds` exceeds the
+ * staleness threshold. A non-2xx response (e.g. 401/404) means the HTTP
+ * server answered, so the bot is alive — it's a probe misconfig, not an
+ * outage, and is treated as a skip (no alert). The bot writes its
  * heartbeat every ~60s tick (stale at 180s); the default 5-minute
  * threshold means a bot is solidly dead, not just one slow tick — avoids
  * flapping.
@@ -127,14 +131,20 @@ type HeartbeatProbe = {
 };
 
 /**
- * Probe one bot's heartbeat endpoint. Never throws — any failure
- * (no URL, fetch error, non-2xx) is treated as "down" with unknown age.
+ * Probe one bot's heartbeat endpoint. Never throws. A thrown fetch
+ * (connection refused / DNS / timeout) → "down" with unknown age — that's
+ * the genuine-unreachable signal. A missing URL is likewise "down".
  *
- * Exception: a missing API key is NOT treated as down. Probing without
- * the key would fail auth and produce a FALSE offline alert, but the
- * real problem is auth-infra (key evicted / legacy bot predating per-bot
- * keys), not a confirmed outage. Such a bot is returned with `skip:true`
- * so the sweep leaves its alert state untouched.
+ * Two cases are NOT down (both returned with `skip:true` so the sweep
+ * leaves alert state untouched — no down alert, no recovery, no dedup-key
+ * mutation):
+ *   - Missing API key: probing without it would fail auth and produce a
+ *     FALSE offline alert; the real problem is auth-infra (key evicted /
+ *     legacy bot predating per-bot keys), not a confirmed outage.
+ *   - Non-2xx response (401/404/5xx): the bot's HTTP server answered, so
+ *     the process is alive. Treating these as down is exactly what caused
+ *     the PR #138 false-alarm (probed the wrong path → 404 → "all 3 bots
+ *     offline" while every bot was healthy).
  */
 async function probeBot(
   row: typeof tenantBots.$inferSelect,
@@ -148,12 +158,26 @@ async function probeBot(
   }
 
   try {
-    const res = await fetch(`${base}/api/heartbeat`, {
+    const res = await fetch(`${base}/api/control/heartbeat`, {
       cache: "no-store",
       headers: { "X-Api-Key": apiKey },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return { down: true, ageSeconds: null };
+    if (!res.ok) {
+      // A non-2xx (e.g. 401 auth misconfig, 404 wrong path) is NOT a dead
+      // bot: the bot's HTTP server answered, so the process is alive. The
+      // false-alarm incident on the PR #138 deploy came from treating
+      // these as down and firing "bot offline" for all three live bots.
+      // Skip drawing any conclusion — leave alert state untouched, never
+      // alert. Genuine unreachability is the caught-exception path below.
+      console.warn(
+        `[heartbeat-watchdog] probe got HTTP ${res.status} for bot=${row.id} ` +
+          "mode=" +
+          row.mode +
+          " — treating as alive (probe misconfig, not an outage)",
+      );
+      return { down: false, ageSeconds: null, skip: true };
+    }
     const data = (await res.json()) as {
       stale?: boolean;
       age_seconds?: number | null;
