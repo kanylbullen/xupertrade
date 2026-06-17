@@ -144,6 +144,18 @@ services:
       HYPERTRADE_BOT_HL_ORDER_TIMEOUT_SECONDS: "${HYPERTRADE_BOT_HL_ORDER_TIMEOUT_SECONDS:-15.0}"
       HYPERTRADE_BOT_HL_INIT_RETRY_ATTEMPTS: "${HYPERTRADE_BOT_HL_INIT_RETRY_ATTEMPTS:-5}"
       HYPERTRADE_BOT_HL_INIT_RETRY_BACKOFF_SECONDS: "${HYPERTRADE_BOT_HL_INIT_RETRY_BACKOFF_SECONDS:-2.0}"
+      # Per-mode tenant-bot memory caps (bot-orchestrator.ts
+      # memoryBytesForMode). mainnet defaults to 1 GiB because it runs
+      # the vault scanner + HODL eval + Telegram notifier on top of the
+      # strategy loop (pandas/pandas-ta peaks during the daily vault
+      # scan OOM-killed it ×4 at the old 512 MiB cap, 2026-06-17);
+      # paper/testnet stay at 512 MiB. Unset = use those code defaults.
+      # HYPERTRADE_BOT_MEMORY_BYTES is a global fallback for any mode
+      # whose per-mode var is unset.
+      HYPERTRADE_BOT_MEMORY_BYTES: "${HYPERTRADE_BOT_MEMORY_BYTES:-}"
+      HYPERTRADE_BOT_PAPER_MEMORY_BYTES: "${HYPERTRADE_BOT_PAPER_MEMORY_BYTES:-}"
+      HYPERTRADE_BOT_TESTNET_MEMORY_BYTES: "${HYPERTRADE_BOT_TESTNET_MEMORY_BYTES:-}"
+      HYPERTRADE_BOT_MAINNET_MEMORY_BYTES: "${HYPERTRADE_BOT_MAINNET_MEMORY_BYTES:-}"
     volumes:
       # Multi-tenancy Phase 3a: dashboard binds the host's docker
       # socket so it can create/start/stop per-tenant bot containers
