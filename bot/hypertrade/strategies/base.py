@@ -35,6 +35,27 @@ class Strategy(ABC):
         """Called with latest candle data. Return a Signal or None to hold."""
         ...
 
+    def on_filled(self, side: str, fill_price: float) -> None:
+        """Called by the engine AFTER an OPEN order fills on the exchange.
+
+        Re-anchors the strategy's entry to the ACTUAL fill price rather than
+        the closed-bar `close` it estimated at signal time. Slippage,
+        market-order fills, and paper fill-at-current-price all make the real
+        fill differ from the bar close, so any percentage/ATR bracket derived
+        from the estimate is slightly wrong (origin: the 2026-05-14 oleg
+        paper-loop investigation, "Fix C").
+
+        Default: set ``_entry_price = fill_price`` if the strategy tracks one,
+        else no-op. Strategies whose SL/TP/trail are derived from entry at
+        OPEN time (not recomputed every bar from ``_entry_price``) must
+        override to re-derive those brackets from ``fill_price``.
+
+        Called only on OPEN fills; closes don't need it. The engine wraps the
+        call in try/except — a bug here cannot break the execution path.
+        """
+        if hasattr(self, "_entry_price"):
+            self._entry_price = fill_price
+
     def restore_state(self, side: str, entry_price: float) -> None:
         """Restore in-memory position state after restart. Override in stateful strategies."""
 

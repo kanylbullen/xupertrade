@@ -170,18 +170,30 @@ class OlegAryukovStrategy(Strategy):
         self._entry_bar_ts: pd.Timestamp | None = None
 
     # ----- state lifecycle --------------------------------------------------
+    def _recompute_brackets(self) -> None:
+        """Derive SL/TP/trail from _position_side + _entry_price. Shared by the
+        open path, restore_state, and on_filled so the %SL math lives once."""
+        sl_pct = self.stop_loss_percent / 100.0
+        tp_pct = self.take_profit_percent / 100.0
+        entry = self._entry_price
+        if self._position_side == "long":
+            self._stop_loss = entry * (1 - sl_pct)
+            self._take_profit = entry * (1 + tp_pct)
+        else:
+            self._stop_loss = entry * (1 + sl_pct)
+            self._take_profit = entry * (1 - tp_pct)
+        self._trail_extreme = entry
+
+    def on_filled(self, side: str, fill_price: float) -> None:
+        # Re-anchor to the real fill but keep _entry_bar_ts (set at open).
+        self._position_side = side
+        self._entry_price = fill_price
+        self._recompute_brackets()
+
     def restore_state(self, side: str, entry_price: float) -> None:
         self._position_side = side
         self._entry_price = entry_price
-        sl_pct = self.stop_loss_percent / 100.0
-        tp_pct = self.take_profit_percent / 100.0
-        if side == "long":
-            self._stop_loss = entry_price * (1 - sl_pct)
-            self._take_profit = entry_price * (1 + tp_pct)
-        else:
-            self._stop_loss = entry_price * (1 + sl_pct)
-            self._take_profit = entry_price * (1 - tp_pct)
-        self._trail_extreme = entry_price
+        self._recompute_brackets()
         # Restart loses the entry bar timestamp — treat any bar as post-entry
         # so trail/SL-hit can fire on the first tick after restore. Better
         # than the original same-bar loop and matches other state-aware
@@ -452,13 +464,11 @@ class OlegAryukovStrategy(Strategy):
         short_cond = sell >= self.min_confirmations and trend_ok_short
 
         if long_cond:
-            sl = close * (1 - self.stop_loss_percent / 100.0)
-            tp = close * (1 + self.take_profit_percent / 100.0)
             self._position_side = "long"
             self._entry_price = close
-            self._stop_loss = sl
-            self._take_profit = tp
-            self._trail_extreme = close
+            self._recompute_brackets()
+            sl = self._stop_loss
+            tp = self._take_profit
             self._entry_bar_ts = latest["timestamp"]
             return Signal(
                 action=SignalAction.OPEN_LONG, symbol=self.symbol,
@@ -471,13 +481,11 @@ class OlegAryukovStrategy(Strategy):
                 ),
             )
         if short_cond:
-            sl = close * (1 + self.stop_loss_percent / 100.0)
-            tp = close * (1 - self.take_profit_percent / 100.0)
             self._position_side = "short"
             self._entry_price = close
-            self._stop_loss = sl
-            self._take_profit = tp
-            self._trail_extreme = close
+            self._recompute_brackets()
+            sl = self._stop_loss
+            tp = self._take_profit
             self._entry_bar_ts = latest["timestamp"]
             return Signal(
                 action=SignalAction.OPEN_SHORT, symbol=self.symbol,
