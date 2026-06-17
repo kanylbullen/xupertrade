@@ -132,3 +132,32 @@ async def test_persisted_state_reflects_post_fill_brackets(monkeypatch):
     state = json.loads(state_json)
     # The persisted entry must be the FILL price (2010), not the bar close.
     assert state["entry_price"] == 2010.0
+
+
+@pytest.mark.asyncio
+async def test_on_filled_skipped_when_fill_price_zero(monkeypatch, caplog):
+    # A FILLED order with filled_price None/0 must NOT call on_filled —
+    # re-anchoring to 0 would zero out entry/SL/TP. The open still proceeds
+    # and a warning is logged.
+    import logging
+
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 0)
+    strat = _RecordingStrategy()
+    runner = _runner(strat)
+    runner.exchange.place_order = AsyncMock(return_value=_fill_order(None))
+    sig = Signal(
+        action=SignalAction.OPEN_LONG, symbol="ETH",
+        strategy_name="recording", size=1.0,
+    )
+    with caplog.at_level(logging.WARNING):
+        ok = await runner._execute_signal(sig, current_price=2000.0, leverage=1)
+    assert ok is True
+    # on_filled must NOT have been called.
+    assert strat.on_filled_calls == []
+    # The open still proceeded (DB write happened).
+    runner.repo.record_trade_and_open_position.assert_awaited_once()
+    # A warning was logged about the missing fill price.
+    assert any(
+        "filled with no price" in r.message or "filled_price" in r.getMessage()
+        for r in caplog.records
+    )

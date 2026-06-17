@@ -966,12 +966,24 @@ class EngineRunner:
             )
             if strat is not None:
                 side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
-                try:
-                    strat.on_filled(side, filled_price)
-                except Exception:
-                    logger.exception(
-                        "[%s] on_filled failed (position open; continuing)",
+                # Guard against a filled order with no usable price: re-anchoring
+                # to 0 would zero out entry/SL/TP for every entry-derived
+                # strategy. Better to keep the signal-time estimate than corrupt
+                # it — the position is open either way.
+                if filled_price > 0:
+                    try:
+                        strat.on_filled(side, filled_price)
+                    except Exception:
+                        logger.exception(
+                            "[%s] on_filled failed (position open; continuing)",
+                            signal.strategy_name,
+                        )
+                else:
+                    logger.warning(
+                        "[%s] OPEN filled with no price (filled_price=%s); "
+                        "skipping on_filled re-anchor, keeping signal-time estimate",
                         signal.strategy_name,
+                        order.filled_price,
                     )
 
         # Calculate realized P&L for closes

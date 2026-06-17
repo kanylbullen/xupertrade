@@ -108,11 +108,33 @@ class VVVHedgeStrategy(Strategy):
         self._entry_price: float | None = None
         self._sl: float | None = None
 
+    def _recompute_sl(self) -> None:
+        """Derive the hard SL from _entry_price. Shared by the open path,
+        restore_state, and on_filled so the SL formula lives in one place.
+        Short-only: SL sits hard_sl_pct ABOVE entry."""
+        entry = self._entry_price
+        self._sl = entry * (1 + self.hard_sl_pct) if entry is not None else None
+
+    def on_filled(self, side: str, fill_price: float) -> None:
+        # Re-anchor entry + hard SL to the REAL fill. At signal time the
+        # strategy set _entry_price from the closed bar's close; slippage /
+        # market fill makes the actual fill differ, so the SL (a % of entry)
+        # is wrong by that amount until re-derived here.
+        if side == "short":
+            self._in_short = True
+            self._entry_price = fill_price
+            self._recompute_sl()
+        else:
+            # Strategy is short-only — defensive no-op for an unexpected side.
+            self._in_short = False
+            self._entry_price = None
+            self._sl = None
+
     def restore_state(self, side: str, entry_price: float) -> None:
         if side == "short":
             self._in_short = True
             self._entry_price = entry_price
-            self._sl = entry_price * (1 + self.hard_sl_pct)
+            self._recompute_sl()
         else:
             # Strategy is short-only — long restore shouldn't happen,
             # treat defensively
@@ -298,7 +320,7 @@ class VVVHedgeStrategy(Strategy):
         if should_open:
             self._in_short = True
             self._entry_price = close
-            self._sl = close * (1 + self.hard_sl_pct)
+            self._recompute_sl()
             return Signal(
                 action=SignalAction.OPEN_SHORT,
                 symbol=self.symbol,
