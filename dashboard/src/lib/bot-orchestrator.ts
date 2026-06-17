@@ -77,8 +77,54 @@ export type BotStartParams = {
 
 const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "xupertrade-bot:latest";
 const NETWORK = process.env.HYPERTRADE_DOCKER_NETWORK ?? "hypertrade_default";
-const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024;     // 512 MiB
 const DEFAULT_NANO_CPUS = 1_000_000_000;            // 1 CPU
+
+/**
+ * Per-mode container memory cap.
+ *
+ * paper/testnet have been stable at 512 MiB for weeks. The mainnet bot
+ * runs three mainnet-only heavy jobs ON TOP of the strategy loop that
+ * paper/testnet never touch:
+ *   - the vault scanner (`_poll_vaults`: ~14 MB catalogue + per-vault
+ *     details + Sharpe/max-DD math during the daily scan),
+ *   - HODL signal evaluation (`_evaluate_hodl_signals`), and
+ *   - the Telegram notifier (mainnet is the single Telegram owner).
+ * pandas/pandas-ta peaks during the daily vault scan pushed mainnet's
+ * anon-rss past the old 512 MiB cgroup cap → OOM-killed ×4 on
+ * 2026-06-17 (it self-heals via Docker restart but keeps alerting).
+ * Give mainnet 1 GiB; keep paper/testnet at 512 MiB.
+ *
+ * Like the C-1 operator-policy caps, each mode's default is
+ * env-overridable for tuning without a redeploy of the dashboard image:
+ *   - per-mode: HYPERTRADE_BOT_{PAPER,TESTNET,MAINNET}_MEMORY_BYTES
+ *   - global fallback: HYPERTRADE_BOT_MEMORY_BYTES (applies to any mode
+ *     whose per-mode var is unset).
+ * Resolved lazily in `memoryBytesForMode` so tests can mutate
+ * process.env between calls (env is read once per buildSpec, not at
+ * module load).
+ */
+const DEFAULT_MEMORY_BYTES_BY_MODE: Readonly<Record<BotMode, number>> = {
+  paper: 512 * 1024 * 1024, // 512 MiB
+  testnet: 512 * 1024 * 1024, // 512 MiB
+  mainnet: 1024 * 1024 * 1024, // 1 GiB — vault scan + HODL + Telegram
+};
+
+/**
+ * Resolve the memory cap (bytes) for a bot mode. Honors a per-mode env
+ * override first, then a global override, then the per-mode default.
+ * Non-positive or non-numeric env values are ignored (fall through to
+ * the next source) so a typo can't silently set a 0-byte / NaN limit.
+ */
+export function memoryBytesForMode(mode: BotMode): number {
+  const perMode = process.env[`HYPERTRADE_BOT_${mode.toUpperCase()}_MEMORY_BYTES`];
+  const global = process.env.HYPERTRADE_BOT_MEMORY_BYTES;
+  for (const raw of [perMode, global]) {
+    if (raw === undefined) continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return DEFAULT_MEMORY_BYTES_BY_MODE[mode];
+}
 
 /**
  * Container name for a (tenant, mode) pair. We use 16 hex chars
@@ -280,7 +326,7 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     image: IMAGE,
     env,
     networkName: NETWORK,
-    memoryBytes: DEFAULT_MEMORY_BYTES,
+    memoryBytes: memoryBytesForMode(params.mode),
     nanoCpus: DEFAULT_NANO_CPUS,
     restartPolicy: "unless-stopped",
     labels: {

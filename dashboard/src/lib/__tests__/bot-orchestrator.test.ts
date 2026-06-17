@@ -21,6 +21,7 @@ import {
   containerName,
   getOrchestratorSystemEnv,
   isValidMode,
+  memoryBytesForMode,
   requiredSecretsForMode,
   startBot,
   statusBot,
@@ -107,9 +108,105 @@ describe("buildSpec", () => {
       decryptedSecrets: {},
       apiKey: TEST_API_KEY,
     });
+    // paper/testnet stay at 512 MiB; mainnet gets 1 GiB (own describe
+    // block below). CPU + restart policy are mode-independent.
     expect(spec.memoryBytes).toBe(512 * 1024 * 1024);
     expect(spec.nanoCpus).toBe(1_000_000_000);
     expect(spec.restartPolicy).toBe("unless-stopped");
+  });
+
+  describe("mode-dependent memory cap (mainnet vault-scan OOM, 2026-06-17)", () => {
+    // mainnet runs the vault scanner + HODL eval + Telegram notifier on
+    // top of the strategy loop; pandas/pandas-ta peaks during the daily
+    // vault scan OOM-killed it ×4 at the old flat 512 MiB cap. mainnet
+    // → 1 GiB; paper/testnet keep their proven-stable 512 MiB. nanoCpus
+    // is unchanged regardless of mode.
+    const MEM_ENV_KEYS = [
+      "HYPERTRADE_BOT_MEMORY_BYTES",
+      "HYPERTRADE_BOT_PAPER_MEMORY_BYTES",
+      "HYPERTRADE_BOT_TESTNET_MEMORY_BYTES",
+      "HYPERTRADE_BOT_MAINNET_MEMORY_BYTES",
+    ];
+    const ORIG = { ...process.env };
+    afterEach(() => {
+      for (const k of MEM_ENV_KEYS) delete process.env[k];
+      process.env = { ...ORIG };
+    });
+
+    it("gives mainnet 1 GiB", () => {
+      for (const k of MEM_ENV_KEYS) delete process.env[k];
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+      });
+      expect(spec.memoryBytes).toBe(1024 * 1024 * 1024);
+      // CPU cap is NOT touched by the memory fix.
+      expect(spec.nanoCpus).toBe(1_000_000_000);
+    });
+
+    it.each(["paper", "testnet"] as const)(
+      "keeps %s at 512 MiB",
+      (mode) => {
+        for (const k of MEM_ENV_KEYS) delete process.env[k];
+        const spec = buildSpec({
+          tenantId: TENANT_ID,
+          botId: BOT_ID,
+          mode,
+          decryptedSecrets: {},
+          apiKey: TEST_API_KEY,
+        });
+        expect(spec.memoryBytes).toBe(512 * 1024 * 1024);
+      },
+    );
+
+    it("memoryBytesForMode returns per-mode defaults", () => {
+      for (const k of MEM_ENV_KEYS) delete process.env[k];
+      expect(memoryBytesForMode("paper")).toBe(512 * 1024 * 1024);
+      expect(memoryBytesForMode("testnet")).toBe(512 * 1024 * 1024);
+      expect(memoryBytesForMode("mainnet")).toBe(1024 * 1024 * 1024);
+    });
+
+    it("per-mode env override wins over the default", () => {
+      for (const k of MEM_ENV_KEYS) delete process.env[k];
+      process.env.HYPERTRADE_BOT_MAINNET_MEMORY_BYTES = String(2 * 1024 * 1024 * 1024);
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+      });
+      expect(spec.memoryBytes).toBe(2 * 1024 * 1024 * 1024);
+      // Other modes are unaffected by the mainnet-specific override.
+      expect(memoryBytesForMode("paper")).toBe(512 * 1024 * 1024);
+    });
+
+    it("global HYPERTRADE_BOT_MEMORY_BYTES applies to modes without a per-mode var", () => {
+      for (const k of MEM_ENV_KEYS) delete process.env[k];
+      process.env.HYPERTRADE_BOT_MEMORY_BYTES = String(700 * 1024 * 1024);
+      expect(memoryBytesForMode("paper")).toBe(700 * 1024 * 1024);
+      expect(memoryBytesForMode("mainnet")).toBe(700 * 1024 * 1024);
+    });
+
+    it("per-mode env override beats the global fallback", () => {
+      for (const k of MEM_ENV_KEYS) delete process.env[k];
+      process.env.HYPERTRADE_BOT_MEMORY_BYTES = String(700 * 1024 * 1024);
+      process.env.HYPERTRADE_BOT_MAINNET_MEMORY_BYTES = String(1536 * 1024 * 1024);
+      expect(memoryBytesForMode("mainnet")).toBe(1536 * 1024 * 1024);
+      expect(memoryBytesForMode("testnet")).toBe(700 * 1024 * 1024);
+    });
+
+    it.each(["", "0", "-1", "not-a-number"])(
+      "ignores a bogus override value %j and falls back to the default",
+      (bad) => {
+        for (const k of MEM_ENV_KEYS) delete process.env[k];
+        process.env.HYPERTRADE_BOT_MAINNET_MEMORY_BYTES = bad;
+        expect(memoryBytesForMode("mainnet")).toBe(1024 * 1024 * 1024);
+      },
+    );
   });
 
   it("labels the container for inventory queries", () => {
