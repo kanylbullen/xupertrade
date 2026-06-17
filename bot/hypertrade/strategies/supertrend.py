@@ -83,6 +83,24 @@ class SuperTrendStrategy(Strategy):
         self._last_entry_time: datetime | None = None
         self._last_dir: int | None = None  # remembered ST direction across calls
 
+    def on_filled(self, side: str, fill_price: float) -> None:
+        # SL/TP are ATR-DISTANCE bands fixed at open (not %-of-entry), and the
+        # ATR doesn't change just because the fill slipped — so re-anchor by
+        # shifting every entry-derived level by the SAME delta the entry moved.
+        # This preserves the exact ATR distance while pinning to the real fill.
+        old_entry = self._entry_price
+        self._position_side = side
+        self._entry_price = fill_price
+        if old_entry is None:
+            return
+        delta = fill_price - old_entry
+        if self._stop_loss is not None:
+            self._stop_loss += delta
+        if self._take_profit is not None:
+            self._take_profit += delta
+        if self._trail_extreme is not None:
+            self._trail_extreme += delta
+
     def restore_state(self, side: str, entry_price: float) -> None:
         self._position_side = side
         self._entry_price = entry_price

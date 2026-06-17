@@ -41,3 +41,35 @@ def test_configure_setattr_for_known_attrs():
     s.configure({"leverage": 3, "unknown": "x"})
     assert s.leverage == 3
     assert s.params == {"unknown": "x"}
+
+
+# ----- on_filled hook (Fix C from oleg paper-loop investigation) -----
+
+_TOL = 1e-9
+
+
+def test_on_filled_default_sets_entry_price_when_attr_exists():
+    """Base default: anchor _entry_price to the real fill if the strategy
+    tracks one (re-anchoring covers vol_breakout, which recomputes its
+    ATR-SL from _entry_price every bar)."""
+
+    class _WithEntry(Strategy):
+        name = "with_entry"
+
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self._entry_price = 100.0
+
+        async def on_candle(self, candles):  # type: ignore[override]
+            return None
+
+    s = _WithEntry()
+    s.on_filled("long", 101.5)
+    assert abs(s._entry_price - 101.5) < _TOL
+
+
+def test_on_filled_default_noop_when_no_entry_attr():
+    """Strategies that don't track entry (e.g. rsi_momentum) are unaffected."""
+    s = _Dummy()
+    s.on_filled("long", 123.0)  # must not raise, must not invent the attr
+    assert not hasattr(s, "_entry_price")

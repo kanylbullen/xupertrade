@@ -45,6 +45,10 @@ class BBShortStrategy(Strategy):
         self._entry_price: float | None = None
         self._tp_level: float | None = None
 
+    def on_filled(self, side: str, fill_price: float) -> None:
+        # Re-anchor entry + TP level to the real fill (bb_short is short-only).
+        self.restore_state(side, fill_price)
+
     def restore_state(self, side: str, entry_price: float) -> None:
         self._entry_price = entry_price
         self._tp_level = entry_price * (1 - self.take_profit_pct)

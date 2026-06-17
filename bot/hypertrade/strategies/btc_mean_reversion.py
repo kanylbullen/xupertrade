@@ -60,6 +60,10 @@ class BTCMeanReversionStrategy(Strategy):
         self._stop_loss: float | None = None
         self._take_profit: float | None = None
 
+    def on_filled(self, side: str, fill_price: float) -> None:
+        # Re-anchor SL/TP to the real fill (%SL derived from entry at open).
+        self.restore_state(side, fill_price)
+
     def restore_state(self, side: str, entry_price: float) -> None:
         self._position_side = side
         self._entry_price = entry_price

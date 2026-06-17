@@ -952,6 +952,40 @@ class EngineRunner:
             filled_price,
         )
 
+        # Re-anchor the strategy's entry/SL/TP to the ACTUAL exchange fill
+        # before we persist its state below. At signal time the strategy set
+        # _entry_price from the closed bar's close; the real fill differs
+        # (slippage / market fill / paper fill-at-current-price), so any
+        # percentage/ATR bracket is slightly wrong. on_filled corrects it.
+        # Fail-safe: the position is already open — a bad bracket re-derivation
+        # must not crash the tick, so log + continue. Closes don't need this.
+        if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
+            strat = next(
+                (s for s in self.strategies if s.name == signal.strategy_name),
+                None,
+            )
+            if strat is not None:
+                side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+                # Guard against a filled order with no usable price: re-anchoring
+                # to 0 would zero out entry/SL/TP for every entry-derived
+                # strategy. Better to keep the signal-time estimate than corrupt
+                # it — the position is open either way.
+                if filled_price > 0:
+                    try:
+                        strat.on_filled(side, filled_price)
+                    except Exception:
+                        logger.exception(
+                            "[%s] on_filled failed (position open; continuing)",
+                            signal.strategy_name,
+                        )
+                else:
+                    logger.warning(
+                        "[%s] OPEN filled with no price (filled_price=%s); "
+                        "skipping on_filled re-anchor, keeping signal-time estimate",
+                        signal.strategy_name,
+                        order.filled_price,
+                    )
+
         # Calculate realized P&L for closes
         realized_pnl: float | None = None
         if signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
