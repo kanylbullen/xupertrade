@@ -61,6 +61,7 @@ const TENANT_DATA_TABLES = [
   "manual_onchain_levels",
   "hodl_purchases",
   "user_vault_entries",
+  "tenant_telegram_links",
 ] as const;
 
 const SCHEMA_SQL = `
@@ -128,6 +129,31 @@ const SCHEMA_SQL = `
     PRIMARY KEY (user_address, vault_address)
   );
 
+  -- tenant_telegram_links (alembic 0012): PK is tenant_id, no serial
+  -- id/sequence (matches TABLES_WITHOUT_ID_SEQ in tenant-pg-role.ts).
+  CREATE TABLE tenant_telegram_links (
+    tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    telegram_chat_id BIGINT NOT NULL,
+    telegram_username VARCHAR(64)
+  );
+
+  -- Shared vault-scanner tables (alembic 0006): global, no tenant_id,
+  -- no RLS. provisionRole() grants SELECT/INSERT/UPDATE (no DELETE)
+  -- on these so the stub must exist or that GRANT fails.
+  CREATE TABLE vaults (
+    address VARCHAR(42) PRIMARY KEY
+  );
+  CREATE TABLE vault_snapshots (
+    id SERIAL PRIMARY KEY,
+    vault_address VARCHAR(42) REFERENCES vaults(address) ON DELETE CASCADE
+  );
+  CREATE TABLE vault_nav_history (
+    vault_address VARCHAR(42) REFERENCES vaults(address) ON DELETE CASCADE,
+    timestamp TIMESTAMPTZ NOT NULL,
+    nav DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (vault_address, timestamp)
+  );
+
   -- Phase 5a: app_tenant_id() helper. Marked STABLE (PR #45 review).
   CREATE OR REPLACE FUNCTION app_tenant_id() RETURNS UUID AS $$
   BEGIN
@@ -160,6 +186,7 @@ const SCHEMA_SQL = `
   ALTER TABLE manual_onchain_levels ENABLE ROW LEVEL SECURITY;
   ALTER TABLE hodl_purchases        ENABLE ROW LEVEL SECURITY;
   ALTER TABLE user_vault_entries    ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE tenant_telegram_links ENABLE ROW LEVEL SECURITY;
 
   CREATE POLICY tenant_isolation ON trades                FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
   CREATE POLICY tenant_isolation ON positions             FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
@@ -170,6 +197,7 @@ const SCHEMA_SQL = `
   CREATE POLICY tenant_isolation ON manual_onchain_levels FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
   CREATE POLICY tenant_isolation ON hodl_purchases        FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
   CREATE POLICY tenant_isolation ON user_vault_entries    FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
+  CREATE POLICY tenant_isolation ON tenant_telegram_links FOR ALL USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id());
 `;
 
 export async function setupPg(): Promise<PgFixture> {
