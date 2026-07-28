@@ -26,6 +26,16 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
+// requireTenantServer calls isSessionRevoked(), whose `client`
+// parameter defaults to getRedisClient(). Without this mock the unit
+// test opens a real Redis connection: with no Redis listening it
+// fails closed (returns true) and redirects to /login, and ioredis's
+// retry backoff blows the 5s test timeout. Same pattern as
+// tenant.test.ts / tenant-is-active.test.ts.
+vi.mock("../session-store", () => ({
+  isSessionRevoked: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock("../auth", () => ({
   SESSION_COOKIE: "hypertrade_session",
   getSessionSecret: vi.fn(),

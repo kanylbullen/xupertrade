@@ -26,6 +26,13 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
+// The route calls loadBotApiKey(), whose `client` parameter defaults
+// to getRedisClient(). Unmocked, this unit test opens a real Redis
+// connection and ioredis's retry backoff blows the 5s test timeout.
+vi.mock("@/lib/bot-api-key", () => ({
+  loadBotApiKey: vi.fn().mockResolvedValue("test-api-key"),
+}));
+
 vi.mock("@/lib/bot-api", () => ({
   getBotApiUrl: vi.fn(),
 }));
