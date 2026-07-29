@@ -73,6 +73,41 @@ export type BotStartParams = {
    * any tenant-supplied or stale system value.
    */
   apiKey: string;
+  /**
+   * The tenant's operator-set strategy allowlist (`tenants.
+   * allowed_strategies`), or `null` when no allowlist is set.
+   *
+   * Passed by env rather than read from Postgres by the bot: the
+   * bot's per-tenant PG role deliberately has no grant on `tenants`
+   * (see `tenant-pg-role.ts:TENANT_DATA_TABLES` — dashboard-owned
+   * tables are excluded so one tenant can never read another's row).
+   * The bot used to `SELECT allowed_strategies FROM tenants` at
+   * startup, which therefore always raised
+   * `InsufficientPrivilegeError` and hit a fail-open `except` —
+   * silently running with NO tenant filter. Injecting it here keeps
+   * the grant boundary intact and makes the filter actually apply.
+   *
+   * `null` → env var omitted entirely → bot applies no tenant filter
+   * (matches the NULL-means-no-allowlist DB semantics).
+   */
+  allowedStrategies?: string[] | null;
+  /**
+   * Expiry dates for the tenant's HL private-key secrets, as
+   * `{ SECRET_KEY: ISO-8601 }`. Drives the bot's daily
+   * rotation-reminder Telegram message.
+   *
+   * Env-injected for the same reason as `allowedStrategies`: the
+   * bot's PG role has no grant on `tenant_secrets` (it holds every
+   * tenant's encrypted credentials), so the bot's
+   * `SELECT ... FROM tenant_secrets` raised
+   * InsufficientPrivilegeError and the reminder loop logged
+   * "Key expiry check failed" once a day instead of ever warning.
+   *
+   * Staleness is a non-issue in practice: rotating a key requires
+   * restarting the bot to pick up the new value anyway, which
+   * re-injects this map.
+   */
+  keyExpiries?: Record<string, string> | null;
 };
 
 const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "xupertrade-bot:latest";
@@ -319,6 +354,20 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     // tenant-supplied API_KEY (smuggled via secret CRUD) nor a stale
     // systemEnv value can override it.
     API_KEY: params.apiKey,
+    // Per-tenant strategy allowlist. Placed after the
+    // `decryptedSecrets` / `systemEnv` spreads for the same reason as
+    // API_KEY: a tenant must not be able to widen their own allowlist
+    // by smuggling TENANT_ALLOWED_STRATEGIES through the secret CRUD
+    // API. Omitted entirely when null so the bot can distinguish
+    // "no allowlist set" from "allowlist set to empty" (the latter
+    // means zero strategies may trade, and MUST NOT be read as the
+    // former).
+    ...(params.allowedStrategies != null
+      ? { TENANT_ALLOWED_STRATEGIES: JSON.stringify(params.allowedStrategies) }
+      : {}),
+    ...(params.keyExpiries && Object.keys(params.keyExpiries).length > 0
+      ? { TENANT_KEY_EXPIRIES: JSON.stringify(params.keyExpiries) }
+      : {}),
   };
   const env = Object.entries(envMap).map(([k, v]) => `${k}=${v}`);
   return {
