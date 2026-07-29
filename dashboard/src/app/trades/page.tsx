@@ -2,13 +2,23 @@ import { permanentRedirect } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TradeTable } from "@/components/trade-table";
 import { TradesModeFilter } from "@/components/trades-mode-filter";
-import { getRecentTrades } from "@/lib/queries";
+import { TradesFilterBar } from "@/components/trades-filter-bar";
+import { TradesPager } from "@/components/trades-pager";
+import {
+  countTrades,
+  getTradedStrategyNames,
+  getTradesPage,
+  type TradeFilters,
+} from "@/lib/queries";
 import { requireTenantServer } from "@/lib/tenant-server";
+import { exclusiveEnd, parseDateParam, parsePageParam } from "./filters";
 
 export const dynamic = "force-dynamic";
 
 const FILTERS = ["all", "paper", "testnet", "mainnet"] as const;
 type Filter = (typeof FILTERS)[number];
+
+const PAGE_SIZE = 50;
 
 function isFilter(v: string | undefined): v is Filter {
   return v === "all" || v === "paper" || v === "testnet" || v === "mainnet";
@@ -17,7 +27,14 @@ function isFilter(v: string | undefined): v is Filter {
 export default async function TradesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ mode?: string; filter?: string }>;
+  searchParams: Promise<{
+    mode?: string;
+    filter?: string;
+    strategy?: string;
+    from?: string;
+    to?: string;
+    page?: string;
+  }>;
 }) {
   const params = await searchParams;
 
@@ -36,19 +53,38 @@ export default async function TradesPage({
   }
 
   const filter: Filter = isFilter(params.filter) ? params.filter : "all";
+  const strategyParam = params.strategy?.trim() ?? "";
+  const fromParam = params.from?.trim() ?? "";
+  const toParam = params.to?.trim() ?? "";
+
+  const page = parsePageParam(params.page);
 
   const tenant = await requireTenantServer();
 
-  let trades: Awaited<ReturnType<typeof getRecentTrades>> = [];
+  const from = parseDateParam(fromParam);
+  const to = exclusiveEnd(toParam);
+
+  const filters: TradeFilters = {
+    mode: filter === "all" ? undefined : filter,
+    strategy: strategyParam || undefined,
+    from,
+    to,
+  };
+
+  let trades: Awaited<ReturnType<typeof getTradesPage>> = [];
+  let total = 0;
+  let strategies: string[] = [];
+  let dbDown = false;
 
   try {
-    trades = await getRecentTrades(
-      tenant.id,
-      100,
-      filter === "all" ? undefined : filter,
-    );
+    [trades, total, strategies] = await Promise.all([
+      getTradesPage(tenant.id, filters, PAGE_SIZE, (page - 1) * PAGE_SIZE),
+      countTrades(tenant.id, filters),
+      getTradedStrategyNames(tenant.id),
+    ]);
   } catch {
-    // DB offline
+    // DB offline — render the empty state rather than a 500.
+    dbDown = true;
   }
 
   const tradeRows = trades.map((t) => ({
@@ -73,14 +109,31 @@ export default async function TradesPage({
         <h1 className="text-2xl font-bold">Trade History</h1>
         <TradesModeFilter active={filter} />
       </div>
+
+      <TradesFilterBar
+        strategies={strategies}
+        strategy={strategyParam}
+        from={fromParam}
+        to={toParam}
+      />
+
       <Card>
         <CardHeader>
           <CardTitle>
-            {titleMode} ({tradeRows.length})
+            {titleMode} ({total})
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          <TradeTable trades={tradeRows} />
+          {dbDown ? (
+            <p className="px-4 py-6 text-sm text-muted-foreground">
+              Could not reach the database.
+            </p>
+          ) : (
+            <>
+              <TradeTable trades={tradeRows} />
+              <TradesPager page={page} pageSize={PAGE_SIZE} total={total} />
+            </>
+          )}
         </CardContent>
       </Card>
     </div>
