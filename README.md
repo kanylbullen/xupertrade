@@ -87,6 +87,16 @@ Six strategies implemented from [Minara AI's backtesting study](https://x.com/mi
 
 Leverage defaults are chosen by historical max drawdown and whether the strategy has a hard stop loss. They can be overridden per-mode from the dashboard or Telegram. The bot computes the maximum leverage needed per coin across active strategies and pushes that to HyperLiquid at startup (HyperLiquid leverage is per-coin, not per-position).
 
+## Documentation
+
+- **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** — for people invited to
+  someone else's instance: sign-in, passphrase, HyperLiquid API wallet,
+  first bot, and what the beta does not do yet.
+- **[docs/INVITE_ONBOARDING.md](docs/INVITE_ONBOARDING.md)** — operator
+  side: Authentik group gating, inviting and removing tenants, admin UI.
+- **[docs/CLOUDFLARE_TUNNEL.md](docs/CLOUDFLARE_TUNNEL.md)** — public
+  access without opening inbound ports.
+
 ## Security model — credentials at rest
 
 Tenants paste HyperLiquid private keys (and Telegram tokens) into the dashboard. The plaintext travels from the browser to the dashboard server over TLS, the server encrypts it in memory under a key `K` derived from the tenant's passphrase, and only the encrypted blob (ciphertext + nonce) hits the database. Plaintext never touches durable storage — not the DB, not Phase, not the log files, not container images. An operator with DB-only access (Postgres credentials but no host shell) cannot read tenant secrets without also knowing each tenant's passphrase.
