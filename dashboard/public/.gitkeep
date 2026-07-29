@@ -1,0 +1,11 @@
+Keeps `public/` present in git.
+
+Next's standalone output expects this directory to exist — the
+Dockerfile does `COPY --from=builder /app/public ./public`, which fails
+the image build if it is missing. PR #148 deleted the last file in here
+(five unreferenced create-next-app boilerplate SVGs), and because git
+does not track empty directories the folder vanished from the repo and
+the next image build broke.
+
+Delete this file only when a real public asset (favicon, robots.txt,
+og-image) takes its place.
