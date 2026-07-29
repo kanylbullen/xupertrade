@@ -17,6 +17,9 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // Stubs lib/redis so no unit test can open a real connection.
+    // See src/test/redis-stub.ts for why this is global.
+    setupFiles: ["./src/test/redis-stub.ts"],
     // Default: unit tests only. Integration tests (`*.integration.test.ts`)
     // need Docker for testcontainers — opt in via `npm run test:integration`.
     include: ["src/**/__tests__/**/*.test.ts"],
