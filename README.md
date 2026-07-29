@@ -136,9 +136,15 @@ The Argon2id parameters are immutable once a tenant has set their passphrase (th
 git clone <repo-url> && cd hypertrade
 docker compose up -d
 # Dashboard: http://localhost:3000
-# bot-paper API:    http://localhost:8000
-# bot-testnet API:  http://localhost:8001  (needs HYPERLIQUID_PRIVATE_KEY in .env)
-# bot-mainnet API:  http://localhost:8002  (only with --profile mainnet)
+#
+# Published ports are bound to 127.0.0.1, so these work from the host
+# itself (or over an SSH tunnel) but are NOT reachable from the LAN.
+# Redis in particular runs without a password, so its reachability is
+# the access control -- don't republish it on 0.0.0.0.
+#
+# Tenant bots are spawned by the dashboard orchestrator and publish no
+# host ports at all. To query one:
+#   docker exec <bot-container> wget -qO- localhost:8001/api/positions
 ```
 
 ### Configuration (`.env`)
@@ -180,7 +186,8 @@ Per-bot env (set in `docker-compose.yml`, override via env):
    ```
 4. `docker compose up -d bot-testnet` and verify with:
    ```bash
-   curl http://localhost:8001/api/hyperliquid/diagnostic
+   docker exec $(docker ps --format '{{.Names}}' | grep -E '^xupertrade-bot-.*-testnet$') \
+     wget -qO- localhost:8001/api/hyperliquid/diagnostic
    # → { "ok": true, "network": "testnet", "api_wallet_mode": true,
    #     "account_value_usd": 999.0, ... }
    ```
