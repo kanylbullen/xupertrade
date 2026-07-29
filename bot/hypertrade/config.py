@@ -145,6 +145,30 @@ class Settings(BaseSettings):
     # beyond the allowlist.
     mainnet_enabled_strategies: str = ""
 
+    # Per-tenant operator-set strategy allowlist, injected as a JSON
+    # array by the dashboard orchestrator at container-spawn time
+    # (`buildSpec`). Empty string = no allowlist set = no filtering,
+    # matching the NULL semantics of `tenants.allowed_strategies`.
+    # A JSON `[]` is NOT the same thing — it means zero strategies may
+    # trade.
+    #
+    # This is env-injected rather than read from Postgres because the
+    # bot's per-tenant PG role has no grant on `tenants` (that table is
+    # dashboard-owned; granting it would let one tenant read another's
+    # row). The previous DB-read always raised
+    # InsufficientPrivilegeError and fell through a fail-open `except`,
+    # so the allowlist was never actually enforced.
+    tenant_allowed_strategies: str = ""
+
+    # Expiry dates for this tenant's HL private-key secrets, injected
+    # by the dashboard orchestrator as a JSON object
+    # `{"SECRET_KEY": "ISO-8601"}`. Drives the daily rotation-reminder
+    # Telegram message. Env-injected rather than read from
+    # `tenant_secrets` because that table holds every tenant's
+    # encrypted credentials and the bot's PG role has no grant on it —
+    # the old DB read raised InsufficientPrivilegeError daily.
+    tenant_key_expiries: str = ""
+
     # Trade-rate anomaly alarm. When a strategy starts spam-trading
     # (e.g. due to a stale-bar SL bug like the 2026-05-09 hash_momentum
     # incident), this catches it within ~5 min and auto-pauses the

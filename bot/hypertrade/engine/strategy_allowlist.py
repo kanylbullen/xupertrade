@@ -8,6 +8,7 @@ mainnet honors `MAINNET_ENABLED_STRATEGIES` as a fail-closed allowlist
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, TypeVar
 
@@ -99,3 +100,46 @@ def apply_tenant_allowlist(
         return list(names)
     allow = set(tenant_allowlist)
     return [n for n in names if n in allow]
+
+
+def parse_tenant_allowlist(raw: str | None) -> list[str] | None:
+    """Parse the TENANT_ALLOWED_STRATEGIES env value.
+
+    The dashboard orchestrator injects the tenant's operator-set
+    allowlist as a JSON array at container-spawn time. It is NOT read
+    from Postgres: the bot's per-tenant PG role has no grant on
+    `tenants` (a dashboard-owned table), so the old
+    `SELECT allowed_strategies FROM tenants` raised
+    InsufficientPrivilegeError on every boot and was swallowed by a
+    fail-open `except` — the allowlist silently never applied.
+
+    Returns:
+        None  — no allowlist configured (unset/blank env, matching the
+                NULL semantics of `tenants.allowed_strategies`). Caller
+                applies no filtering.
+        list  — the allowlist. May be empty, which legitimately means
+                "zero strategies may trade".
+
+    A malformed value returns an EMPTY list, not None. This is a
+    containment control, so a corrupt value must fail CLOSED rather
+    than hand the tenant the unfiltered strategy set.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        if not isinstance(parsed, list) or not all(
+            isinstance(n, str) for n in parsed
+        ):
+            raise ValueError(
+                "expected a JSON array of strings, got "
+                f"{type(parsed).__name__}"
+            )
+    except (ValueError, TypeError):
+        logger.exception(
+            "TENANT_ALLOWED_STRATEGIES is malformed — failing CLOSED "
+            "(no strategies will trade). Fix the value and restart."
+        )
+        return []
+    return parsed

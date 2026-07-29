@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,13 +16,24 @@ TENANT_ID = "11111111-2222-3333-4444-555555555555"
 
 
 def _notifier(rows: list[tuple[str, datetime]]):
+    """Build a notifier with `rows` staged as the injected expiry env.
+
+    Expiries now arrive via the TENANT_KEY_EXPIRIES env var (a JSON
+    object) instead of a `tenant_secrets` query — the bot's PG role has
+    no grant on that table, so the old DB read failed on every run.
+    Assigning `settings.tenant_key_expiries` here is safe because the
+    autouse fixture monkeypatches it first, so pytest restores the
+    original value at teardown.
+    """
+    settings.tenant_key_expiries = json.dumps(
+        {key: expires.isoformat() for key, expires in rows}
+    )
     n = TelegramNotifier.__new__(TelegramNotifier)
     n._token = "fake"
     n._chat_id = "12345"
     n._session = MagicMock()
     n._enabled_types = set()
     n._repo = MagicMock()
-    n._repo.get_hl_key_expiries = AsyncMock(return_value=rows)
     n._redis = MagicMock()
     n._redis.set = AsyncMock(return_value=True)
     n.send = AsyncMock(return_value=True)
@@ -31,6 +43,9 @@ def _notifier(rows: list[tuple[str, datetime]]):
 @pytest.fixture(autouse=True)
 def _set_tenant(monkeypatch):
     monkeypatch.setattr(settings, "tenant_id", TENANT_ID)
+    # Registers the pre-test value so _notifier's direct assignment is
+    # rolled back after each test.
+    monkeypatch.setattr(settings, "tenant_key_expiries", "")
 
 
 @pytest.mark.asyncio

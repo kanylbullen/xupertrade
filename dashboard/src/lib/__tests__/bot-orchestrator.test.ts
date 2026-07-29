@@ -115,6 +115,107 @@ describe("buildSpec", () => {
     expect(spec.restartPolicy).toBe("unless-stopped");
   });
 
+  describe("TENANT_ALLOWED_STRATEGIES / TENANT_KEY_EXPIRIES injection", () => {
+    // Regression cover for the fail-open allowlist bug. The bot used to
+    // read `tenants.allowed_strategies` and `tenant_secrets.expires_at`
+    // straight from Postgres, but its per-tenant PG role has no grant on
+    // either table (both are dashboard-owned). Every boot therefore hit
+    // InsufficientPrivilegeError; the allowlist read swallowed it in a
+    // fail-open `except` and ran with NO tenant filter, and the expiry
+    // read logged "Key expiry check failed" daily without ever warning.
+    // Both values are now injected here instead.
+
+    it("injects the allowlist as JSON when the tenant has one", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        allowedStrategies: ["bb_short", "hash_momentum"],
+      });
+      expect(spec.env).toContain(
+        'TENANT_ALLOWED_STRATEGIES=["bb_short","hash_momentum"]',
+      );
+    });
+
+    it("omits the var entirely when the allowlist is null (NULL = no filter)", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        allowedStrategies: null,
+      });
+      expect(
+        spec.env.some((e) => e.startsWith("TENANT_ALLOWED_STRATEGIES=")),
+      ).toBe(false);
+    });
+
+    it("distinguishes an empty allowlist from an absent one", () => {
+      // [] means "zero strategies may trade" and MUST reach the bot as a
+      // real value — collapsing it to the null case would silently grant
+      // the tenant every strategy.
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        allowedStrategies: [],
+      });
+      expect(spec.env).toContain("TENANT_ALLOWED_STRATEGIES=[]");
+    });
+
+    it("a tenant cannot widen their own allowlist via a smuggled secret", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {
+          TENANT_ALLOWED_STRATEGIES: '["everything","i","want"]',
+        },
+        apiKey: TEST_API_KEY,
+        allowedStrategies: ["bb_short"],
+      });
+      expect(spec.env).toContain('TENANT_ALLOWED_STRATEGIES=["bb_short"]');
+      expect(spec.env).not.toContain(
+        'TENANT_ALLOWED_STRATEGIES=["everything","i","want"]',
+      );
+    });
+
+    it("injects key expiries as a JSON object", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        keyExpiries: {
+          HYPERLIQUID_MAINNET_PRIVATE_KEY: "2026-12-01T00:00:00.000Z",
+        },
+      });
+      expect(spec.env).toContain(
+        'TENANT_KEY_EXPIRIES={"HYPERLIQUID_MAINNET_PRIVATE_KEY":"2026-12-01T00:00:00.000Z"}',
+      );
+    });
+
+    it("omits key expiries when none are set", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "mainnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        keyExpiries: {},
+      });
+      expect(spec.env.some((e) => e.startsWith("TENANT_KEY_EXPIRIES="))).toBe(
+        false,
+      );
+    });
+  });
+
   describe("mode-dependent memory cap (mainnet vault-scan OOM, 2026-06-17)", () => {
     // mainnet runs the vault scanner + HODL eval + Telegram notifier on
     // top of the strategy loop; pandas/pandas-ta peaks during the daily

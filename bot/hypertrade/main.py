@@ -16,6 +16,7 @@ from hypertrade.exchange.paper import PaperExchange
 from hypertrade.engine.strategy_allowlist import (
     apply_mainnet_allowlist,
     apply_tenant_allowlist,
+    parse_tenant_allowlist,
 )
 from hypertrade.strategies.registry import get_strategy, list_strategies, load_all
 
@@ -123,25 +124,27 @@ async def main() -> None:
     # Per-tenant operator-set allowlist (alembic 0016). Defense-in-
     # depth: even if the dashboard's enforcement at strategy-toggle is
     # bypassed, disallowed strategies are not registered at all here.
-    # NULL = no allowlist (no filtering). Failure to read = log + skip
-    # (fail-open at startup so a transient DB blip doesn't break boot).
-    if repo is not None and settings.tenant_id:
-        try:
-            import uuid as _uuid
-
-            tenant_uuid = _uuid.UUID(settings.tenant_id)
-            tenant_allowlist = await repo.get_tenant_allowed_strategies(tenant_uuid)
-            if tenant_allowlist is not None:
-                before = len(allowed_names)
-                allowed_names = apply_tenant_allowlist(allowed_names, tenant_allowlist)
-                logger.warning(
-                    "Tenant allowlist applied: %d/%d strategies remain: %s",
-                    len(allowed_names), before, allowed_names,
-                )
-        except Exception:
-            logger.exception(
-                "Failed to read tenant allowlist — running with no tenant filter"
-            )
+    #
+    # Source is the TENANT_ALLOWED_STRATEGIES env var, injected as a
+    # JSON array by the dashboard orchestrator at spawn time. It is
+    # NOT read from Postgres: the bot's per-tenant PG role has no
+    # grant on `tenants` (dashboard-owned table), so the old
+    # `SELECT allowed_strategies FROM tenants` raised
+    # InsufficientPrivilegeError on every boot and fell through a
+    # fail-open `except` — the allowlist silently never applied.
+    #
+    # Unset/empty env = no allowlist (matches NULL in the DB) = no
+    # filtering. A malformed value is NOT treated as "no allowlist":
+    # this is a containment control, so it fails CLOSED (zero
+    # strategies) rather than handing the tenant the unfiltered set.
+    tenant_allowlist = parse_tenant_allowlist(settings.tenant_allowed_strategies)
+    if tenant_allowlist is not None:
+        before = len(allowed_names)
+        allowed_names = apply_tenant_allowlist(allowed_names, tenant_allowlist)
+        logger.warning(
+            "Tenant allowlist applied: %d/%d strategies remain: %s",
+            len(allowed_names), before, allowed_names,
+        )
     strategies = [get_strategy(name) for name in allowed_names]
     logger.info("Active strategies: %s", [s.name for s in strategies])
 

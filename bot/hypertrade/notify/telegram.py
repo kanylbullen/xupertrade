@@ -665,20 +665,45 @@ class TelegramNotifier:
 
     async def _check_key_expiries(self) -> None:
         if (
-            self._repo is None
-            or self._redis is None
+            self._redis is None
             or not settings.tenant_id
             or not self.configured
         ):
             return
-        import uuid as _uuid
+        import json as _json
         from datetime import datetime, timedelta, timezone
 
-        try:
-            tenant_uuid = _uuid.UUID(settings.tenant_id)
-        except (ValueError, AttributeError):
+        # Source is the TENANT_KEY_EXPIRIES env var (JSON object of
+        # {secret_key: ISO-8601}), injected by the dashboard
+        # orchestrator at spawn. Previously this read `tenant_secrets`
+        # directly, but the bot's per-tenant PG role has no grant on
+        # that table — it holds every tenant's encrypted credentials —
+        # so the query raised InsufficientPrivilegeError and this loop
+        # logged "Key expiry check failed" once a day, every day,
+        # without ever sending a reminder.
+        raw = (settings.tenant_key_expiries or "").strip()
+        if not raw:
             return
-        rows = await self._repo.get_hl_key_expiries(tenant_uuid)
+        try:
+            parsed = _json.loads(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    f"expected a JSON object, got {type(parsed).__name__}"
+                )
+        except (ValueError, TypeError):
+            logger.exception(
+                "TENANT_KEY_EXPIRIES is malformed — skipping expiry reminders"
+            )
+            return
+
+        rows: list[tuple[str, datetime]] = []
+        for key, iso in parsed.items():
+            try:
+                rows.append((key, datetime.fromisoformat(iso)))
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Skipping unparseable expiry for secret %s: %r", key, iso
+                )
         now = datetime.now(timezone.utc)
         window = now + timedelta(days=self.REMINDER_WINDOW_DAYS)
         for key, expires_at in rows:

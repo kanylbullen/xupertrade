@@ -138,6 +138,19 @@ export async function decryptAndStart(args: Args): Promise<Result> {
       mode,
       decryptedSecrets,
       apiKey,
+      // Passed by env because the bot's PG role has no grant on
+      // `tenants` — see the field docs on BotStartParams. Reading it
+      // here (dashboard-side, where the table is owned) is what makes
+      // the per-tenant allowlist actually enforceable.
+      allowedStrategies: tenant.allowedStrategies,
+      // Same rationale — the bot has no grant on `tenant_secrets`.
+      // `secretRows` is already in hand from the decrypt loop above,
+      // so this costs no extra query.
+      keyExpiries: Object.fromEntries(
+        secretRows
+          .filter((r) => r.expiresAt != null)
+          .map((r) => [r.key, r.expiresAt!.toISOString()]),
+      ),
       systemEnv: {
         ...getOrchestratorSystemEnv(),
         DATABASE_URL: tenantDbUrl,
