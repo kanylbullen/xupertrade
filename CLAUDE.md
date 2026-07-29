@@ -154,10 +154,24 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 - **Local working tree:** `~/hypertrade/` (Linux, x86_64).
 - **Remote server:** `root@$DEPLOY_HOST` at `$DEPLOY_IP`, code at `/opt/hypertrade/`. SSH key: `~/.ssh/hypertrade`. Always log in as `root`. Concrete values for the maintainer's deployment are in their local `~/.bashrc` / SSH config — **never commit them here**.
 - **Git remote:** `https://github.com/kanylbullen/hypertrade.git`, branch `master`.
-- **Postgres:** runs in compose, exposed on `:5432`.
-- **Redis:** runs in compose, exposed on `:6379`.
-- **Bot APIs:** paper `:8000`, testnet `:8001`, mainnet `:8002` (direct on host — should be removed once Caddy is verified).
-- **Dashboard:** `:3000` (direct, dev/debug only) and via Caddy at `:443` (production).
+- **Postgres:** runs in compose, published on **`127.0.0.1:5432` only**.
+  Not reachable from the LAN. Use `docker compose exec -T postgres psql -U
+  postgres -d hypertrade`, or tunnel for a GUI client:
+  `ssh -L 15432:localhost:5432 root@$DEPLOY_HOST`.
+- **Redis:** runs in compose, published on **`127.0.0.1:6379` only**. It
+  runs with no `requirepass`, so reachability *is* the access control — it
+  holds `dashboard:auth:session_secret` (the HMAC key signing session
+  cookies), the OIDC client secret and the CF API token. **Never republish
+  it beyond loopback without setting `requirepass` first** and threading it
+  through both the dashboard and the bots.
+- **Bot APIs:** paper `:8000`, testnet `:8001`, mainnet `:8002` **inside
+  their containers only**. Orchestrator-spawned tenant bots publish no host
+  ports at all (`HostConfig.PortBindings` is null); the dashboard reaches
+  them by container name over the compose network. To query one directly:
+  `docker exec <bot-container> wget -qO- localhost:<port>/api/...`.
+- **Dashboard:** `127.0.0.1:3000` (dev/debug + health probes) and via Caddy
+  at `:443` (LAN) / Cloudflare tunnel (public). Both real ingress paths
+  reach the container over the compose network, not the published port.
 - **Caddy reverse proxy:** `:80` (HTTP→HTTPS redirect), `:443` (HTTPS), `:443/udp` (HTTP/3). Admin API on `:2019` (internal Docker network only).
 - **HTTPS:** `https://$DEPLOY_HOST/` — Let's Encrypt cert auto-renewed by Caddy via Cloudflare DNS-01.
 - **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis.
@@ -418,7 +432,8 @@ cache-trap — don't reintroduce it.
 ```bash
 # DB ↔ exchange parity
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "echo '=== Exchange ==='; curl -s http://localhost:8001/api/positions; echo; \
+  "echo '=== Exchange ==='; docker exec \$(docker ps --format '{{.Names}}' \
+   | grep -E '^xupertrade-bot-.*-testnet\$') wget -qO- localhost:8001/api/positions; echo; \
    echo '=== DB ==='; cd /opt/hypertrade && \
    docker compose exec -T postgres psql -U postgres -d hypertrade \
    -c \"SELECT strategy_name, symbol, side, size, entry_price FROM positions WHERE mode='testnet' AND is_open=true;\""
@@ -504,7 +519,6 @@ None currently.
 - [ ] **Trades page filters/pagination.** Currently `LIMIT 50`. Add strategy filter, date range, paging.
 - [ ] **Correlation grouping.** `cdc_macd` and `macd_zero` are mathematically near-identical. Tag strategies with a `family` attribute and let `allow_multi_coin=False` extend to family-level conflicts.
 - [ ] **Optimize `oleg_aryukov` for backtest.** Nadaraya-Watson kernel + RCI loops are O(n²). Fine for live (one call per tick) but a 4k-bar backtest hangs >30 min. Vectorize NW using rolling weighted convolution; replace per-bar RCI loop with a vectorized rank-correlation.
-- [ ] **Drop direct port exposure once HTTPS is verified.** Dashboard `:3000` and bot `:8001/:8002` are still bound on the host. Caddy is the only path that should be reachable externally. Remove the host-port mappings from `docker-compose.yml` for those services and let Caddy handle all ingress.
 - [ ] **Make `/strategies` page data-driven.** Currently a hardcoded array of 21 strategy descriptors. Should pull names+symbol+timeframe from the bot's `/strategies` endpoint and read description/strengths/weaknesses from a metadata file colocated with each strategy module.
 - [ ] **Surface backtest history in dashboard.** `backtest_runs` table now persists every CLI run. A `/backtests` page would let users compare runs, filter by strategy, and see how parameter changes affect APR/Sharpe over time.
 - [ ] **Suppress Telegram noise on transient HL-fetch failures (strategy ticks).** Bot currently emits `ErrorOccurred` on every strategy tick whose `fetch_candles` fails after retries — this spams Telegram during HL outages even though the bot recovers automatically. Filter by error type before publishing. (Companion fix landed for HODL verdict-recovery noise on `fix/vault-picks-error-event` — strategy-tick path still TODO.)
@@ -593,6 +607,9 @@ None currently.
 - [x] `Strategy.reset_state()` on base + override on all 13 stateful strategies; `repo.reconcile_positions(on_strategy_close=cb)` callback wired to `runner._reset_strategy_state` — commit `526d3cc`. When 5-min runtime reconcile orphan-closes a DB row, strategy `_in_position` is brought into sync. Eliminates "DB closed but strategy thinks it's still in" desync.
 - [x] DB cleanup of 28 orphan-closed positions + 28 buy-only trades from before fix — manual SQL on 2026-05-03. Real PnL trades preserved.
 - [x] `rsi_momentum` adds `_in_position` flag — commit `494aec8`. Was emitting CLOSE_LONG every tick where exit cond was true, even when flat. Engine ignored each but logged WARNING per tick (~50/hour). Closes Open-Medium item.
+
+#### Host port exposure closed (2026-07-29)
+- [x] **Every published port moved to loopback except Caddy's 80/443.** `docker-compose.yml` published `postgres:5432`, `redis:6379` and `dashboard:3000` on `0.0.0.0`, i.e. on the LAN. The bot ports named in the original backlog item were a non-issue — orchestrator-spawned tenant bots have never published host ports (`PortBindings: null`); the § 3 line claiming otherwise was stale and is now corrected. The severe one was **Redis**: `redis:7-alpine` runs with an empty `requirepass`, so any LAN host could read `dashboard:auth:session_secret` — the HMAC key signing session cookies — and forge an admin session outright, plus the OIDC client secret and the CF API token. `dashboard:3000` bypassed both real ingress paths (CF tunnel and Caddy each reach the container over the compose network), so it also sat outside Cloudflare's rate limiting and bot management. Bound to `127.0.0.1` rather than removed, which closes the LAN exposure while keeping `localhost` dev access and SSH-tunnelled DB clients working. Verified no external client was connected to any of the three beforehand.
 
 #### Vault scanner Phase 1 (2026-05-05) — first PR-flow feature
 - [x] HyperLiquid vault scanner: daily catalogue poll → coarse pre-filter → per-vault `vaultDetails` fetch → Sharpe/max-DD/multi-period ROI → quality filter → `vault_snapshots` row + `vault_nav_history` append. Telegram fires `vault.qualified` / `vault.disqualified` events on state change with 24h debounce per vault. New `/vaults` dashboard page (sorted by Sharpe) and `vault_picks` HODL signal alongside the others. Owned by the mainnet bot only (single owner; vaults are mainnet-only on HL and the `/vaults` dashboard is pinned to mainnet — moved from testnet 2026-05-13). Quality filter defaults: age ≥ 180d, AUM \$200k–\$20M, ROI 90/180d > 0%, max DD ≤ 25%, Sharpe(180d) > 1.5, manager equity ≥ 5%, fee ≤ 15%. ROI 365d waived for vaults < 365d. — squash-merge `23dd0bf` (PR #1, branch `feat/vault-scanner`). Plan: `docs/plans/vault-scanner.md`. API research: `docs/hyperliquid-vaults-api.md`. 28 new pytest cases (filters / metrics / poller); full suite 133 passed. **First PR-flow feature**: Copilot found 11 issues on first review (catalogue dropouts not disqualified, NAV history not merged into metrics, full-microsecond `snapshot_at` defeating upsert, unguarded casts in `fetch_details`, 48h cutoff hiding everything on missed poll, per-mode duplicate scanning, cooldown bumped on failure, compose `TELEGRAM_EVENTS` overriding .env update, "—d" rendering for null age, follower count under-reports capped vaults, coarse `apr ≤ 0` filter dropping legit qualifiers); all addressed in commit on the branch before merge.

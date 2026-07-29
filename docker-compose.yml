@@ -39,7 +39,16 @@ services:
       # `openssl rand -base64 36 | tr -d '/+='` produces compliant output.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (use 'phase run -- docker compose ...')}
     ports:
-      - "5432:5432"
+      # Loopback-only. Was "5432:5432", i.e. 0.0.0.0 — the database sat
+      # on the LAN. Nothing off-host has any reason to speak to it: the
+      # dashboard and the orchestrator-spawned tenant bots all reach it
+      # by service name over the compose network.
+      #
+      # Binding to 127.0.0.1 keeps the operator's workflows intact —
+      # `docker compose exec -T postgres psql ...` still works, and a
+      # GUI client still works over an SSH tunnel:
+      #   ssh -L 15432:localhost:5432 root@$DEPLOY_HOST
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
@@ -52,7 +61,18 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      # Loopback-only. This was the most dangerous of the three
+      # published ports: redis:7-alpine runs with NO password by default
+      # (`requirepass` is empty), so reachability IS the access control.
+      # Published on 0.0.0.0 it let any LAN host read
+      # `dashboard:auth:session_secret` — the HMAC key that signs
+      # session cookies, i.e. enough to forge a valid admin session
+      # outright — plus the OIDC client secret, the basic-auth hash and
+      # the Cloudflare API token.
+      #
+      # If you ever republish this beyond loopback, set `requirepass`
+      # first and thread it through both the dashboard and the bots.
+      - "127.0.0.1:6379:6379"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -63,7 +83,16 @@ services:
   dashboard:
     build: ./dashboard
     ports:
-      - "3000:3000"
+      # Loopback-only. Neither real ingress path uses this — public
+      # traffic arrives Cloudflare tunnel -> dashboard:3000 and LAN
+      # traffic arrives caddy -> dashboard:3000, both over the compose
+      # network. Published on 0.0.0.0 it was a third path that bypassed
+      # both, and therefore sat outside Cloudflare's rate limiting, DDoS
+      # protection and bot management.
+      #
+      # Kept on loopback so `localhost:3000` still works for local
+      # development and for health probes over an SSH tunnel.
+      - "127.0.0.1:3000:3000"
     environment:
       # Force Next.js standalone to bind 0.0.0.0. Setting HOSTNAME via
       # the Dockerfile ENV doesn't work because docker auto-injects
