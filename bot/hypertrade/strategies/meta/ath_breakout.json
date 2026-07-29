@@ -1,0 +1,36 @@
+{
+  "tvUrl": null,
+  "summary": "Custom strategy (not a Pine port) — an OVERLAY on top of HODL+DCA rather than a standalone replacement. Sits in cash and only deploys when BTC breaks a new ~100-day high, then rides it out on a wide trailing stop.",
+  "logic": [
+    "Entry (long-only): close > rolling-max of the previous `lookback` closes — i.e. the prior bar's 100-day high is broken on close. On BTC daily that reads as \"a new ~3-month high\": recent enough to catch regime change, slow enough to avoid most chop.",
+    "Exit: trailing stop at peak-since-entry × (1 - trail_pct), evaluated on close rather than intraday low.",
+    "trail_pct = 35% is deliberately wide — enough to ride BTC's brutal mid-bull drawdowns without exiting, so it only fires on genuine regime change.",
+    "No short logic by design. Shorting into the high is a mean-reversion thesis, which is a different strategy; keeping this one focused.",
+    "Leverage 2x. Per the backtest sweep: 1x → APR 33% / Sharpe 0.93; 2x → APR 51% / Sharpe 1.04 (peak); 3x → APR 64% but liquidation distance (~32%) falls inside the 35% trail, so a deep dip would realistically liquidate before the stop fires."
+  ],
+  "strengths": [
+    "Sat in cash through the 2022 bear market, avoiding HODL's -77% drawdown, then re-entered on multiple new-high triggers through the 2023-2024 bull.",
+    "Beat both benchmarks over the tested window: +247.1% vs HODL +36.6% and monthly DCA +90.8%, at roughly half HODL's max drawdown (37% vs 77%).",
+    "The wide trail keeps risk discipline intact at 2x — the stop fires around -35% from peak, well before the ~-48% liquidation distance.",
+    "Long-only and rule-simple: one entry condition, one exit condition, no parameter interaction to overfit."
+  ],
+  "weaknesses": [
+    "Backtest does not model funding rate, which is a meaningful drag (~10-30% APR) on leveraged longs during exactly the bull regimes this strategy holds through. Real-world APR will be lower than the quoted figure.",
+    "A 35% trailing stop means giving back a third of the peak before exiting — psychologically hard to hold and a large realised give-back on every exit.",
+    "100 daily bars of warmup before the first valid signal after a restart.",
+    "Evidence is a single 5-year window (2021-05 to 2026-05) that contains one full bear and one full bull. Regime-dependent by construction, and that sample is thin.",
+    "Trades rarely by design, so live confirmation of the edge accumulates very slowly."
+  ],
+  "params": {
+    "lookback": 100,
+    "trail_pct": 0.35,
+    "leverage": 2
+  },
+  "stats": {
+    "apr": "33.4% (1x, backtest)",
+    "sharpe": "0.93 (1x) / 1.04 (2x)",
+    "maxDrawdown": "37%",
+    "winRate": "N/A",
+    "trades": "Rare by design (new ~3-month highs only)"
+  }
+}

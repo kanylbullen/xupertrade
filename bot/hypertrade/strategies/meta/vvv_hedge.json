@@ -1,0 +1,44 @@
+{
+  "name": "vvv_hedge",
+  "tvUrl": null,
+  "summary": "Custom defensive hedge for staked VVV holdings. Shorts 400 VVV when long-term uptrend breaks; closes when EMA flips back bullish. NOT a Pine port — designed in-house specifically for this use case. *backtest 2025-12-08 → 2026-05-01 with EMA filter on.",
+  "logic": [
+    "EMA21 < EMA55 + close < EMA55 is a MANDATORY filter (must be true to even consider a short).",
+    "When EMA confirms, requires 2-of-3 additional bearish votes from: ATR(14) chandelier exit, RSI(14) bearish divergence, volume distribution (7d > 1.5× 30d).",
+    "Open emits Signal(size=400) — bypasses engine notional calc, exact 1:1 hedge of the spot holding.",
+    "Hard SL: 10% above entry (~20% margin loss at 2× — survivable, last-resort liquidation guard).",
+    "Symmetric exit: as soon as EMA flips back bullish, close immediately. Don't wait for full vote turnaround — re-engagement with spot trend matters more for a hedge."
+  ],
+  "strengths": [
+    "EMA filter eliminated 3 of 5 false signals during the audit-rerun on the last 6 months of VVV uptrend.",
+    "Size invariant: every emitted signal is exactly holding_vvv (default 400). Never under- or over-hedges.",
+    "2× leverage capped — even a +10% gap up only loses 20% of margin, not the position.",
+    "Auto-closes on EMA bullish flip — won't hedge into a fresh leg up."
+  ],
+  "weaknesses": [
+    "Lagging by design — accepts ~15-20% of a top before triggering, in exchange for many fewer false alarms.",
+    "Backtested only on the up-cycle so far. VVV has 14 months of history but no prior major top to learn from. First real top will be the first true validation.",
+    "If VVV spikes >10% above entry before EMA flips bullish, hard SL fires and the hedge unwinds at a loss. Rare but possible."
+  ],
+  "params": {
+    "holding_vvv": 400,
+    "ema_fast_len": 21,
+    "ema_slow_len": 55,
+    "atr_len": 14,
+    "chandelier_lookback": 30,
+    "chandelier_atr_mult": 3.0,
+    "rsi_len": 14,
+    "rsi_div_window": 20,
+    "hard_sl_pct": 0.10,
+    "require_ema_bearish": true,
+    "bearish_votes_to_open": 2,
+    "bearish_votes_to_keep": 1
+  },
+  "stats": {
+    "apr": "+2.65%*",
+    "sharpe": "0.38*",
+    "maxDrawdown": "6.30%*",
+    "winRate": "50%*",
+    "trades": "2 round trips / 144d (defensive — designed to fire rarely)"
+  }
+}

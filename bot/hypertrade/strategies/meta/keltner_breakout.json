@@ -1,0 +1,40 @@
+{
+  "name": "keltner_breakout",
+  "tvUrl": "https://www.tradingview.com/script/LmNV3ZLN/",
+  "summary": "Port of TradingView 'ETHUSDT 4H - Keltner Breakout (Pro)' — enters long when close breaks above the upper Keltner Channel while above EMA(200). ATR-based SL, 20% TP, KC-lower exit.",
+  "logic": [
+    "EMA(200) trend filter: only long when close > EMA200.",
+    "Keltner Channel: basis = EMA(close, 20), upper = basis + ATR(14) × 2.0.",
+    "Entry: close > upper KC AND close > EMA200.",
+    "Stop loss: entry − ATR(14) × 4.0 (wide stop for 4h volatility).",
+    "Take profit: entry × 1.20 (20% target).",
+    "Additional exit: close drops below lower KC (trend weakness signal)."
+  ],
+  "strengths": [
+    "EMA200 filter ensures entries are only in the long-term bullish trend direction.",
+    "KC breakout captures genuine momentum moves, not just noise.",
+    "Three exit paths (SL / TP / KC lower) adapt to different market conditions.",
+    "Source was designed specifically for ETHUSDT 4H — symbol/timeframe validated by author."
+  ],
+  "weaknesses": [
+    "Long-only misses short-side opportunities.",
+    "EMA200 on 4h needs 800+ hours of data (~33 days) to warm up after restart.",
+    "ATR×4 stop on 4h can be 5-10% below entry — large per-trade risk in volatile periods.",
+    "20% TP is ambitious — many breakouts reverse before reaching the target."
+  ],
+  "params": {
+    "ema_len": 200,
+    "kc_len": 20,
+    "atr_len": 14,
+    "kc_mult": 2.0,
+    "sl_atr_mult": 4.0,
+    "tp_pct": 0.20
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (4h KC breakout, long only)"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "bb_rsi_scalper",
+  "tvUrl": null,
+  "summary": "Port of 'Crypto LONG 10m Scalper BB+RSI+EMA+Fib' — long-only multi-filter scalper. Originally 10m on TradingView; runs on 15m here since HyperLiquid doesn't expose a 10m timeframe.",
+  "logic": [
+    "Bollinger Bands (20, 2σ), RSI(14), EMA(9), Fibonacci levels — all coincide for entry.",
+    "Long entry: RSI < 20 + price breaks BB lower + price in Fibonacci zone + EMA turns up.",
+    "Exit: technical reversal OR time-out, gated on having 0.1% profit.",
+    "No SL — only exits when in profit."
+  ],
+  "strengths": [
+    "Multi-filter entry suppresses false signals.",
+    "Fibonacci confluence is a popular discretionary mark — encoding it removes hesitation.",
+    "180d backtest: ~0% APR, 57% win rate, 7 trades — break-even but consistent."
+  ],
+  "weaknesses": [
+    "No stop loss — a sustained downtrend post-entry can hold the position indefinitely.",
+    "Pyramiding=1 in source means one position at a time (we already enforce this engine-side)."
+  ],
+  "params": {
+    "bb_length": 20,
+    "bb_mult": 2.0,
+    "rsi_length": 14,
+    "ema_length": 9
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (15m scalper, long only)"
+  }
+}

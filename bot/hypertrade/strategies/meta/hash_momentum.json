@@ -1,0 +1,40 @@
+{
+  "name": "hash_momentum",
+  "tvUrl": "https://www.tradingview.com/script/L6VNlhiV/",
+  "summary": "Port of TradingView 'Hash Momentum Strategy' — normalized price momentum filtered by an ATR-dynamic threshold and EMA trend. Fixed-% SL with 2.5:1 RR take-profit.",
+  "logic": [
+    "mom0 = close − close[13] (13-bar momentum). Normalized: mom0 / stdev(mom0, 39).",
+    "Dynamic threshold: ATR(14) × 2.25. Momentum must exceed threshold to be tradeable.",
+    "EMA(28) trend filter: longs only above EMA, shorts only below.",
+    "Long: mom0 > threshold AND momentum accelerating (mom1 > 0) AND normMom > 0.5 AND close > close[1] AND close > EMA28.",
+    "Short: mirror conditions below EMA28.",
+    "SL = 2.2% from entry. TP = entry ± risk × 2.5 (1:2.5 RR). 6-bar cooldown after each trade."
+  ],
+  "strengths": [
+    "Normalized momentum (σ units) makes the threshold meaningful across different volatility regimes.",
+    "ATR-dynamic threshold automatically adjusts — strong signals in low-vol periods, fewer in high-vol.",
+    "Multi-condition gate (momentum magnitude + acceleration + normalization + trend) rejects weak moves.",
+    "Long & short with fixed RR gives defined risk on every trade."
+  ],
+  "weaknesses": [
+    "No stop-loss on extreme gaps — slippage can cause fills beyond the 2.2% SL in illiquid conditions.",
+    "Cooldown after close means a fast reversal immediately after exit is missed.",
+    "39-bar stdev warmup plus ATR warmup requires ~50+ 4h bars before first valid signal.",
+    "Source backtest stats not provided; performance must be validated live."
+  ],
+  "params": {
+    "mom_length": 13,
+    "mom_threshold_atr_mult": 2.25,
+    "ema_length": 28,
+    "stop_loss_pct": 2.2,
+    "risk_reward": 2.5,
+    "cooldown_bars": 6
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (4h momentum, long & short)"
+  }
+}

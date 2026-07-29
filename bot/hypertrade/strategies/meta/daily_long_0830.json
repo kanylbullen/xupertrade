@@ -1,0 +1,29 @@
+{
+  "name": "daily_long_0830",
+  "tvUrl": null,
+  "summary": "Pure time-based long-only strategy. Enters at exactly 08:30 UTC (first 15m candle whose minute matches), exits at 08:00 UTC the following morning. No price/indicator logic — just clock-driven.",
+  "logic": [
+    "Compares the latest closed candle's UTC timestamp.",
+    "Enters long when minute == 30 and hour == 8.",
+    "Exits long when minute == 0 and hour == 8.",
+    "No SL, no TP, no filters."
+  ],
+  "strengths": [
+    "Trivially simple — no indicator drift, no warmup.",
+    "Captures any consistent time-of-day price drift if it exists.",
+    "Predictable hold period (~23.5h)."
+  ],
+  "weaknesses": [
+    "No edge unless the chosen time window genuinely correlates with positive return.",
+    "No risk management — full overnight exposure.",
+    "Backtest shows -2.5% APR over 44d sample — not statistically significant either way."
+  ],
+  "params": {},
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Time-of-day long: enter 08:30 UTC, exit 08:00 UTC next day"
+  }
+}

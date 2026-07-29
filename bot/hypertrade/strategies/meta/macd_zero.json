@@ -1,0 +1,36 @@
+{
+  "name": "macd_zero",
+  "tvUrl": "https://www.tradingview.com/script/llTXO45e/",
+  "summary": "Port of TradingView 'BTC MACD Zero-Line Strategy (Long Only)' — enters long when the MACD line crosses above zero, exits when it crosses below. No SL or TP.",
+  "logic": [
+    "MACD = EMA(12) − EMA(26). Signal = EMA(9) of MACD. Histogram = MACD − Signal.",
+    "Long entry: MACD crosses above 0 (prev_macd ≤ 0 AND cur_macd > 0).",
+    "Long exit: MACD crosses below 0 (prev_macd ≥ 0 AND cur_macd < 0).",
+    "Long-only, no stop loss, no take profit. Full equity sizing.",
+    "Source designed for BTC daily chart."
+  ],
+  "strengths": [
+    "Zero-line cross is a cleaner signal than signal-line cross — fewer false positives.",
+    "Daily timeframe means few trades, low churn, and meaningful trend signals.",
+    "Long-only on BTC aligns with the asset's historical long-term upward bias.",
+    "Mathematically simple and robust — no tuning beyond MACD parameters."
+  ],
+  "weaknesses": [
+    "No stop loss: a sustained reversal after entry rides out with no protection.",
+    "MACD zero-line cross on 1d can lag by many days during fast reversals.",
+    "Long-only misses bear market short opportunities.",
+    "Highly correlated with cdc_macd (also EMA12/26 crossover, long only) — limited diversification."
+  ],
+  "params": {
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1d MACD zero-line, long only)"
+  }
+}

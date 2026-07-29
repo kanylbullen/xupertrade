@@ -1,0 +1,33 @@
+{
+  "name": "oleg_aryukov",
+  "tvUrl": null,
+  "summary": "Port of 'Oleg_Aryukov_Strategy' — 6-indicator ensemble with voting. Each of RSI / Williams %R / TSI / KDJ / %BB / Nadaraya-Watson casts a vote; trade when ≥3 confirm AND EMA50/200 trend filter aligns.",
+  "logic": [
+    "6 indicators vote independently for long or short bias.",
+    "EMA50/200 trend filter gates direction (no shorts above EMA200, no longs below).",
+    "Fixed % SL and TP, plus a percentage trailing stop.",
+    "Nadaraya-Watson is a Gaussian-kernel weighted regression smoother (custom hand-roll)."
+  ],
+  "strengths": [
+    "Ensemble voting reduces dependence on any single indicator's quirks.",
+    "Trend filter prevents counter-trend trades in strong directional regimes.",
+    "Both long and short — works in both market modes."
+  ],
+  "weaknesses": [
+    "Nadaraya-Watson + RCI loops are O(n²) — fine live (1 call per tick), too slow for 4k-bar backtests.",
+    "Tight trailing stop (1%) at default — many quick stop-outs.",
+    "Russian source comments — translation may lose nuance."
+  ],
+  "params": {
+    "rsi_length": 12,
+    "williams_length_6": 6,
+    "williams_length_12": 12
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h ensemble, long & short, EMA50/200 trend-filter)"
+  }
+}

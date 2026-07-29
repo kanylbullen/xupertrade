@@ -1,0 +1,32 @@
+{
+  "name": "hash_supertrend",
+  "tvUrl": null,
+  "summary": "Port of 'Hash Supertrend' by Hash Capital Research — pure SuperTrend(16, 3.11) flip strategy. Long on bullish flip, short on bearish flip, reverses every cross.",
+  "logic": [
+    "ATR(16) with multiplier 3.11.",
+    "SuperTrend bands: hl2 ± multiplier × ATR with continuity logic.",
+    "Long entry on bullish flip (direction goes from bearish to bullish).",
+    "Short entry on bearish flip — engine flip-detect handles the reverse.",
+    "No stop loss, no take profit, no other filters."
+  ],
+  "strengths": [
+    "Simple and reactive — never far from the prevailing trend.",
+    "Long & short — captures both up and down moves."
+  ],
+  "weaknesses": [
+    "No SL — risk control depends entirely on engine's MAX_POSITION_SIZE_USD cap.",
+    "180d backtest: -6.9% APR, 33% win rate, 96 trades — over-trades in choppy regimes.",
+    "Funding cost on 96 round-trips adds up — strategy should be paired with funding-aware analysis."
+  ],
+  "params": {
+    "atr_period": 16,
+    "factor": 3.11
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h SuperTrend flips, long & short)"
+  }
+}

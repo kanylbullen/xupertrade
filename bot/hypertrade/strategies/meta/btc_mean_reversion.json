@@ -1,0 +1,42 @@
+{
+  "name": "btc_mean_reversion",
+  "tvUrl": "https://www.tradingview.com/script/pIrgsDpT/",
+  "summary": "Direct port of TradingView 'Optimized BTC Mean Reversion (RSI 20/65)' — RSI extremes confirmed by Stochastic, gated by EMA200 position.",
+  "logic": [
+    "Long entry: RSI(14) < 20 AND raw fast %K(14) < 25 AND close > EMA(close, 200) × 0.9.",
+    "Short entry: RSI(14) > 65 AND raw fast %K(14) > 75 AND close < EMA(close, 200).",
+    "Long exit: SL = entry × 0.96, TP = entry × 1.06. Whichever the bar's low/high hits first.",
+    "Short exit: SL = entry × 1.04, TP = entry × 0.94.",
+    "Long & short, single position at a time, 1× leverage to match source's 100%-equity sizing."
+  ],
+  "strengths": [
+    "Three-way confirmation (RSI extreme + Stochastic extreme + EMA200 position) filters out weak setups.",
+    "Asymmetric RSI levels (20/65) require deeper oversold for entry but exit faster on recovery.",
+    "Fixed SL/TP make per-trade risk and reward fully predictable.",
+    "Trades both directions — works in trending and ranging regimes."
+  ],
+  "weaknesses": [
+    "Mean-reversion strategies underperform during sustained one-directional moves (no trend-following).",
+    "1.5:1 reward-to-risk (6% TP / 4% SL) requires win rate > 40% to be profitable after fees.",
+    "Strict filters mean entries are very rare — expect long flat periods.",
+    "EMA200 filter on 15m needs 50+ hours of data to warm up after a restart."
+  ],
+  "params": {
+    "ema_length": 200,
+    "rsi_period": 14,
+    "rsi_bull_level": 20,
+    "rsi_bear_level": 65,
+    "stoch_length": 14,
+    "stoch_oversold": 25,
+    "stoch_overbought": 75,
+    "stop_loss_pct": 0.04,
+    "take_profit_pct": 0.06
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (15m mean reversion, long & short)"
+  }
+}

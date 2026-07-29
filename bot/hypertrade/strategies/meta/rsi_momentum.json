@@ -1,0 +1,35 @@
+{
+  "name": "rsi_momentum",
+  "tvUrl": "https://www.tradingview.com/script/wZIdSrBG/",
+  "summary": "Direct port of TradingView 'RSI > 70 Buy / Exit on Cross Below 70' by © Boubizee — counter-intuitive momentum continuation.",
+  "logic": [
+    "RSI(14) on 4h candles. Long entry: RSI crosses ABOVE 70 (rsi > 70 AND prev_rsi <= 70).",
+    "Long exit: RSI crosses BELOW 70 (rsi < 70 AND prev_rsi >= 70).",
+    "No stop loss, no take profit, no filters — pure RSI threshold logic.",
+    "Long-only, single position, 1× leverage to match source.",
+    "* Backtest stats from Minara article (BTCUSDT 4h over ~4 years). Source PineScript itself works on any timeframe."
+  ],
+  "strengths": [
+    "Verified byte-equivalent port of the original PineScript — no logic divergence.",
+    "Per Minara backtest: best risk-adjusted profile (Sharpe 1.85, max DD 14.8%).",
+    "Simple, fully mechanical — no discretionary judgment.",
+    "Counter-intuitive thesis (RSI > 70 = strength, not exhaustion) means edge if you have the discipline to follow it."
+  ],
+  "weaknesses": [
+    "~35% win rate (per article) — psychologically hard to keep trading after a streak of losses.",
+    "No stop loss: a sustained reversal after entry has no protection.",
+    "Edge depends on BTC's trend characteristics; weaker on range-bound assets.",
+    "21% historical fee drag (per article) leaves a thin margin if you raise leverage."
+  ],
+  "params": {
+    "rsi_length": 14,
+    "rsi_level": 70
+  },
+  "stats": {
+    "apr": "+24.3%*",
+    "sharpe": "1.85*",
+    "maxDrawdown": "14.8%*",
+    "winRate": "35.2%*",
+    "trades": "142 trades / 4 years*"
+  }
+}

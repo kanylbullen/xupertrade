@@ -1,0 +1,33 @@
+{
+  "name": "qullamagi_breakout",
+  "tvUrl": null,
+  "summary": "Port of 'Qullamaggie MA Breakout' (Loose Intraday preset) — multi-MA trend-stack breakout with ADX/RSI filters, intra-bar box breakout, EMA-trail stop with breakeven activation.",
+  "logic": [
+    "MA stack: MA1 > MA2 > MA3 must align with direction.",
+    "ADX and RSI filters confirm momentum.",
+    "Intra-bar box breakout is the trigger.",
+    "EMA-trail stop with buffer + hard SL + breakeven activation.",
+    "Wide-candle and volume filters (1.1×).",
+    "Short-only consec-red filter, cooldown between trades."
+  ],
+  "strengths": [
+    "Many filters → high-quality entries when they fire.",
+    "Trail-stop locks in profit on extended moves.",
+    "Long & short with hard risk control."
+  ],
+  "weaknesses": [
+    "180d backtest: -6.9% APR, 23% win rate — over-trades in this regime.",
+    "Scale-out partial close not emitted (engine doesn't support fractional close yet).",
+    "Strict (Daily) preset not ported — only Loose (Intraday)."
+  ],
+  "params": {
+    "preset": "Loose (Intraday)"
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h breakout, long & short)"
+  }
+}

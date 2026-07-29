@@ -12,6 +12,7 @@ from aiohttp import web
 
 from hypertrade.config import settings
 from hypertrade.db.repo import Repository
+from hypertrade.strategies.meta_loader import metadata_for
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.indicators_status import get_all_status
 from hypertrade.exchange.base import Exchange
@@ -180,9 +181,25 @@ async def list_strategies_handler(request: web.Request) -> web.Response:
     if (err := _require_auth(request)) is not None:
         return err
     strategies: list = request.app.get("strategies", [])
+    # Live fields (name/symbol/timeframe) come from the registered
+    # strategy objects; the prose comes from `strategies/meta/*.json`
+    # colocated with the modules. Merging here makes the bot the single
+    # source of truth for the dashboard's /strategies page, which used
+    # to carry its own hardcoded copy that drifted from the code.
+    #
+    # `metadata_for` returns {} for an undocumented strategy, so a newly
+    # added one still lists — it just has no prose yet.
     return _cors({
         "strategies": [
-            {"name": s.name, "symbol": s.symbol, "timeframe": s.timeframe}
+            {
+                "name": s.name,
+                "symbol": s.symbol,
+                "timeframe": s.timeframe,
+                # Metadata cannot contribute name/symbol/timeframe —
+                # the loader filters those out, so live values win by
+                # construction rather than by key ordering.
+                **metadata_for(s.name),
+            }
             for s in strategies
         ]
     })

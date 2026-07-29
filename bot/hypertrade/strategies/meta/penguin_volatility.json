@@ -1,0 +1,41 @@
+{
+  "name": "penguin_volatility",
+  "tvUrl": "https://www.tradingview.com/script/skzo4i9e/",
+  "summary": "Port of TradingView 'Penguin Volatility State Strategy' (© waranyu.trkm) — classifies market state using BB/KC width ratio, then enters long when volatility accelerates in a bullish EMA state.",
+  "logic": [
+    "Bollinger Bands (SMA20, 2σ) and Keltner Channel (SMA20, ATR20 × 2.0) computed on same basis.",
+    "diff = (upperBB − upperKC) / upperKC × 100 — positive when BB wider than KC (volatility expanding).",
+    "RSI applied to the diff series (RSI-of-diff, length 14) + SMA(7) smoothed = rsi_diff2.",
+    "EMA state: Green (fast>slow AND price momentum bullish) or Yellow (fast>slow AND momentum weakening).",
+    "Long entry (timing filter): rsi_diff2 crosses UNDER rsi_diff (volatility accelerating) AND state is Green or Yellow.",
+    "Long exit: rsi_diff crosses UNDER rsi_diff2 (volatility decelerating). No SL/TP."
+  ],
+  "strengths": [
+    "RSI-of-diff is a second-derivative volatility signal — catches the start of vol expansions, not just the expansion itself.",
+    "EMA state filter prevents entries in bearish macro conditions.",
+    "Timing filter reduces overtrading vs. the default always-in-trend approach.",
+    "Unique signal source (BB/KC width dynamics) — diversifies from price-based strategies."
+  ],
+  "weaknesses": [
+    "No stop loss: a volatility spike in the wrong direction rides until rsi_diff decelerates.",
+    "Complex indicator chain (BB → KC → diff → RSI → SMA) introduces significant lag.",
+    "EMA state can flip rapidly on 1h, causing frequent position churn.",
+    "Source backtest stats not provided; performance must be validated live."
+  ],
+  "params": {
+    "bb_len": 20,
+    "bb_mult": 2.0,
+    "kc_mult": 2.0,
+    "ema_fast_len": 12,
+    "ema_slow_len": 26,
+    "rsi_diff_len": 14,
+    "rsi_avg_len": 7
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h volatility state, long only)"
+  }
+}

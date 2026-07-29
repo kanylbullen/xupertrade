@@ -1,0 +1,35 @@
+{
+  "name": "moon_phases",
+  "tvUrl": "https://www.tradingview.com/script/sl42otOB/",
+  "summary": "Port of TradingView 'Moon Phases Long/Short Strategy' — enters long at the start of a full moon and exits at the new moon. 5% SL / 10% TP. Experimental / research use.",
+  "logic": [
+    "Lunar day computed from timestamp: daysSince = (bar_time − 2000-01-06T00:00Z) / 86400 days. lunarDay = floor((daysSince mod 29.53) + 0.5).",
+    "Full moon: lunarDay 13–15. New moon: lunarDay 0–1.",
+    "Long entry: first bar where full moon starts (lunarDay in [13,14,15] AND prev was not).",
+    "Long exit: new moon starts (lunarDay in [0,1] AND prev was not) OR SL hit (5%) OR TP hit (10%).",
+    "Long-only. Default 'Long Only (Research)' mode from source."
+  ],
+  "strengths": [
+    "Completely uncorrelated with all other technical strategies — novel diversification source.",
+    "Clear entry/exit rules anchored to a deterministic calendar cycle.",
+    "Fixed SL/TP bound per-trade losses and capture moonshot gains.",
+    "Generates ~13 trade opportunities per year (one per lunar cycle)."
+  ],
+  "weaknesses": [
+    "No empirical edge is established in crypto — performance is hypothesis-driven.",
+    "Lunar cycle is independent of market structure, news, or fundamentals.",
+    "Only 13 signals/year makes statistical validation extremely slow.",
+    "Primarily for research/diversification; not a core alpha strategy."
+  ],
+  "params": {
+    "stop_loss_pct": 5.0,
+    "take_profit_pct": 10.0
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1d lunar cycle, long only, experimental)"
+  }
+}
