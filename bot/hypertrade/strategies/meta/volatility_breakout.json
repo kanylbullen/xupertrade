@@ -1,0 +1,47 @@
+{
+  "name": "volatility_breakout",
+  "tvUrl": "https://www.tradingview.com/script/36zwwSMa/",
+  "summary": "Direct port of TradingView 'Volume Breakout Strategy [Tables Fixed]' — Keltner Channel breakout with EMA trend, ADX, RSI and volume filters.",
+  "logic": [
+    "Keltner Channels: basis = EMA(close, 22), bands = basis ± ATR(10) × 2.0.",
+    "Long entry: close crosses ABOVE upper band AND volume > SMA(volume, 18) AND close > EMA(close, 220) AND RSI(14) > 50 AND ADX(14) > 20.",
+    "Short entry: close crosses BELOW lower band AND volume > SMA(volume, 18) AND close < EMA(close, 220) AND RSI(14) < 50 AND ADX(14) > 20.",
+    "Hard stop: entry ± ATR(14) × 4. Breakeven bump: SL moves to entry once price reaches +1.5% (long) / -1.5% (short).",
+    "Trailing stop: activates at +3% / -3%, then trails 1% behind the highest high (long) or lowest low (short).",
+    "4-hour cooldown between entries. Long & short. 2× leverage to match source."
+  ],
+  "strengths": [
+    "Four independent filters (volume, EMA trend, RSI, ADX) gate every entry — drastically fewer false breakouts.",
+    "Trailing stop captures extended trends instead of capping profit at a fixed target.",
+    "Breakeven SL bump locks in zero-loss once a trade is +1.5%.",
+    "Long & short — strategy works in both bullish and bearish regimes."
+  ],
+  "weaknesses": [
+    "Strict filters mean trades are rare — long stretches with no entries are normal.",
+    "Trailing stop with 1% offset can give back meaningful unrealized gain in a fast reversal.",
+    "Source backtest stats not provided; performance must be validated live or via own backtest.",
+    "ADX > 20 threshold is subjective — slightly weaker trends are excluded."
+  ],
+  "params": {
+    "kc_len": 22,
+    "kc_mult": 2.0,
+    "atr_kc_len": 10,
+    "ema_len": 220,
+    "adx_thresh": 20,
+    "vol_len": 18,
+    "rsi_len": 14,
+    "atr_sl_len": 14,
+    "sl_multiplier": 4.0,
+    "bk_activation_pct": 0.015,
+    "trail_start_pct": 0.03,
+    "trail_offset_pct": 0.01,
+    "cooldown_hours": 4
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h KC breakouts, long & short)"
+  }
+}

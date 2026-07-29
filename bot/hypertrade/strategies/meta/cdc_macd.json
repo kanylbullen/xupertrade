@@ -1,0 +1,35 @@
+{
+  "name": "cdc_macd",
+  "tvUrl": "https://www.tradingview.com/script/7nv3hTpO/",
+  "summary": "Port of TradingView 'CDC Backtest (MACD)' — EMA 12/26 crossover long-only. Mathematically equivalent to MACD crossing zero. Simple, no SL or TP.",
+  "logic": [
+    "EMA(12) and EMA(26) on daily close.",
+    "Long entry: EMA12 crosses above EMA26 (equivalent: MACD > 0 fresh cross).",
+    "Long exit: EMA12 crosses below EMA26.",
+    "Long-only, no stop loss, no take profit. Full equity sizing.",
+    "Source default_qty_value = $200k per trade on $400k capital (50% allocation)."
+  ],
+  "strengths": [
+    "One of the oldest, most battle-tested trend-following signals in technical analysis.",
+    "Long-only on daily avoids short-selling complexity and overnight margin risk.",
+    "Clean, unambiguous entry/exit rules — no parameter tuning needed beyond EMA lengths.",
+    "Daily timeframe means few trades and low transaction costs."
+  ],
+  "weaknesses": [
+    "No stop loss: an adverse move after entry has no protection until the cross reverses.",
+    "Slow to react — EMA12/26 crossover on 1d can lag price by several days.",
+    "Long-only misses profitable short setups in downtrends.",
+    "Mathematically equivalent to MACD zero-line cross — not independently diversifying vs. macd_zero."
+  ],
+  "params": {
+    "ema_fast": 12,
+    "ema_slow": 26
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1d EMA crossover, long only)"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "kalman_breakout",
+  "tvUrl": null,
+  "summary": "Port of 'Kinetic Kalman Breakout' — 2-state Kalman filter (position + velocity) on close prices produces a smoothed mean. Bands = mean ± 2.6 × MAE. Trades on close cross of bands.",
+  "logic": [
+    "Kalman filter recomputed each tick over full closed-bar history.",
+    "absDiff = |close − kalmanPrice|, then SMA(absDiff, 200) = MAE.",
+    "Upper/Lower band = kalmanPrice ± 2.6 × MAE.",
+    "Long on close crossover upper band, short on close crossunder lower band.",
+    "Reverses on opposite signal via engine flip-detect."
+  ],
+  "strengths": [
+    "Adaptive smoothing — Kalman tracks both level and velocity, more responsive than EMAs in trends.",
+    "Bands widen with realized volatility (MAE-based), narrowing in calm regimes.",
+    "Long & short — works in both trend directions."
+  ],
+  "weaknesses": [
+    "180d backtest: -3.8% APR, 27% win rate. Few signals (15 round trips) but mostly losing in this regime.",
+    "No SL — relies entirely on flip on opposite signal.",
+    "Kalman filter recomputed each tick (O(n) per call) — fine live, slow on huge backtest windows."
+  ],
+  "params": {
+    "process_noise_pos": 0.05,
+    "process_noise_vel": 0.0001,
+    "measurement_noise": 250,
+    "band_lookback": 200,
+    "band_multiplier": 2.6
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h Kalman bands, long & short)"
+  }
+}

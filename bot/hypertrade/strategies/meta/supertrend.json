@@ -1,0 +1,47 @@
+{
+  "name": "supertrend",
+  "tvUrl": "https://www.tradingview.com/script/kZVrTReu/",
+  "summary": "Direct port of TradingView 'SuperTrend AI Strategy [Adaptive]' by © DefinedEdge — regime-aware SuperTrend with AI signal scoring and full SL/TP risk management.",
+  "logic": [
+    "SuperTrend on hl2 with ATR(10) and base multiplier 3.0. Multiplier adapts to regime.",
+    "Regime detection: atrRatio = ATR / SMA(ATR, 40), combined with ADX(14). Volatile (atrRatio>1.4), Ranging (ADX<20 AND atrRatio<0.9), or Trending (default).",
+    "Adaptive multiplier: volatile → base × (1 + (atrRatio-1) × 0.4); ranging → base × 0.85; trending → base. Clamped to [base × 0.5, base × 2.0].",
+    "On a trend flip, score the signal 0-100 across 5 factors: volume surge, displacement beyond band, EMA(50) trend alignment, regime quality, and prior band distance.",
+    "Entry only if score ≥ 65 AND EMA trend aligns AND regime is not ranging AND volume > SMA(volume, 20). 5-bar cooldown between entries.",
+    "Exit: SL = entry ± ATR × 6. TP = entry ± SL_distance × 2.5 (1:2.5 risk/reward). Optional trailing stop disabled by default."
+  ],
+  "strengths": [
+    "Adaptive multiplier widens bands in volatile regimes (fewer whipsaws) and tightens in ranging regimes (rare entries).",
+    "5-factor AI score gates every entry — rejects flips that look mechanically valid but lack quality signals.",
+    "Long & short with structured SL/TP gives bounded per-trade risk and a known reward profile.",
+    "Skipping ranging regime entirely avoids the worst drawdowns of mechanical trend-followers."
+  ],
+  "weaknesses": [
+    "Stack of filters (score ≥ 65 + EMA + regime + volume) makes entries very rare on 1d timeframe.",
+    "Regime detection adds 40 daily bars (~6 weeks) of warmup before the first valid trade after a restart.",
+    "ATR × 6 stop is wide on 1d — can mean 8-15% adverse move before the SL hits.",
+    "Source backtest stats not provided; performance must be re-validated live."
+  ],
+  "params": {
+    "atr_length": 10,
+    "base_mult": 3.0,
+    "regime_lookback": 40,
+    "adx_length": 14,
+    "adx_threshold": 20,
+    "adaptive": true,
+    "trend_ema_length": 50,
+    "volume_ma_length": 20,
+    "min_signal_score": 65,
+    "sl_atr_mult": 6.0,
+    "tp_rr": 2.5,
+    "use_trail": false,
+    "cooldown_bars": 5
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1d adaptive ST flips, long & short)"
+  }
+}

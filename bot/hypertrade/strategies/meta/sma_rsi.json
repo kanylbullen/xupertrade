@@ -1,0 +1,37 @@
+{
+  "name": "sma_rsi",
+  "tvUrl": "https://www.tradingview.com/script/1x2AawHf/",
+  "summary": "Direct port of TradingView '50 & 200 SMA + RSI Average Strategy' by © muratkbesiroglu — classic trend following with a smoothed RSI filter.",
+  "logic": [
+    "Long entry: close > SMA(50) AND close > SMA(200) AND SMA(RSI(21), 9) > 57.",
+    "Long exit: close < SMA(50) AND SMA(RSI(21), 9) < 57.",
+    "Long-only, single position, 1× leverage to match source.",
+    "* Backtest stats from Minara article (ETHUSDT 1d). Source PineScript itself works on any timeframe."
+  ],
+  "strengths": [
+    "Verified byte-equivalent port of the original PineScript — no logic divergence.",
+    "Per Minara: beat ETH buy-and-hold by +117 percentage points during a period when holding ETH lost 22%.",
+    "The smoothed RSI > 57 filter keeps the strategy in cash during weak-momentum chop, which is where most trend-followers bleed.",
+    "Uses the oldest, most proven technical indicators — nothing exotic to overfit."
+  ],
+  "weaknesses": [
+    "Requires 200 days of data warmup after a restart before SMA200 produces a valid signal.",
+    "No stop loss: a sustained reversal between SMA50 cross and RSI confirmation has no protection.",
+    "Trend-follower lag: in V-shaped recoveries the SMA200 condition delays entry significantly.",
+    "Daily timeframe + strict filters → very few trades (19 in the article's window). Small sample size."
+  ],
+  "params": {
+    "sma_fast": 50,
+    "sma_slow": 200,
+    "rsi_length": 21,
+    "rsi_smooth": 9,
+    "rsi_threshold": 57
+  },
+  "stats": {
+    "apr": "+23.5%*",
+    "sharpe": "1.16*",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "19 trades*"
+  }
+}

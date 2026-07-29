@@ -1,0 +1,36 @@
+{
+  "name": "pivot_supertrend",
+  "tvUrl": "https://www.tradingview.com/script/b74KzneI/",
+  "summary": "Port of TradingView 'Pivot Point SuperTrend' by Kadunagra — uses pivot highs/lows to anchor a dynamic center line, then builds a SuperTrend trailing stop from it. EMA200 trend filter. 1% SL.",
+  "logic": [
+    "Pivot highs/lows detected with 2-bar left/right confirmation.",
+    "Center line: exponentially-weighted average of consecutive pivot levels: center = (center × 2 + lastPivot) / 3.",
+    "SuperTrend bands: Up = center − 3 × ATR(10), Dn = center + 3 × ATR(10).",
+    "TUp (support): ratchets up — only moves higher, never lower. TDown (resistance): only moves lower.",
+    "Trend = 1 (bullish) when close > prev TDown, −1 when close < prev TUp.",
+    "Long signal: trend flips 1 AND close > EMA(200). Short: flips −1 AND close < EMA(200). SL = 1%."
+  ],
+  "strengths": [
+    "Pivot-anchored center line reduces noise vs. price-anchored SuperTrend — more meaningful flip signals.",
+    "EMA200 filter keeps the strategy aligned with the macro trend.",
+    "Ratcheting TUp/TDown gives the trailing stop a natural anti-whipsaw property.",
+    "Long & short with tight 1% SL gives very defined risk per trade."
+  ],
+  "weaknesses": [
+    "2-bar pivot confirmation introduces a 2-bar lag — signals are slightly delayed.",
+    "EMA200 on 4h requires 800+ hours warmup; pivot detection needs additional bars.",
+    "1% SL is very tight on 4h — normal volatility can stop out valid trades.",
+    "Source backtest stats not provided; performance must be validated live."
+  ],
+  "params": {
+    "ma_len": 200,
+    "sl_pct": 1.0
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (4h pivot ST, long & short)"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "bb_short",
+  "tvUrl": "https://www.tradingview.com/script/UBGvlIlq/",
+  "summary": "Direct port of TradingView 'BB Upper breakout Short +2%' by @DrZiuber — shorts intra-bar spikes above the upper Bollinger Band with a fixed limit take-profit.",
+  "logic": [
+    "Bollinger Bands: basis = SMA(close, 20), upper = basis + 2.0 × stdev(close, 20).",
+    "Entry trigger: bar's HIGH > upper × 1.02 (i.e. intra-bar spike at least 2% above the upper band).",
+    "Opens SHORT at the trigger bar's close. No long side, no stop loss.",
+    "Exit: limit order at entry × 0.98. The bar's low touching that level fills the trade exactly at the limit price.",
+    "1× leverage to match source (fixed $10k cash on $40k initial capital ≈ 25% of equity)."
+  ],
+  "strengths": [
+    "Intra-bar HIGH trigger captures wick-driven spikes that close-based detection would miss.",
+    "Limit-fill exit at the exact target gives predictable, repeatable per-trade PnL.",
+    "Simple, mechanical mean-reversion logic with no discretionary judgment.",
+    "No leverage means liquidation risk is minimal even in sustained adverse moves."
+  ],
+  "weaknesses": [
+    "No stop loss: in a sustained trending breakout the position can sit underwater indefinitely.",
+    "Mean reversion assumes the market eventually pulls back — fails in strong trending regimes.",
+    "Only tested on SOL by the original author; behavior on other coins unverified.",
+    "Source backtest stats not provided; performance must be re-validated live or via own backtest."
+  ],
+  "params": {
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "breakout_pct": 0.02,
+    "take_profit_pct": 0.02,
+    "use_high": true
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h BB upper breakouts, short-only)"
+  }
+}

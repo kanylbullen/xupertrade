@@ -1,0 +1,37 @@
+{
+  "name": "ema_crossover",
+  "tvUrl": "https://www.tradingview.com/script/c0dAzn2Q/",
+  "summary": "Port of TradingView '7/19 EMA Crypto Strategy' — fast/slow EMA crossover. Long on bullish cross, short on bearish. SL at the structural low/high of the last 4 candles.",
+  "logic": [
+    "EMA(7) and EMA(19) on close.",
+    "Long entry: EMA7 crosses above EMA19 (prev: ema7 ≤ ema19, cur: ema7 > ema19).",
+    "Short entry: EMA7 crosses below EMA19.",
+    "Stop loss: lowest low (long) / highest high (short) of the last 4 candles at signal bar.",
+    "Exit: opposite cross (reversal) or SL hit. No fixed take-profit — ride the trend.",
+    "Long & short. Reverses directly on opposite cross without waiting for flat."
+  ],
+  "strengths": [
+    "Structural SL anchors the stop to recent price action — adapts to volatility at time of entry.",
+    "Direct reversal on opposite cross means the strategy is always aligned with the current trend direction.",
+    "Simple and fully mechanical — no discretionary judgment.",
+    "EMA7/19 responds quickly to intraday trend changes on 1h."
+  ],
+  "weaknesses": [
+    "Frequent false crosses in sideways markets generate repeated small losses.",
+    "SL at N-candle structure can be very tight in low-volatility regimes, causing premature stops.",
+    "No take-profit means profits fully depend on sustained trend moves post-entry.",
+    "Source backtest stats not provided; performance depends heavily on market regime."
+  ],
+  "params": {
+    "fast_len": 7,
+    "slow_len": 19,
+    "sl_candles": 4
+  },
+  "stats": {
+    "apr": "N/A",
+    "sharpe": "N/A",
+    "maxDrawdown": "N/A",
+    "winRate": "N/A",
+    "trades": "Active (1h EMA crossover, long & short)"
+  }
+}
