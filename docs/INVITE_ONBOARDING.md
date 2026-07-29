@@ -9,8 +9,10 @@ Authentik account to the `hypertrade-users` group.
 This document covers the operator-side workflow (adding a new user)
 and the user-side workflow (first sign-in through bot-running).
 
-> **Status note (2026-05-10):** This doc was written ahead of
-> Phase 6 + Phase 8. Feature status is marked inline:
+> **Status note (updated 2026-07-29):** Originally written ahead of
+> Phase 6 + Phase 8. The admin API + `/admin` UI, per-tenant limits and
+> `is_active` enforcement have since shipped and are marked as such
+> below. Feature status is marked inline:
 > - **AVAILABLE NOW** = implemented + on `master`
 > - **PLANNED** = part of a later phase, not yet implemented
 > Where the operator workflow currently relies on raw DB / SSH
@@ -80,9 +82,9 @@ dashboard.
 2. Add their account to the `hypertrade-users` group:
    - Authentik admin → **Directory → Users → [their account]
      → Groups → Add → hypertrade-users**
-3. Send them the dashboard URL + the user-workflow steps from this
-   doc (USER_GUIDE.md is **PLANNED** — first beta user audience
-   will tell us what they need before we write a dedicated guide).
+3. Send them the dashboard URL and [`USER_GUIDE.md`](USER_GUIDE.md) —
+   the user-facing walkthrough (sign-in → passphrase → API wallet →
+   credentials → first bot), including what the beta does not do yet.
 
 That's it on the operator side. The user can now sign in and
 the dashboard will auto-create their `tenants` row on first sign-
@@ -114,13 +116,16 @@ in.
    Irreversible. Confirm against `git log` to be sure you're
    removing the right tenant.
 
-**PLANNED** (Phase 6+):
+**AVAILABLE NOW** — an operator-only `/admin` UI shipped, backed by
+`/api/admin/tenants`: tenant list with status, bot counts, trade counts
+and P&L; per-tenant limits (`max_active_strategies`,
+`allowed_strategies`); and `/admin/server` for host CPU/RAM/disk.
 
-- `GET/POST/DELETE /api/admin/tenants[/<id>]` — operator-scoped HTTP
-  endpoints for the above. No admin dashboard UI in v1; operators
-  use curl + jq.
-- A `delete_tenant(tenant_id)` helper that wraps the SQL cascade
-  + Postgres-role DROP into one atomic operation.
+**STILL PLANNED**:
+
+- `DELETE /api/admin/tenants/<id>` — tenant deletion is still the manual
+  SQL cascade above. A `delete_tenant()` helper wrapping the cascade +
+  Postgres-role DROP into one atomic operation has not been written.
 
 ### Operator visibility
 
@@ -136,17 +141,20 @@ in.
   running containers per tenant (labels set by the orchestrator
   in Phase 3a).
 
-**PLANNED** (admin-tier dashboard endpoints, Phase 6+):
+**AVAILABLE NOW**:
 
-- List all tenants + bot status via `/api/admin/tenants`
-- Stop any tenant's bot via `/api/admin/tenants/<id>/bots/<bot_id>/stop`
-- Disable a tenant via `/api/admin/tenants/<id>/disable`
-  (this should set `tenants.is_active = false` AND have the
-  tenant resolver enforce it — currently `tenants.is_active`
-  exists in the schema but **NOT enforced** by
-  `lib/tenant.ts:getCurrentTenant`. Bug or feature gap; tracked
-  for Phase 6.)
-- Aggregate metrics page
+- `/admin` lists every tenant with status, active bots, trade counts and
+  P&L; `/admin/server` shows host CPU/RAM/disk.
+- **`tenants.is_active` IS now enforced.** `lib/tenant.ts` returns
+  `TENANT_DISABLED` for an inactive tenant on both the existing-row and
+  the just-created path, and the server-side resolver redirects to
+  `/login?error=tenant-disabled`. Setting the column to `false` locks a
+  tenant out immediately.
+
+**STILL PLANNED**:
+
+- Stopping another tenant's bot from the admin UI — still
+  `docker rm -f` over SSH.
 
 The operator role currently **CANNOT** (by design, multi-tenancy
 trust model B):
@@ -272,12 +280,12 @@ Their bot is dead; their data stays. They can recreate via the dashboard if they
 so for repeat offenders also remove their account from the
 `hypertrade-users` Authentik group.
 
-**Planned (Phase 6+)**: admin endpoint
-`POST /api/admin/tenants/<id>/disable` will set
-`tenants.is_active = false`, and the tenant resolver will be
-updated to deny new sign-ins for inactive tenants. Today the
-column exists but isn't enforced — file an issue if this bites
-before Phase 6 lands.
+**AVAILABLE NOW**: set `tenants.is_active = false` (SQL, or via
+`/admin`). The tenant resolver enforces it — the tenant is bounced to
+`/login?error=tenant-disabled` on their next request and cannot create
+or start bots. Killing the container is still a separate step, since
+`is_active` gates the dashboard rather than reaching into a running
+bot.
 
 The bot's trade-rate alarm + parity check (audit M2 + M3) will
 surface a misbehaving bot loudly via Telegram regardless.
@@ -306,17 +314,25 @@ operator metrics are preserved.
 
 **Q: How many tenants can my host handle?**
 
-A: No hard cap is enforced today. Per-bot defaults
-(`bot-orchestrator.ts`): **1 CPU, 512 MB RAM**, hardcoded — not
-yet env-overridable per tenant. Roughly: 10 single-bot tenants
-≈ 10 containers ≈ 5 GB RAM + 10 CPU shares plus the operator's
-own paper/testnet/mainnet bots.
+A: No hard tenant cap is enforced today. Per-bot defaults
+(`bot-orchestrator.ts`): **1 CPU**, and memory **by mode** — mainnet
+gets **1 GiB**, paper and testnet **512 MiB**. Mainnet needs the
+headroom because it owns the vault scanner, HODL evaluation and the
+Telegram notifier on top of the strategy loop; it was being OOM-killed
+at 512 MiB. All of these are env-overridable on the dashboard container
+via `HYPERTRADE_BOT_*` (see the operator-cap block in
+`bot-orchestrator.ts`).
 
-**Planned (Phase 6+)**: `MAX_TENANTS` env var enforced at bot-
-create time + per-tenant resource overrides via admin endpoint.
-Until then, the operator polices headcount via the
-`hypertrade-users` Authentik group and watches host metrics
-(`docker stats`).
+Roughly: 10 single-bot paper tenants ≈ 5 GB RAM + 10 CPU shares, plus
+the operator's own bots.
+
+**Per-tenant limits ARE available now** via `/admin`:
+`max_active_strategies` and `allowed_strategies` are enforced per
+tenant.
+
+**`MAX_TENANTS` is still NOT implemented.** The operator polices
+headcount via the `hypertrade-users` Authentik group and watches
+`docker stats` / `/admin/server`.
 
 **Q: Can I invite from a separate Authentik instance?**
 
