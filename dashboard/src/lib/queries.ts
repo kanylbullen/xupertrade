@@ -1,5 +1,5 @@
 import { db, trades, positions, equitySnapshots, strategyConfigs, fundingPayments } from "./db";
-import { desc, eq, and, gte, sql, sum, count } from "drizzle-orm";
+import { desc, eq, and, gte, lt, sql, sum, count } from "drizzle-orm";
 
 import { type Mode } from "./mode";
 
@@ -36,6 +36,86 @@ export async function getRecentTrades(
     .where(and(...conditions))
     .orderBy(desc(trades.timestamp))
     .limit(limit);
+}
+
+/**
+ * Filters accepted by the Trades page. Every field is optional; an
+ * omitted field means "no constraint on this column".
+ *
+ * `to` is treated as EXCLUSIVE (`timestamp < to`). The page passes the
+ * day *after* the operator's chosen end date, so picking
+ * 2026-07-01..2026-07-01 returns that whole day rather than only the
+ * single instant at midnight.
+ */
+export type TradeFilters = {
+  mode?: Mode;
+  strategy?: string;
+  from?: Date;
+  to?: Date;
+};
+
+function tradeFilterConditions(tenantId: string, f: TradeFilters) {
+  const conditions = [eq(trades.tenantId, tenantId)];
+  if (f.mode !== undefined) conditions.push(eq(trades.mode, f.mode));
+  if (f.strategy !== undefined) {
+    conditions.push(eq(trades.strategyName, f.strategy));
+  }
+  if (f.from !== undefined) conditions.push(gte(trades.timestamp, f.from));
+  if (f.to !== undefined) conditions.push(lt(trades.timestamp, f.to));
+  return conditions;
+}
+
+/**
+ * One page of trades matching `filters`, newest first.
+ *
+ * Ordered by `(timestamp DESC, id DESC)` rather than timestamp alone.
+ * Trades written in the same tick share a timestamp, and an unstable
+ * sort under OFFSET can drop or duplicate rows across page boundaries;
+ * the serial `id` is a unique tiebreaker that makes paging total.
+ */
+export async function getTradesPage(
+  tenantId: string,
+  filters: TradeFilters,
+  limit: number,
+  offset: number,
+) {
+  return db
+    .select()
+    .from(trades)
+    .where(and(...tradeFilterConditions(tenantId, filters)))
+    .orderBy(desc(trades.timestamp), desc(trades.id))
+    .limit(limit)
+    .offset(offset);
+}
+
+/** Total row count for the same filters — drives the pager. */
+export async function countTrades(
+  tenantId: string,
+  filters: TradeFilters,
+): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(trades)
+    .where(and(...tradeFilterConditions(tenantId, filters)));
+  return row?.n ?? 0;
+}
+
+/**
+ * Distinct strategy names this tenant has ever traded, for the filter
+ * dropdown. Deliberately NOT the registry list: the point is to offer
+ * only values that can actually return rows, so the operator can't pick
+ * a strategy and get an empty table. Not mode-scoped — narrowing it per
+ * mode would make options appear and vanish as the mode pill changes.
+ */
+export async function getTradedStrategyNames(
+  tenantId: string,
+): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ name: trades.strategyName })
+    .from(trades)
+    .where(eq(trades.tenantId, tenantId))
+    .orderBy(trades.strategyName);
+  return rows.map((r) => r.name);
 }
 
 export async function getOpenPositions(tenantId: string, mode: Mode = "paper") {
