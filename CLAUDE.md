@@ -614,8 +614,8 @@ None currently.
 - [x] HyperLiquid vault scanner: daily catalogue poll → coarse pre-filter → per-vault `vaultDetails` fetch → Sharpe/max-DD/multi-period ROI → quality filter → `vault_snapshots` row + `vault_nav_history` append. Telegram fires `vault.qualified` / `vault.disqualified` events on state change with 24h debounce per vault. New `/vaults` dashboard page (sorted by Sharpe) and `vault_picks` HODL signal alongside the others. Owned by the mainnet bot only (single owner; vaults are mainnet-only on HL and the `/vaults` dashboard is pinned to mainnet — moved from testnet 2026-05-13). Quality filter defaults: age ≥ 180d, AUM \$200k–\$20M, ROI 90/180d > 0%, max DD ≤ 25%, Sharpe(180d) > 1.5, manager equity ≥ 5%, fee ≤ 15%. ROI 365d waived for vaults < 365d. — squash-merge `23dd0bf` (PR #1, branch `feat/vault-scanner`). Plan: `docs/plans/vault-scanner.md`. API research: `docs/hyperliquid-vaults-api.md`. 28 new pytest cases (filters / metrics / poller); full suite 133 passed. **First PR-flow feature**: Copilot found 11 issues on first review (catalogue dropouts not disqualified, NAV history not merged into metrics, full-microsecond `snapshot_at` defeating upsert, unguarded casts in `fetch_details`, 48h cutoff hiding everything on missed poll, per-mode duplicate scanning, cooldown bumped on failure, compose `TELEGRAM_EVENTS` overriding .env update, "—d" rendering for null age, follower count under-reports capped vaults, coarse `apr ≤ 0` filter dropping legit qualifiers); all addressed in commit on the branch before merge.
 
 #### Dashboard: trades-page filters + data-driven /strategies (2026-07-29)
-- [x] Trades page filters/pagination — was `LIMIT 50`. Strategy filter, date-range picker, and pagination on `/trades`; filter state is URL-driven so views are shareable/bookmarkable. — squash-merge `2c37e79` (PR #150).
-- [x] Make `/strategies` page data-driven — page no longer carries its hardcoded 21-descriptor array (which had already drifted: `ath_breakout` shipped and traded but was never documented). Strategy prose moved to `bot/hypertrade/strategies/meta/<name>.json` colocated with each module, read via `meta_loader.py`; the bot's `/strategies` endpoint merges metadata with the live registry (live name/symbol/timeframe always win; unreadable meta files are skipped and an undocumented strategy still lists). Coverage test asserts every registered strategy has a meta file. — squash-merge `97ff1d1` (PR #152).
+- [x] Trades page filters/pagination — was `LIMIT 50`. Strategy filter, date-range picker, and pagination on `/trades`; filter state is URL-driven so views are shareable/bookmarkable. — squash-merge `2c37e79` (PR #150, branch `feat/trades-filters-pagination`).
+- [x] Make `/strategies` page data-driven — page no longer carries its hardcoded 21-descriptor array (which had already drifted: `ath_breakout` shipped and traded but was never documented). Strategy prose moved to `bot/hypertrade/strategies/meta/<name>.json` colocated with each module, read via `meta_loader.py`; the bot's `/strategies` endpoint merges metadata with the live registry (live name/symbol/timeframe always win; unreadable meta files are skipped and an undocumented strategy still lists). Coverage test asserts every registered strategy has a meta file. — squash-merge `97ff1d1` (PR #152, branch `refactor/data-driven-strategies`).
 
 ---
 
@@ -805,8 +805,8 @@ When the notification fires, the agent:
 1. Reads the dump from the task output file
 2. For each `===COMMENT===` block: classifies (real bug / style nit /
    spurious) and applies the fix
-3. Runs `pytest` — **always**, even if `comments=0`. CI checks aren't
-   enabled, so the suite is the merge gate.
+3. Runs `pytest` — **always**, even if `comments=0`. There is no test/build
+   CI (only gitleaks + CodeQL run server-side), so the suite is the merge gate.
 4. Commits + pushes the fix-bundle (skip if no fixes were needed)
 5. Replies inline to each addressed comment via `gh api`
 6. Merges via `gh pr merge --squash --delete-branch`

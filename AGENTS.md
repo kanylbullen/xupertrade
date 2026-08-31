@@ -38,8 +38,10 @@ never-commit table and the leak-response drill: **CLAUDE.md § 0 — read it.**
 | `API_KEY`, Cloudflare / OIDC / Phase tokens | Phase or Redis (see § 0 table) |
 | Personal email, server IP / LAN, real hostname, wallet addresses | `$DEPLOY_HOST`-style placeholders, `you@example.com` |
 
-The `.githooks/pre-commit` gitleaks hook blocks secret-shaped diffs. Setup
-is **per clone** (git ignores `core.hooksPath` from a checked-in config):
+The `.githooks/pre-commit` secret-pattern hook blocks secret-shaped diffs
+(patterns kept in sync with `.gitleaks.toml`; gitleaks itself also runs on
+every PR in CI). Setup is **per clone** (git ignores `core.hooksPath` from
+a checked-in config):
 
 ```bash
 git config --local core.hooksPath .githooks
@@ -68,7 +70,9 @@ Never bypass with `--no-verify` unless verified false positive (CLAUDE.md § 0).
   § 7's direct-to-master exceptions are the operator's call, not the agent's.
 - **NO deploy to the remote server.** The operator deploys after merge.
 - **Merge gates:** bot changes → `pytest` green. Dashboard changes →
-  `vitest` + `build` green. CI is not enabled — the local suite is the gate.
+  `vitest` + `build` green. There is no test/build CI — the local suite is
+  the gate. Server-side checks that do run on every PR: gitleaks
+  secret-scan (`.github/workflows/secret-scan.yml`) and CodeQL.
 - Never bypass the pre-commit hook.
 
 ## Key commands
