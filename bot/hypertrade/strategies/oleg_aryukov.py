@@ -54,6 +54,11 @@ def _nadaraya_watson(closes: np.ndarray, bandwidth: float, lookback: int) -> flo
 
     Matches Pine: weight_i = exp(-i^2 / (2*bandwidth^2)), i in [0..lookback-1],
     closes[0] is the most recent bar.
+
+    Kept as the per-bar reference oracle for the differential tests in
+    ``tests/test_strategies/test_oleg_vectorized_parity.py``; the production
+    path is the vectorized :func:`_nadaraya_watson_series` (identical math,
+    proven equal to within 1e-9).
     """
     n = min(lookback, len(closes))
     if n <= 0:
@@ -67,28 +72,92 @@ def _nadaraya_watson(closes: np.ndarray, bandwidth: float, lookback: int) -> flo
     return float((window * weights).sum() / sw)
 
 
-def _rci(close: pd.Series, length: int) -> pd.Series:
-    """RCI ≈ Pearson correlation of percentrank(close) vs. percentrank(time),
-    as per Pine `ta.correlation(rank_price, rank_time, length)` * 100.
-    """
-    if length < 2 or len(close) < length:
-        return pd.Series([float("nan")] * len(close), index=close.index)
+def _nadaraya_watson_series(
+    closes: np.ndarray, bandwidth: float, lookback: int
+) -> np.ndarray:
+    """Nadaraya-Watson estimate for every bar, vectorized.
 
-    out = np.full(len(close), np.nan)
+    Equivalent to calling :func:`_nadaraya_watson` on ``closes[: t + 1]`` for
+    each bar ``t`` (exactly what the growing-window backtest used to compute
+    one bar at a time), but computed in two vectorized passes:
+
+    - Bars with fewer than ``lookback`` bars of history use only the ``m =
+      t + 1`` most recent closes and the first ``m`` kernel weights (same as
+      the reference oracle's ``n = min(lookback, len(closes))`` rule).
+    - Every remaining bar is a rolling weighted sum of a ``lookback``-sized
+      sliding window with the fixed Gaussian kernel — i.e. a weighted
+      convolution of the close series with the kernel, normalized by the
+      constant kernel mass.
+
+    O(n * lookback) for the whole series in one vectorized pass, instead of
+    a Python-loop invocation of the per-bar oracle for every bar.
+    """
+    closes = np.asarray(closes, dtype=float)
+    n = len(closes)
+    if n == 0 or lookback <= 0:
+        return np.full(n, np.nan)
+
+    idx = np.arange(lookback)
+    weights = np.exp(-(idx ** 2) / (2.0 * bandwidth ** 2))
+
+    out = np.empty(n, dtype=float)
+    # Warmup bars with less history than the kernel: mirror the reference
+    # oracle's variable-length window (weights[:m] are exactly the weights
+    # the oracle would build for an m-bar window).
+    head = min(lookback - 1, n)
+    for t in range(head):
+        m = t + 1
+        w = weights[:m]
+        out[t] = (closes[:m][::-1] * w).sum() / w.sum()
+    # Remaining bars: one sliding-window weighted sum (rolling convolution)
+    # over the whole series. Column 0 of the view is the most recent bar of
+    # each window, matching the oracle's reversed window.
+    if n >= lookback:
+        win = np.lib.stride_tricks.sliding_window_view(closes, lookback)
+        out[lookback - 1:] = (win[:, ::-1] * weights).sum(axis=1) / weights.sum()
+    return out
+
+
+def _rci(close: pd.Series, length: int) -> pd.Series:
+    """RCI — Rank Correlation Index in [-100, 100].
+
+    Pine ``ta.correlation(rank_price, rank_time, length) * 100`` where both
+    ranks are ordinal in [0, 1] across the trailing ``length`` bars.
+
+    Vectorized replacement for the former per-bar loop: ordinal ranks for
+    every trailing window come from one 2-D ``argsort`` over a sliding-window
+    view, and because the price ranks are always a *permutation of the same
+    uniform grid* as the time ranks, their Pearson correlation is exactly
+    Spearman's rank correlation in closed form::
+
+        rho = 1 - 6 * sum(d_i^2) / (length * (length^2 - 1)),  d = rank - t
+
+    (The old loop carried a ``std(ranks) < 1e-12`` zero-variance guard; it
+    was unreachable — ordinal ranks of any window are a permutation of
+    0..length-1, so their variance is a fixed positive constant for
+    length >= 2. The closed form needs no guard.)
+
+    Tie behavior is preserved: both implementations rank with numpy's default
+    (introsort) argsort, one window at a time, so tied closes get the same
+    order-dependent ranks here as they did in the loop.
+    """
+    n = len(close)
+    if length < 2 or n < length:
+        return pd.Series([float("nan")] * n, index=close.index)
+
+    out = np.full(n, np.nan)
     closes = close.values
-    for i in range(length - 1, len(close)):
-        window = closes[i - length + 1 : i + 1]
-        # percentrank within window — relative ordinal rank in [0..1]
-        order = np.argsort(window)
-        ranks = np.empty_like(order, dtype=float)
-        ranks[order] = np.arange(length, dtype=float) / max(length - 1, 1)
-        # time rank is just linear 0..1
-        time_rank = np.arange(length, dtype=float) / max(length - 1, 1)
-        if np.std(ranks) < 1e-12 or np.std(time_rank) < 1e-12:
-            out[i] = 0.0
-            continue
-        corr = float(np.corrcoef(ranks, time_rank)[0, 1])
-        out[i] = corr * 100.0
+    # (n - length + 1, length) view; row j = closes[j : j + length], oldest
+    # bar first — the same windows the old loop visited in the same order.
+    win = np.lib.stride_tricks.sliding_window_view(closes, length)
+    order = np.argsort(win, axis=1)
+    ranks = np.empty(order.shape, dtype=np.int64)
+    rows = np.arange(order.shape[0])[:, None]
+    ranks[rows, order] = np.arange(length, dtype=np.int64)
+    d = ranks - np.arange(length, dtype=np.int64)
+    d2 = (d * d).sum(axis=1).astype(np.float64)
+    corr = 1.0 - 6.0 * d2 / float(length * (length * length - 1))
+    out[length - 1:] = corr * 100.0
     return pd.Series(out, index=close.index)
 
 
@@ -422,9 +491,10 @@ class OlegAryukovStrategy(Strategy):
 
         # Nadaraya-Watson
         if self.use_nadaraya:
-            nw_est = _nadaraya_watson(
+            nw_series = _nadaraya_watson_series(
                 df["close"].values, self.nw_bandwidth, self.nw_lookback
             )
+            nw_est = float(nw_series[-1])
             if not math.isnan(nw_est):
                 nw_upper = nw_est * (1 + self.nw_bandwidth / 100.0)
                 nw_lower = nw_est * (1 - self.nw_bandwidth / 100.0)
