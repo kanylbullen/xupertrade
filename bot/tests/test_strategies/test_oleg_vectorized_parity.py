@@ -111,6 +111,18 @@ def _nw_series_legacy_shim(closes, bandwidth, lookback):
     )
 
 
+def _tsi_signal_source_legacy(ds_pc, ds_abs):
+    """Pre-refactor TSI per-element ratio loop (the former list comp)."""
+    return pd.Series(
+        [
+            0.0 if (ds_abs.iloc[i] == 0 or pd.isna(ds_abs.iloc[i])) else
+            100.0 * ds_pc.iloc[i] / ds_abs.iloc[i]
+            for i in range(len(ds_pc))
+        ],
+        index=ds_pc.index,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Data zoo — deterministic, seeded, adversarial for ranking/kernels.
 # ---------------------------------------------------------------------------
@@ -288,6 +300,73 @@ def test_rci_nan_input_parity():
     assert np.max(np.abs(a[finite] - b[finite])) <= TOL
 
 
+def test_rci_tail_slice_matches_full_series():
+    """Warrant for the on_candle call sites: RCI at bar t depends only on
+    the trailing `length` bars, so feeding _rci exactly the trailing window
+    yields the identical last value as the full-history series — bit for
+    bit, because both paths evaluate the same window through the same
+    vectorized row computation."""
+    for dataset, closes in ZOO.items():
+        s = pd.Series(closes)
+        for length in (2, 9, 26, 52):
+            if len(s) < length:
+                continue
+            full_last = _rci(s, length).iloc[-1]
+            tail_last = _rci(s.iloc[-length:], length).iloc[-1]
+            if pd.isna(full_last):
+                assert pd.isna(tail_last), (dataset, length)
+            else:
+                assert full_last == tail_last, (dataset, length)
+
+
+# ---------------------------------------------------------------------------
+# 2b. TSI ratio source: vectorized mapping vs legacy per-element loop
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("dataset", sorted(ZOO))
+def test_tsi_signal_source_matches_legacy_loop(dataset):
+    """ds_pc/ds_abs built exactly as on_candle builds them (double
+    pta.ema): NaN warmup head plus finite tail; constant/flat datasets
+    drive ds_abs to exactly 0.0, exercising the zero mask."""
+    import pandas_ta as pta  # noqa: WPS433 — same lib the strategy uses
+
+    pc = pd.Series(ZOO[dataset]).diff()
+    ds_pc = pta.ema(pta.ema(pc, length=25), length=13)
+    ds_abs = pta.ema(pta.ema(pc.abs(), length=25), length=13)
+    got = oleg_mod._tsi_signal_source(ds_pc, ds_abs)
+    expected = _tsi_signal_source_legacy(ds_pc, ds_abs)
+    assert isinstance(got, pd.Series)
+    assert got.index.equals(ds_pc.index)
+    got_v, exp_v = got.values, expected.values
+    assert (np.isnan(got_v) == np.isnan(exp_v)).all(), dataset
+    finite = ~np.isnan(got_v)
+    if finite.any():
+        max_diff = float(np.max(np.abs(got_v[finite] - exp_v[finite])))
+        assert max_diff <= TOL, (dataset, max_diff)
+
+
+def test_tsi_signal_source_edge_cases():
+    # all-zero ds_abs -> every bar masked to 0.0 (even where ds_pc is NaN)
+    zeros = pd.Series([0.0, 0.0, 0.0, 0.0])
+    pc = pd.Series([np.nan, 1.0, -2.0, 3.0])
+    got = oleg_mod._tsi_signal_source(pc, zeros)
+    assert (got.values == 0.0).all()
+    # NaN ds_abs -> masked to 0.0 (legacy: pd.isna branch)
+    ab = pd.Series([np.nan, 0.0, 2.0, 4.0])
+    pc = pd.Series([1.0, 2.0, 3.0, -4.0])
+    got = oleg_mod._tsi_signal_source(pc, ab)
+    expected = _tsi_signal_source_legacy(pc, ab)
+    assert got.values[0] == 0.0 and got.values[1] == 0.0
+    assert np.array_equal(got.values, expected.values)
+    # negative-zero denominator behaves like zero in both
+    ab = pd.Series([-0.0, 1.0])
+    pc = pd.Series([5.0, 2.0])
+    assert np.array_equal(
+        oleg_mod._tsi_signal_source(pc, ab).values,
+        _tsi_signal_source_legacy(pc, ab).values,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. End-to-end: on_candle signal stream, vectorized vs legacy-wired
 # ---------------------------------------------------------------------------
@@ -347,8 +426,13 @@ async def _assert_stream_parity(candles: pd.DataFrame, strat_kwargs: dict,
 
     # Re-wire the module to the pre-refactor oracles — the exact behavior
     # the strategy had before the vectorization — and compare fresh runs.
+    # (The RCI trailing-window slicing at the call sites is separately
+    # proven by test_rci_tail_slice_matches_full_series; patching _rci with
+    # the legacy full-series implementation here still yields the exact
+    # original per-bar values because only iloc[-1] is consumed.)
     monkeypatch.setattr(oleg_mod, "_rci", _rci_legacy)
     monkeypatch.setattr(oleg_mod, "_nadaraya_watson_series", _nw_series_legacy_shim)
+    monkeypatch.setattr(oleg_mod, "_tsi_signal_source", _tsi_signal_source_legacy)
     try:
         old_sigs = [
             _signal_fields(s)
@@ -390,4 +474,32 @@ async def test_on_candle_stream_parity_alt_config(monkeypatch):
         _make_candles(248, seed=7),
         {"min_confirmations": 2, "check_trend": False, "use_trailing": False},
         monkeypatch,
+    )
+
+
+@pytest.mark.asyncio
+async def test_on_candle_rci_calls_use_trailing_window_only(monkeypatch):
+    """Warrant for the call-site slices: every _rci call from on_candle must
+    receive exactly `length` bars (the trailing window), not the full
+    history — the value-equivalence of that slice is proven by
+    test_rci_tail_slice_matches_full_series; this pins the wiring."""
+    calls: list[tuple[int, int]] = []
+    real_rci = oleg_mod._rci
+
+    def spy(close, length):
+        calls.append((len(close), length))
+        return real_rci(close, length)
+
+    monkeypatch.setattr(oleg_mod, "_rci", spy)
+    strat = OlegAryukovStrategy()
+    candles = _make_candles(240, seed=5)
+    await _stream_signals(strat, candles)
+    monkeypatch.undo()
+
+    assert calls, "expected on_candle to invoke _rci"
+    assert {length for _, length in calls} == {
+        strat.rci_fast, strat.rci_medium, strat.rci_slow,
+    }
+    assert all(n == length for n, length in calls), (
+        f"_rci received window sizes != length: {sorted(set(calls))}"
     )

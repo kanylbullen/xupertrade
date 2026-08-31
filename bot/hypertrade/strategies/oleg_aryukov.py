@@ -161,6 +161,27 @@ def _rci(close: pd.Series, length: int) -> pd.Series:
     return pd.Series(out, index=close.index)
 
 
+def _tsi_signal_source(ds_pc: pd.Series, ds_abs: pd.Series) -> pd.Series:
+    """Per-bar TSI ratio fed to the signal EMA, vectorized.
+
+    Legacy semantics, per element ``i``::
+
+        0.0 if (ds_abs[i] == 0 or isnan(ds_abs[i])) else 100.0 * ds_pc[i] / ds_abs[i]
+
+    Same elementwise IEEE operations as the former per-element loop
+    (``(100.0 * pc) / ab`` left-to-right), just evaluated in one numpy pass
+    instead of 2 * n pandas scalar ``.iloc`` lookups. Where the mask is
+    false the values are bit-identical to the loop; masked-out lanes may
+    hold inf/NaN from the division but are discarded by ``np.where``.
+    """
+    pc = ds_pc.values
+    ab = ds_abs.values
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = 100.0 * pc / ab
+    mask = (ab == 0) | np.isnan(ab)
+    return pd.Series(np.where(mask, 0.0, ratio), index=ds_pc.index)
+
+
 @register
 class OlegAryukovStrategy(Strategy):
     name = "oleg_aryukov"
@@ -438,14 +459,7 @@ class OlegAryukovStrategy(Strategy):
                 100.0 * float(ds_pc.iloc[-1]) / denom if denom and not pd.isna(denom) else 0.0
             )
             tsi_signal_series = pta.ema(
-                pd.Series(
-                    [
-                        0.0 if (ds_abs.iloc[i] == 0 or pd.isna(ds_abs.iloc[i])) else
-                        100.0 * ds_pc.iloc[i] / ds_abs.iloc[i]
-                        for i in range(len(df))
-                    ],
-                    index=df.index,
-                ),
+                _tsi_signal_source(ds_pc, ds_abs),
                 length=self.tsi_signal,
             )
             if tsi_signal_series is not None and not pd.isna(tsi_signal_series.iloc[-1]):
@@ -503,11 +517,19 @@ class OlegAryukovStrategy(Strategy):
                 if close > nw_upper:
                     sell += 1
 
-        # RCI ribbon (always evaluated in Pine — no toggle, mirror that)
+        # RCI ribbon (always evaluated in Pine — no toggle, mirror that).
+        # RCI at bar t depends only on the trailing `length` bars, so each
+        # call gets exactly its own trailing window — identical last value
+        # to the full-history series (proven by
+        # tests/test_strategies/test_oleg_vectorized_parity.py::
+        # test_rci_tail_slice_matches_full_series) at a fraction of the
+        # cost under the backtest's growing-window replay.
         if self.use_rci:
-            rci_f = _rci(df["close"], self.rci_fast).iloc[-1]
-            rci_m = _rci(df["close"], self.rci_medium).iloc[-1]
-            rci_s = _rci(df["close"], self.rci_slow).iloc[-1]
+            rci_f = _rci(df["close"].iloc[-self.rci_fast :], self.rci_fast).iloc[-1]
+            rci_m = _rci(
+                df["close"].iloc[-self.rci_medium :], self.rci_medium
+            ).iloc[-1]
+            rci_s = _rci(df["close"].iloc[-self.rci_slow :], self.rci_slow).iloc[-1]
             if not (pd.isna(rci_f) or pd.isna(rci_m) or pd.isna(rci_s)):
                 if (
                     rci_f < self.rci_oversold and rci_m < self.rci_oversold
