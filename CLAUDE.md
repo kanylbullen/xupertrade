@@ -102,7 +102,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 │   │   │   ├── base.py              # Exchange interface (Position, Balance, Order, OrderType)
 │   │   │   ├── paper.py             # in-memory simulated exchange
 │   │   │   └── hyperliquid.py       # live HL via SDK + tenacity retry on reads only
-│   │   ├── strategies/              # 21 strategies (14 Pine ports + 6 new ports + vvv_hedge custom)
+│   │   ├── strategies/              # 22 registered strategies (14 Pine ports + 6 new ports + vvv_hedge, ath_breakout custom) + meta/<name>.json descriptors
 │   │   ├── data/                    # candle feed (REST + WS) with retry/backoff
 │   │   ├── events/                  # Redis pub/sub event bus
 │   │   ├── notify/
@@ -117,8 +117,8 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 │   │   └── db/
 │   │       ├── models.py            # Trade, PositionRecord, EquitySnapshot, StrategyConfig, FundingPayment, BacktestRun
 │   │       └── repo.py              # all SQL + reconcile_positions (closes orphans both sides)
-│   ├── tests/                       # pytest, pytest-asyncio (97 passing, 3 xfailed)
-│   ├── alembic/versions/            # 0001 initial, 0002 state_json, 0003 funding_payments, 0004 backtest_runs
+│   ├── tests/                       # pytest, pytest-asyncio (463 passed, 1 skipped, 3 xfailed as of 2026-08-31)
+│   ├── alembic/versions/            # 16 migrations: 0001 initial → 0016 tenant_admin_limits (see dir for current head)
 │   ├── scripts/migrate.sh
 │   └── Dockerfile
 │
@@ -142,6 +142,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 ├── docker-compose.yml               # postgres + redis + 3 bot containers + dashboard + caddy
 ├── README.md                        # user-facing docs
 ├── .env.example
+├── AGENTS.md                        # fast entry point for coding agents (defers to this file)
 └── CLAUDE.md                        # this file
 ```
 
@@ -516,10 +517,8 @@ None currently.
 
 ### Open — Low
 
-- [ ] **Trades page filters/pagination.** Currently `LIMIT 50`. Add strategy filter, date range, paging.
 - [ ] **Correlation grouping.** `cdc_macd` and `macd_zero` are mathematically near-identical. Tag strategies with a `family` attribute and let `allow_multi_coin=False` extend to family-level conflicts.
 - [ ] **Optimize `oleg_aryukov` for backtest.** Nadaraya-Watson kernel + RCI loops are O(n²). Fine for live (one call per tick) but a 4k-bar backtest hangs >30 min. Vectorize NW using rolling weighted convolution; replace per-bar RCI loop with a vectorized rank-correlation.
-- [ ] **Make `/strategies` page data-driven.** Currently a hardcoded array of 21 strategy descriptors. Should pull names+symbol+timeframe from the bot's `/strategies` endpoint and read description/strengths/weaknesses from a metadata file colocated with each strategy module.
 - [ ] **Surface backtest history in dashboard.** `backtest_runs` table now persists every CLI run. A `/backtests` page would let users compare runs, filter by strategy, and see how parameter changes affect APR/Sharpe over time.
 - [ ] **Suppress Telegram noise on transient HL-fetch failures (strategy ticks).** Bot currently emits `ErrorOccurred` on every strategy tick whose `fetch_candles` fails after retries — this spams Telegram during HL outages even though the bot recovers automatically. Filter by error type before publishing. (Companion fix landed for HODL verdict-recovery noise on `fix/vault-picks-error-event` — strategy-tick path still TODO.)
 
@@ -613,6 +612,10 @@ None currently.
 
 #### Vault scanner Phase 1 (2026-05-05) — first PR-flow feature
 - [x] HyperLiquid vault scanner: daily catalogue poll → coarse pre-filter → per-vault `vaultDetails` fetch → Sharpe/max-DD/multi-period ROI → quality filter → `vault_snapshots` row + `vault_nav_history` append. Telegram fires `vault.qualified` / `vault.disqualified` events on state change with 24h debounce per vault. New `/vaults` dashboard page (sorted by Sharpe) and `vault_picks` HODL signal alongside the others. Owned by the mainnet bot only (single owner; vaults are mainnet-only on HL and the `/vaults` dashboard is pinned to mainnet — moved from testnet 2026-05-13). Quality filter defaults: age ≥ 180d, AUM \$200k–\$20M, ROI 90/180d > 0%, max DD ≤ 25%, Sharpe(180d) > 1.5, manager equity ≥ 5%, fee ≤ 15%. ROI 365d waived for vaults < 365d. — squash-merge `23dd0bf` (PR #1, branch `feat/vault-scanner`). Plan: `docs/plans/vault-scanner.md`. API research: `docs/hyperliquid-vaults-api.md`. 28 new pytest cases (filters / metrics / poller); full suite 133 passed. **First PR-flow feature**: Copilot found 11 issues on first review (catalogue dropouts not disqualified, NAV history not merged into metrics, full-microsecond `snapshot_at` defeating upsert, unguarded casts in `fetch_details`, 48h cutoff hiding everything on missed poll, per-mode duplicate scanning, cooldown bumped on failure, compose `TELEGRAM_EVENTS` overriding .env update, "—d" rendering for null age, follower count under-reports capped vaults, coarse `apr ≤ 0` filter dropping legit qualifiers); all addressed in commit on the branch before merge.
+
+#### Dashboard: trades-page filters + data-driven /strategies (2026-07-29)
+- [x] Trades page filters/pagination — was `LIMIT 50`. Strategy filter, date-range picker, and pagination on `/trades`; filter state is URL-driven so views are shareable/bookmarkable. — squash-merge `2c37e79` (PR #150).
+- [x] Make `/strategies` page data-driven — page no longer carries its hardcoded 21-descriptor array (which had already drifted: `ath_breakout` shipped and traded but was never documented). Strategy prose moved to `bot/hypertrade/strategies/meta/<name>.json` colocated with each module, read via `meta_loader.py`; the bot's `/strategies` endpoint merges metadata with the live registry (live name/symbol/timeframe always win; unreadable meta files are skipped and an undocumented strategy still lists). Coverage test asserts every registered strategy has a meta file. — squash-merge `97ff1d1` (PR #152).
 
 ---
 
@@ -729,7 +732,7 @@ Keep names short but specific: `feat/vault-scanner`, not
 - 1-3 bullets: what this changes and why
 
 ## Test plan
-- [ ] pytest passes (97+ tests)
+- [ ] pytest passes
 - [ ] specific manual checks (e.g. "/hodl page renders new card")
 - [ ] deploy verified (or "deploy after merge")
 
