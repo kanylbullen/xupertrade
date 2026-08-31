@@ -2,6 +2,13 @@
 # Watch a PR for Copilot's automated review and emit the data needed to
 # auto-handle it (fix, push, reply, merge, deploy).
 #
+# STATUS 2026-08-31: currently INERT on this repo. Copilot's PR review
+# stopped posting after PR #134 (2026-05-17); every PR since has zero
+# reviews, so this script polls until timeout and exits 1. Do NOT arm it
+# expecting a review (CLAUDE.md § 7 "Review before merge"). Kept only in
+# case Copilot code review is re-enabled — if that never happens, delete
+# this script.
+#
 # Usage (in CLI):
 #     ./scripts/pr-watch.sh 22
 #
