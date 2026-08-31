@@ -33,10 +33,10 @@ export const db = drizzle(client);
 // Mirror the Python SQLAlchemy models
 
 // tenant_id is NOT NULL on all data tables as of alembic 0011 (Phase 6c
-// PR β). The Drizzle schema mirrors that on the 5 tables this module
+// PR β). The Drizzle schema mirrors that on the 6 tables this module
 // exposes (trades / positions / equity_snapshots / funding_payments /
-// strategy_configs). Other tenant-scoped tables in alembic 0011
-// (backtest_runs / manual_onchain_levels / hodl_purchases /
+// strategy_configs / backtest_runs). The remaining tenant-scoped tables
+// in alembic 0011 (manual_onchain_levels / hodl_purchases /
 // user_vault_entries) are not declared here because the dashboard
 // doesn't query them via Drizzle today — they're read through the
 // bot's API. Add them here if/when a server-component query needs
@@ -123,6 +123,44 @@ export const strategyConfigs = pgTable("strategy_configs", {
   paramsJson: text("params_json").default("{}"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+});
+
+// Backtest history — one row per `python -m hypertrade.backtest` CLI
+// run (alembic 0004; tenant_id added NOT NULL in 0011). Read-only from
+// the dashboard: the bot CLI writes these, the /backtests page reads
+// them. Mirrors bot/hypertrade/db/models.py:BacktestRun. Note the
+// metric columns are FRACTIONS (0.055 = +5.5%) — the bot's CLI
+// multiplies by 100 only when printing; slippage is in bps.
+export const backtestRuns = pgTable("backtest_runs", {
+  id: serial("id").primaryKey(),
+  tenantId: uuid("tenant_id").notNull(),
+  strategyName: varchar("strategy_name", { length: 64 }).notNull(),
+  symbol: varchar("symbol", { length: 16 }).notNull(),
+  timeframe: varchar("timeframe", { length: 8 }).notNull(),
+  leverage: integer("leverage").notNull(),
+  periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+  periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+  days: doublePrecision("days").notNull(),
+  initialEquity: doublePrecision("initial_equity").notNull(),
+  finalEquity: doublePrecision("final_equity").notNull(),
+  totalReturnPct: doublePrecision("total_return_pct").notNull(),
+  apr: doublePrecision("apr").notNull(),
+  sharpe: doublePrecision("sharpe").notNull(),
+  maxDrawdownPct: doublePrecision("max_drawdown_pct").notNull(),
+  numTrades: integer("num_trades").notNull(),
+  numRoundTrips: integer("num_round_trips").notNull(),
+  wins: integer("wins").notNull(),
+  losses: integer("losses").notNull(),
+  winRate: doublePrecision("win_rate").notNull(),
+  feesPaid: doublePrecision("fees_paid").notNull(),
+  positionSizeUsd: doublePrecision("position_size_usd").notNull(),
+  feeRate: doublePrecision("fee_rate").notNull(),
+  slippageBps: doublePrecision("slippage_bps").notNull(),
+  // Bot stamps created_at at the ORM level — alembic 0004 has no
+  // server default, so no `.defaultNow()` here. Dashboard never
+  // inserts, and legacy rows could in theory pre-date the backfill,
+  // hence nullable (matches the migration).
+  createdAt: timestamp("created_at", { withTimezone: true }),
 });
 
 // ─────────────────────────────────────────────────────────────────────

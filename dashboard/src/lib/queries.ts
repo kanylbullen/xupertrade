@@ -1,4 +1,12 @@
-import { db, trades, positions, equitySnapshots, strategyConfigs, fundingPayments } from "./db";
+import {
+  db,
+  trades,
+  positions,
+  equitySnapshots,
+  strategyConfigs,
+  fundingPayments,
+  backtestRuns,
+} from "./db";
 import { desc, eq, and, gte, lt, sql, sum, count } from "drizzle-orm";
 
 import { type Mode } from "./mode";
@@ -361,4 +369,113 @@ export async function getLatestEquity(tenantId: string, mode: Mode = "paper") {
     .orderBy(desc(equitySnapshots.timestamp))
     .limit(1);
   return rows[0] ?? null;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Backtest runs (bot CLI history — /backtests page)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Filters accepted by the Backtests page. Same conventions as
+ * TradeFilters: every field optional, `to` EXCLUSIVE (`created_at < to`)
+ * — the page passes the day after the operator's chosen end date.
+ *
+ * The date bounds apply to when the run was recorded (`created_at`),
+ * NOT the candle window it covered (`period_start`/`period_end`): the
+ * page answers "what did I run lately", not "what ran on this window".
+ */
+export type BacktestRunFilters = {
+  strategy?: string;
+  from?: Date;
+  to?: Date;
+};
+
+function backtestFilterConditions(tenantId: string, f: BacktestRunFilters) {
+  const conditions = [eq(backtestRuns.tenantId, tenantId)];
+  if (f.strategy !== undefined) {
+    conditions.push(eq(backtestRuns.strategyName, f.strategy));
+  }
+  if (f.from !== undefined) conditions.push(gte(backtestRuns.createdAt, f.from));
+  if (f.to !== undefined) conditions.push(lt(backtestRuns.createdAt, f.to));
+  return conditions;
+}
+
+/**
+ * One page of backtest runs matching `filters`, newest first.
+ *
+ * Same `(created_at DESC, id DESC)` ordering as the Trades page: a
+ * `--all` sweep saves one row per strategy in quick succession, so
+ * timestamps collide and the serial id is the tiebreaker that keeps
+ * OFFSET paging total.
+ */
+export async function getBacktestRunsPage(
+  tenantId: string,
+  filters: BacktestRunFilters,
+  limit: number,
+  offset: number,
+) {
+  return db
+    .select()
+    .from(backtestRuns)
+    .where(and(...backtestFilterConditions(tenantId, filters)))
+    .orderBy(desc(backtestRuns.createdAt), desc(backtestRuns.id))
+    .limit(limit)
+    .offset(offset);
+}
+
+/** Total row count for the same filters — drives the pager. */
+export async function countBacktestRuns(
+  tenantId: string,
+  filters: BacktestRunFilters,
+): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(backtestRuns)
+    .where(and(...backtestFilterConditions(tenantId, filters)));
+  return row?.n ?? 0;
+}
+
+/**
+ * Distinct strategy names this tenant has saved runs for, for the
+ * filter dropdown. Same reasoning as getTradedStrategyNames: offer only
+ * values that can actually return rows, not the full registry.
+ */
+export async function getBacktestStrategyNames(
+  tenantId: string,
+): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ name: backtestRuns.strategyName })
+    .from(backtestRuns)
+    .where(eq(backtestRuns.tenantId, tenantId))
+    .orderBy(backtestRuns.strategyName);
+  return rows.map((r) => r.name);
+}
+
+/**
+ * Full run history for ONE strategy, oldest first — feeds the APR /
+ * Sharpe trend chart on /backtests.
+ *
+ * Not date-filtered on purpose: the trend is about the strategy's
+ * whole saved history, including runs older than anything on the
+ * current table page. Newest-first query (same stable tiebreaker)
+ * with the newest cap applied, then reversed in JS — a ≤200-row
+ * reverse is cheaper than maintaining a second ascending query shape.
+ */
+export async function getBacktestTrend(
+  tenantId: string,
+  strategy: string,
+  limit = 200,
+) {
+  const rows = await db
+    .select()
+    .from(backtestRuns)
+    .where(
+      and(
+        eq(backtestRuns.tenantId, tenantId),
+        eq(backtestRuns.strategyName, strategy),
+      ),
+    )
+    .orderBy(desc(backtestRuns.createdAt), desc(backtestRuns.id))
+    .limit(limit);
+  return rows.reverse();
 }
