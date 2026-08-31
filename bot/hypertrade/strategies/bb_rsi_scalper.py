@@ -43,6 +43,7 @@ from hypertrade.strategies.registry import register
 @register
 class BBRsiScalperStrategy(Strategy):
     name = "bb_rsi_scalper"
+    family = "bollinger_band"  # BB-extreme entries: bb_short, bb_rsi_scalper
     symbol = "BTC"
     timeframe = "15m"  # source uses 10m but HL's candleSnapshot doesn't support 10m
     leverage = 1

@@ -35,6 +35,7 @@ from hypertrade.strategies.registry import register
 @register
 class BTCMeanReversionStrategy(Strategy):
     name = "btc_mean_reversion"
+    family = "btc_mean_reversion"
     symbol = "BTC"
     timeframe = "15m"
     leverage = 1

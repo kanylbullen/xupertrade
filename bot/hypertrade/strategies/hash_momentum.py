@@ -32,6 +32,7 @@ from hypertrade.strategies.registry import register
 @register
 class HashMomentumStrategy(Strategy):
     name = "hash_momentum"
+    family = "hash_momentum"
     symbol = "SOL"
     timeframe = "4h"
     leverage = 1

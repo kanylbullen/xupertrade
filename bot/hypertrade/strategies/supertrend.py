@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 @register
 class SuperTrendStrategy(Strategy):
     name = "supertrend"
+    family = "supertrend"  # SuperTrend variants: supertrend, hash_supertrend, pivot_supertrend
     symbol = "BTC"
     timeframe = "1d"
     leverage = 1

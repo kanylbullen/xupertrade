@@ -44,6 +44,7 @@ def _lunar_day(ts_ms: float) -> int:
 @register
 class MoonPhasesStrategy(Strategy):
     name = "moon_phases"
+    family = "moon_phases"
     symbol = "BTC"
     timeframe = "1d"
     leverage = 1

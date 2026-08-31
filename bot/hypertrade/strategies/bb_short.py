@@ -30,6 +30,7 @@ from hypertrade.strategies.registry import register
 @register
 class BBShortStrategy(Strategy):
     name = "bb_short"
+    family = "bollinger_band"  # BB-extreme entries: bb_short, bb_rsi_scalper
     symbol = "SOL"
     timeframe = "1h"
     leverage = 1

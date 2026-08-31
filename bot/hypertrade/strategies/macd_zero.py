@@ -27,6 +27,9 @@ from hypertrade.strategies.registry import register
 @register
 class MACDZeroStrategy(Strategy):
     name = "macd_zero"
+    # Same math as cdc_macd (MACD zero-cross ≡ EMA12/26 cross) — the engine
+    # refuses to hold both at once under allow_multi_coin=False.
+    family = "macd_zero_cross"
     symbol = "BTC"
     timeframe = "1d"
     leverage = 1

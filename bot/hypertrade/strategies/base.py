@@ -11,6 +11,17 @@ class Strategy(ABC):
     name: str = "unnamed"
     symbol: str = "BTC"
     timeframe: str = "4h"
+    # Correlation family (backlog "Correlation grouping"): strategies whose
+    # signal math is near-identical share a `family` so the engine can refuse
+    # to stack them — cdc_macd and macd_zero are both the EMA12/26 cross
+    # (≡ MACD crossing zero) and would otherwise take effectively the same
+    # trade in duplicate. When the allow_multi_coin Redis flag is False, the
+    # runner blocks an OPEN not only when another strategy holds the same
+    # coin (legacy rule) but also when another strategy of the same family
+    # holds a position on ANY coin. A strategy with no known near-duplicate
+    # declares its own name as family; None = no family-level exclusion
+    # (names unknown to the registry keep the legacy per-coin behaviour).
+    family: str | None = None
     # Leverage applied on the exchange for this strategy's positions.
     # 1 = no leverage. Position notional = MAX_POSITION_SIZE_USD * leverage.
     # Bot sets HyperLiquid leverage per coin to the max across strategies

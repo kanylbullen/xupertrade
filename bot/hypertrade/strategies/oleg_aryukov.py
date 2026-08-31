@@ -95,6 +95,7 @@ def _rci(close: pd.Series, length: int) -> pd.Series:
 @register
 class OlegAryukovStrategy(Strategy):
     name = "oleg_aryukov"
+    family = "oleg_aryukov"
     symbol = "ETH"
     timeframe = "1h"
     leverage = 1

@@ -35,6 +35,7 @@ from hypertrade.strategies.registry import register
 @register
 class HashSupertrendStrategy(Strategy):
     name = "hash_supertrend"
+    family = "supertrend"  # SuperTrend variants: supertrend, hash_supertrend, pivot_supertrend
     symbol = "BTC"
     timeframe = "1h"
     leverage = 1

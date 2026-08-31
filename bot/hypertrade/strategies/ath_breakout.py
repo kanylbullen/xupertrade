@@ -45,6 +45,7 @@ from hypertrade.strategies.registry import register
 @register
 class AthBreakoutStrategy(Strategy):
     name = "ath_breakout"
+    family = "ath_breakout"
     symbol = "BTC"
     timeframe = "1d"
     # 2x is the leverage sweet spot per backtest sweep:

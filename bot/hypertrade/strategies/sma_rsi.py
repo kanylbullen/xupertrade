@@ -29,6 +29,7 @@ from hypertrade.strategies.registry import register
 @register
 class SMARSIStrategy(Strategy):
     name = "sma_rsi"
+    family = "sma_rsi"
     symbol = "ETH"
     timeframe = "1d"
     leverage = 1  # source has no leverage input
