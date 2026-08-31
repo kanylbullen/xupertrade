@@ -69,6 +69,7 @@ logger = logging.getLogger(__name__)
 @register
 class VVVHedgeStrategy(Strategy):
     name = "vvv_hedge"
+    family = "vvv_hedge"
     symbol = "VVV"
     timeframe = "4h"
     leverage = 2  # conservative; pushed to HL on bot startup

@@ -25,6 +25,7 @@ from hypertrade.strategies.registry import register
 @register
 class RSIMomentumStrategy(Strategy):
     name = "rsi_momentum"
+    family = "rsi_momentum"
     symbol = "BTC"
     timeframe = "4h"
     leverage = 1  # source has no leverage input

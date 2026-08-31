@@ -4,6 +4,22 @@ from hypertrade.strategies.base import Strategy
 
 _REGISTRY: dict[str, type[Strategy]] = {}
 
+# Correlation families (backlog "Correlation grouping"): strategies whose
+# signal math is near-identical share a `family` (see Strategy.family) so
+# the engine's allow_multi_coin=False gate can refuse to stack them — at
+# most one strategy per family may hold a position, across all coins.
+# Grouped families:
+#   macd_zero_cross — cdc_macd, macd_zero (EMA12/26 cross ≡ MACD zero cross)
+#   supertrend      — supertrend, hash_supertrend, pivot_supertrend
+#   keltner_channel — keltner_breakout, volatility_breakout
+#   bollinger_band  — bb_short, bb_rsi_scalper
+# A strategy with no known near-duplicate declares its own name as family,
+# which keeps the "every registered strategy has a family" invariant
+# meaningful without inventing artificial groupings. ema_crossover is
+# deliberately NOT in macd_zero_cross: it is an EMA-cross too, but 7/19 on
+# 1h with structural-SL exits — correlated, not near-identical, and the two
+# trade different assets at different timescales.
+
 
 def register(cls: type[Strategy]) -> type[Strategy]:
     """Decorator to register a strategy class."""
@@ -22,6 +38,20 @@ def get_strategy(name: str, **kwargs: object) -> Strategy:
 def list_strategies() -> list[str]:
     """List all registered strategy names."""
     return list(_REGISTRY.keys())
+
+
+def get_strategy_family(name: str) -> str | None:
+    """Correlation family for a registered strategy, or None when unknown.
+
+    Used by the runner's allow_multi_coin=False gate: when the flag is off,
+    at most one strategy per family may hold a position, across all coins
+    (see Strategy.family). Names not in the registry return None — such
+    signals keep the legacy per-coin behaviour only.
+    """
+    cls = _REGISTRY.get(name)
+    if cls is None:
+        return None
+    return getattr(cls, "family", None)
 
 
 # Import strategy modules to trigger registration

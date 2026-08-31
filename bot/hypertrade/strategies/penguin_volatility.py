@@ -39,6 +39,9 @@ from hypertrade.strategies.registry import register
 @register
 class PenguinVolatilityStrategy(Strategy):
     name = "penguin_volatility"
+    # BB/KC width-ratio squeeze-state machine — related to the KC/BB
+    # breakout families but distinct entry math.
+    family = "volatility_squeeze"
     symbol = "ETH"
     timeframe = "1h"
     leverage = 1

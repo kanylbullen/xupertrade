@@ -31,6 +31,9 @@ from hypertrade.strategies.registry import register
 @register
 class EMACrossoverStrategy(Strategy):
     name = "ema_crossover"
+    # EMA cross like cdc_macd/macd_zero, but 7/19 on 1h with structural-SL
+    # exits — correlated, not near-identical, so its own family.
+    family = "ema_cross"
     symbol = "BTC"
     timeframe = "1h"
     leverage = 1

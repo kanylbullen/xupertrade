@@ -71,6 +71,7 @@ from hypertrade.strategies.registry import register
 @register
 class QullamagiBreakoutStrategy(Strategy):
     name = "qullamagi_breakout"
+    family = "qullamagi_breakout"
     symbol = "ETH"
     timeframe = "1h"
     leverage = 1

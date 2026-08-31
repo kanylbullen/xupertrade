@@ -57,6 +57,7 @@ from hypertrade.strategies.registry import register
 @register
 class KalmanBreakoutStrategy(Strategy):
     name = "kalman_breakout"
+    family = "kalman_breakout"
     symbol = "ETH"
     timeframe = "1h"
     leverage = 1

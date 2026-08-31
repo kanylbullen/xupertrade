@@ -26,6 +26,7 @@ from hypertrade.events.types import (
 )
 from hypertrade.exchange.base import Exchange, OrderType
 from hypertrade.strategies.base import Strategy
+from hypertrade.strategies.registry import get_strategy_family
 
 logger = logging.getLogger(__name__)
 
@@ -661,7 +662,8 @@ class EngineRunner:
     async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> bool:
         """Execute a signal end-to-end. Returns True on full success
         (order filled + DB written + parity OK), False on any abort
-        (risk-blocked, kill-switch, order rejected, close-size unresolved,
+        (risk-blocked, kill-switch, coin/family conflict under
+        allow_multi_coin=False, order rejected, close-size unresolved,
         cap-breached). Callers performing flip-close-then-open MUST check
         the close return value — opening a new opposite position when the
         close failed leaves the DB and exchange permanently divergent.
@@ -761,7 +763,8 @@ class EngineRunner:
                         return False
 
             # Cross-strategy check: block if another strategy already holds
-            # this coin and allow_multi_coin is disabled.
+            # this coin and allow_multi_coin is disabled. The same flag also
+            # enforces the family-level rule below (correlation grouping).
             if self.control and self.repo:
                 allow_multi = await self.control.get_allow_multi_coin()
                 if not allow_multi:
@@ -777,6 +780,35 @@ class EngineRunner:
                             signal.symbol,
                         )
                         return False
+
+                    # Family-level correlation guard: strategies tagged with
+                    # the same `family` are near-identical ports of the same
+                    # signal math (cdc_macd and macd_zero are both the
+                    # EMA12/26 cross ≡ MACD-zero-cross on 1d). With
+                    # allow_multi_coin disabled, at most ONE strategy per
+                    # family may hold a position — across ALL coins — because
+                    # on different coins the two entries would still be
+                    # effectively the same trade in duplicate. Strategies
+                    # whose name is unknown to the registry (family=None)
+                    # keep the legacy per-coin behaviour only.
+                    family = get_strategy_family(signal.strategy_name)
+                    if family:
+                        for held in await self.repo.get_open_positions():
+                            if held.strategy_name == signal.strategy_name:
+                                continue
+                            if get_strategy_family(held.strategy_name) != family:
+                                continue
+                            logger.info(
+                                "[%s] Skipping %s %s — family '%s' already "
+                                "exposed via %s on %s (allow_multi_coin=False)",
+                                signal.strategy_name,
+                                signal.action.value,
+                                signal.symbol,
+                                family,
+                                held.strategy_name,
+                                held.symbol,
+                            )
+                            return False
 
             # Total exposure cap: block if opening this would exceed the
             # configured margin sum across all open strategy positions.

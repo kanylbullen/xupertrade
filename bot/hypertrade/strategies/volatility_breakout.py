@@ -46,6 +46,7 @@ from hypertrade.strategies.registry import register
 @register
 class VolatilityBreakoutStrategy(Strategy):
     name = "volatility_breakout"
+    family = "keltner_channel"  # KC breakouts: keltner_breakout, volatility_breakout
     symbol = "ETH"
     timeframe = "1h"
     leverage = 2  # source: input.int(2, ...)

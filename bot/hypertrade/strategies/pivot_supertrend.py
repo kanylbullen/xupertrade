@@ -107,6 +107,7 @@ def _compute_pivot_supertrend(df: pd.DataFrame) -> pd.DataFrame:
 @register
 class PivotSuperTrendStrategy(Strategy):
     name = "pivot_supertrend"
+    family = "supertrend"  # SuperTrend variants: supertrend, hash_supertrend, pivot_supertrend
     symbol = "BTC"
     timeframe = "4h"
     leverage = 1

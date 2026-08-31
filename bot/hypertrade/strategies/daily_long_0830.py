@@ -25,6 +25,7 @@ from hypertrade.strategies.registry import register
 @register
 class DailyLong0830Strategy(Strategy):
     name = "daily_long_0830"
+    family = "daily_long_0830"
     symbol = "BTC"
     timeframe = "15m"
     leverage = 1
