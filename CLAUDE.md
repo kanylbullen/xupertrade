@@ -520,7 +520,6 @@ None currently.
 - [ ] **Correlation grouping.** `cdc_macd` and `macd_zero` are mathematically near-identical. Tag strategies with a `family` attribute and let `allow_multi_coin=False` extend to family-level conflicts.
 - [ ] **Optimize `oleg_aryukov` for backtest.** Nadaraya-Watson kernel + RCI loops are O(n²). Fine for live (one call per tick) but a 4k-bar backtest hangs >30 min. Vectorize NW using rolling weighted convolution; replace per-bar RCI loop with a vectorized rank-correlation.
 - [ ] **Surface backtest history in dashboard.** `backtest_runs` table now persists every CLI run. A `/backtests` page would let users compare runs, filter by strategy, and see how parameter changes affect APR/Sharpe over time.
-- [ ] **Suppress Telegram noise on transient HL-fetch failures (strategy ticks).** Bot currently emits `ErrorOccurred` on every strategy tick whose `fetch_candles` fails after retries — this spams Telegram during HL outages even though the bot recovers automatically. Filter by error type before publishing. (Companion fix landed for HODL verdict-recovery noise on `fix/vault-picks-error-event` — strategy-tick path still TODO.)
 
 ### Done
 
@@ -616,6 +615,9 @@ None currently.
 #### Dashboard: trades-page filters + data-driven /strategies (2026-07-29)
 - [x] Trades page filters/pagination — was `LIMIT 50`. Strategy filter, date-range picker, and pagination on `/trades`; filter state is URL-driven so views are shareable/bookmarkable. — squash-merge `2c37e79` (PR #150, branch `feat/trades-filters-pagination`).
 - [x] Make `/strategies` page data-driven — page no longer carries its hardcoded 21-descriptor array (which had already drifted: `ath_breakout` shipped and traded but was never documented). Strategy prose moved to `bot/hypertrade/strategies/meta/<name>.json` colocated with each module, read via `meta_loader.py`; the bot's `/strategies` endpoint merges metadata with the live registry (live name/symbol/timeframe always win; unreadable meta files are skipped and an undocumented strategy still lists). Coverage test asserts every registered strategy has a meta file. — squash-merge `97ff1d1` (PR #152, branch `refactor/data-driven-strategies`).
+
+#### Telegram noise: transient HL-fetch failures on strategy ticks (2026-08-31)
+- [x] **Suppress Telegram noise on transient HL-fetch failures (strategy ticks).** Replaces both failure modes the strategy-tick path had: per-strategy-per-tick `ErrorOccurred` publishing (~22 events/min during the 2026-05-09 HL outage) and the PR-#24 error-type filter's full suppression (which left a multi-hour outage Telegram-silent — the empty-DataFrame signature `fetch_candles` returns after its tenacity retries never even reached the filter). Now both failure signatures (empty candles in `_run_strategy`, transient exceptions in the tick catch-all via the reused `_is_transient_network_error` predicate) feed an outage-window aggregator in `EngineRunner._settle_fetch_outage()`: a window clearing before `FETCH_OUTAGE_ALERT_SECONDS` (default 600) never notifies; a window persisting ≥ threshold emits exactly ONE `ErrorOccurred` (`strategy="candle-fetch"`) summarizing affected strategies; recovery closes the window log-only. Non-transient errors still publish immediately. Companion fix for HODL verdict-recovery noise was `fix/vault-picks-error-event` (PR #98). Tests: `bot/tests/test_engine/test_fetch_outage_alert.py` (10 cases). — branch `fix/fetch-outage-dedup` (squash hash + PR number recorded at merge).
 
 ---
 
