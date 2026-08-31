@@ -205,6 +205,17 @@ class Settings(BaseSettings):
     hl_init_retry_attempts: int = 5
     hl_init_retry_backoff_seconds: float = 2.0
 
+    # Transient candle-fetch failure aggregation (strategy ticks). A
+    # fetch failure is NOT published per strategy per tick — that spammed
+    # Telegram at ~22 events/min during the 2026-05-09 HL outage — nor
+    # fully suppressed — that left a multi-hour outage Telegram-silent.
+    # Instead failures accumulate into an outage window in the runner:
+    # a window persisting ≥ this many seconds emits exactly ONE error
+    # event summarizing the affected strategies; shorter windows stay
+    # Telegram-silent (the bot auto-recovers on the next tick). 0
+    # disables the persistent-outage alert entirely.
+    fetch_outage_alert_seconds: int = 600
+
     # API authentication
     api_key: str = ""  # if set, all POST endpoints require X-Api-Key header
 

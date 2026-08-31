@@ -134,6 +134,24 @@ class EngineRunner:
         # `notional / new_leverage`. On a 10× bump that's 10× the
         # expected margin → liquidation path.
         self._pushed_leverage: dict[str, int] = {}
+        # Transient fetch-failure outage window (CLAUDE.md backlog
+        # Open-Low: "Suppress Telegram noise on transient HL-fetch
+        # failures"). Publishing per strategy per tick spammed Telegram
+        # at ~22 events/min during the 2026-05-09 HL outage; fully
+        # suppressing instead left a multi-hour outage Telegram-silent.
+        # Now per-tick failures accumulate into an outage window:
+        #   - window clears before FETCH_OUTAGE_ALERT_SECONDS → no
+        #     notification at all (bot auto-recovers, logs carry detail)
+        #   - window persists ≥ threshold → exactly ONE ErrorOccurred
+        #     per window summarizing the affected strategies
+        #   - recovery closes the window log-only (one ping per window)
+        # `_tick_fetch_failures` is the per-tick scratch set filled by
+        # _run_strategy / the tick catch-all and drained by
+        # _settle_fetch_outage() after each strategy loop.
+        self._tick_fetch_failures: set[str] = set()
+        self._outage_start: float | None = None  # first failure of the open window
+        self._outage_affected: set[str] = set()  # strategies failed during the window
+        self._outage_alerted: bool = False  # one-alert-per-window latch
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -436,22 +454,32 @@ class EngineRunner:
                     continue
                 except Exception as e:
                     logger.exception("Error running strategy %s", strategy.name)
-                    # Skip Telegram alert for transient HL/network errors
-                    # — bot recovers on next tick automatically and we
-                    # don't want to flood during outages (CLAUDE.md backlog
-                    # Open-Low: "Suppress Telegram noise on transient
-                    # HL-fetch failures"). Heartbeat staleness is the
-                    # signal for monitoring real outages.
-                    if (
-                        self.event_bus
-                        and not _is_transient_network_error(e)
-                    ):
+                    # Filter by error type before publishing (CLAUDE.md
+                    # backlog Open-Low: "Suppress Telegram noise on
+                    # transient HL-fetch failures"; § 6 "Telegram is for
+                    # humans"). A transient HL/network error recovers on
+                    # the next tick — publishing per strategy per tick
+                    # spammed ~22 events/min during the 2026-05-09
+                    # outage. Route it into the fetch-outage aggregator
+                    # instead: a window persisting ≥
+                    # FETCH_OUTAGE_ALERT_SECONDS still alerts exactly
+                    # once (see _settle_fetch_outage). Non-transient
+                    # errors are real bugs → publish immediately,
+                    # unchanged.
+                    if _is_transient_network_error(e):
+                        self._tick_fetch_failures.add(strategy.name)
+                    elif self.event_bus:
                         await self.event_bus.publish(
                             ErrorOccurred(
                                 strategy=strategy.name,
                                 message="Strategy tick failed",
                             )
                         )
+            # Aggregate this tick's fetch failures into the outage
+            # window; alert once if the window persists. Runs after the
+            # strategy loop (and only on non-paused ticks) so a paused
+            # bot freezes — not closes — an open window.
+            await self._settle_fetch_outage()
 
         # Update unrealized P&L for open positions (always, even when paused)
         if self.repo:
@@ -481,6 +509,95 @@ class EngineRunner:
                 )
         except Exception:
             logger.exception("Failed to snapshot equity")
+
+    async def _settle_fetch_outage(self, now: float | None = None) -> None:
+        """Aggregate this tick's transient fetch failures into outage
+        windows and decide whether Telegram should hear about it.
+
+        Rate-limit/dedup policy (CLAUDE.md § 6 "Telegram is for humans"):
+          - a window that clears before
+            `settings.fetch_outage_alert_seconds` produces NO
+            notification — the bot auto-recovers on the next tick and
+            the per-strategy warning/error logs are the diagnostic trail;
+          - a window persisting ≥ the threshold produces EXACTLY ONE
+            ErrorOccurred per window, summarizing every strategy
+            affected so far, so a genuine outage still reaches Telegram
+            while it is ongoing (not just after it ends);
+          - recovery (a tick with zero fetch failures) closes the
+            window with a log summary only — never a second
+            notification.
+
+        Called from tick() after the strategy loop; only non-paused
+        ticks settle, so a paused bot freezes (doesn't close) an open
+        window. `now` is injectable for deterministic tests.
+        """
+        if now is None:
+            now = time.time()
+        failures = self._tick_fetch_failures
+        self._tick_fetch_failures = set()
+
+        if not failures:
+            if self._outage_start is None:
+                return  # quiet tick, no window open
+            # Recovery: first tick with zero fetch failures closes the
+            # window. Log-only — the user was pinged at most once for
+            # this window (and not at all if it was a short blip), so
+            # pinging the recovery would double the noise for zero info.
+            logger.info(
+                "Candle-fetch outage window closed after %.0fs — "
+                "affected strategies (%d): %s%s",
+                now - self._outage_start,
+                len(self._outage_affected),
+                ", ".join(sorted(self._outage_affected)) or "none",
+                " — outage alert was sent"
+                if self._outage_alerted
+                else " — no alert (recovered before threshold)",
+            )
+            self._outage_start = None
+            self._outage_affected = set()
+            self._outage_alerted = False
+            return
+
+        if self._outage_start is None:
+            self._outage_start = now
+            self._outage_affected = set()
+            self._outage_alerted = False
+            logger.info(
+                "Candle-fetch outage window opened — failing this tick: %s",
+                ", ".join(sorted(failures)),
+            )
+        self._outage_affected.update(failures)
+
+        threshold = settings.fetch_outage_alert_seconds
+        if (
+            threshold > 0
+            and not self._outage_alerted
+            and (now - self._outage_start) >= threshold
+        ):
+            # Latch: exactly one notification per outage window, no
+            # matter how long it lasts or how many strategies join it.
+            self._outage_alerted = True
+            names = ", ".join(sorted(self._outage_affected))
+            summary = (
+                f"Candle fetch / network failures persisting for "
+                f"{int(now - self._outage_start)}s across "
+                f"{len(self._outage_affected)} strategy(ies): {names}. "
+                f"The bot retries every tick and recovers on its own "
+                f"once the exchange is back; investigate if it lasts "
+                f"much longer."
+            )
+            logger.warning(
+                "[%s] fetch-outage alert (one per window): %s",
+                settings.exchange_mode,
+                summary,
+            )
+            if self.event_bus:
+                try:
+                    await self.event_bus.publish(
+                        ErrorOccurred(strategy="candle-fetch", message=summary)
+                    )
+                except Exception:
+                    logger.exception("fetch-outage: event publish failed")
 
     async def _flat_all_positions(self) -> None:
         """Close every open position with a market order."""
@@ -616,6 +733,13 @@ class EngineRunner:
         candles = await fetch_candles(strategy.symbol, strategy.timeframe)
         if candles.empty:
             logger.warning("No candle data for %s %s", strategy.symbol, strategy.timeframe)
+            # fetch_candles swallows network/5xx errors after its 3
+            # tenacity retries and returns an empty frame — this IS the
+            # fetch-failure signature during an HL outage (only bare
+            # TimeoutError propagates). Record it for the outage-window
+            # aggregator so a persistent outage still alerts once (see
+            # _settle_fetch_outage) instead of staying fully silent.
+            self._tick_fetch_failures.add(strategy.name)
             return
 
         # Update exchange price (use latest/forming candle for real-time pricing)
