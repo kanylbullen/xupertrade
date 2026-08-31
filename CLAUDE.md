@@ -891,7 +891,7 @@ The agent **recommends** disable, the user **decides** disable. Disable is done 
 - **Trade:** a row in `trades` table representing a single fill (open or close).
 - **Equity snapshot:** total account value at a point in time, written every tick.
 - **Reconcile:** the operation that compares DB open positions to exchange positions and closes DB orphans. See `Repository.reconcile_positions()`.
-- **Allow_multi_coin:** Redis flag. When false (default), only one strategy can hold a position per coin. Enforced in `runner._execute_signal()`.
+- **Allow_multi_coin:** Redis flag. When false (default), only one strategy can hold a position per coin, and at most one strategy per `family` may hold a position across all coins (correlation grouping — e.g. cdc_macd and macd_zero are both the EMA12/26 ≡ MACD-zero-cross signal and never stack). Enforced in `runner._execute_signal()`; families are declared on the strategy classes and resolved via `registry.get_strategy_family()`.
 - **Flip-detect:** Engine logic that synthesizes a CLOSE signal when a strategy emits OPEN_X while DB shows the opposite side open for that strategy. Prevents HL netting from leaving a partial-direction position.
 - **Export_state / restore_from_json:** Strategy-level methods that serialize internal state (SL, TP, trail, entry) to `positions.state_json` at signal time and read it back verbatim on bot restart. Eliminates SL drift across restarts. Implemented on all 8 stateful strategies.
 - **Self-signed default:** When TLS is enabled but Let's Encrypt isn't configured (or fails), Caddy issues a cert from its internal CA for `CADDY_HOST`. Browser warns once, user accepts. Auth cookies never cross the network in cleartext.
