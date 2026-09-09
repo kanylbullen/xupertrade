@@ -58,11 +58,14 @@ Never bypass with `--no-verify` unless verified false positive (CLAUDE.md § 0).
 5. **Commit** — Conventional-Commit message + `Co-Authored-By:` line (CLAUDE.md § 7).
 6. **Push + open PR** — `gh pr create --fill --base master` with the
    `## Summary` / `## Test plan` / `## Notes for reviewer` template (CLAUDE.md § 7).
-7. **Copilot review** — one-shot, posted only at PR open (no re-review on
-   pushes). Arm `scripts/pr-watch.sh <PR>`; classify and fix or reply inline
-   to every comment; never merge with unaddressed bug-flag comments.
+7. **Review before merge** — there is NO automated code reviewer (the
+   Copilot PR review stopped posting after 2026-05-17). Zero comments on
+   a PR means unreviewed, not approved: get a human review or run the
+   repo-native `.github/review-team/` reviewer fleet and triage every
+   finding; if no review is available, leave the PR open.
    Details: CLAUDE.md § 7.
-8. **Merge** — `gh pr merge --squash --delete-branch`.
+8. **Merge** — `gh pr merge --squash --delete-branch`, only after step 7
+   is satisfied.
 
 ## Guardrails (hard rules)
 
@@ -72,7 +75,10 @@ Never bypass with `--no-verify` unless verified false positive (CLAUDE.md § 0).
 - **Merge gates:** bot changes → `pytest` green. Dashboard changes →
   `vitest` + `build` green. There is no test/build CI — the local suite is
   the gate. Server-side checks that do run on every PR: gitleaks
-  secret-scan (`.github/workflows/secret-scan.yml`) and CodeQL.
+  secret-scan (`.github/workflows/secret-scan.yml`) and CodeQL — both
+  security scans, neither is a code review. **No automated code review
+  exists**: a PR with zero review comments is unreviewed, not approved
+  (CLAUDE.md § 7).
 - Never bypass the pre-commit hook.
 
 ## Key commands
@@ -103,7 +109,10 @@ data and points at the docs in `node_modules/next/dist/docs/`.
 
 - [ ] Changes committed on the task branch, pushed, PR opened.
 - [ ] Gates green (pytest / vitest + build, as applicable).
-- [ ] Copilot comments addressed (replied inline + fixed or dismissed).
+- [ ] Review handled before merge: a review pass happened (human, or the
+      `.github/review-team/` fleet) and every finding is fixed or replied
+      to. Zero comments on a PR = unreviewed, not done — leave it open
+      (CLAUDE.md § 7).
 
 CLAUDE.md § 5 backlog updates (move item to Done + squash-commit hash) and
 deployment happen **at merge time** — not on the task branch.

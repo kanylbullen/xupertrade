@@ -693,13 +693,12 @@ the change has any risk of regression.
 8. Push: git push -u origin <branch>
 9. Open PR: gh pr create --fill --base master
    Use a HEREDOC body with: ## Summary, ## Test plan, ## Notes for reviewer.
-10. Wait for GitHub Copilot's automated review to post (~60s after open).
-    - Read every comment Copilot leaves.
-    - Address what's worth addressing (real bugs, security, clarity).
-    - Reply inline (`gh api ...pulls/N/comments/<id>/replies`) and push
-      fixes. Copilot does NOT re-review on subsequent pushes — its only
-      pass is on initial PR open. Don't wait for a second review.
-11. After all Copilot comments are resolved (replied + fixed), merge:
+10. Get the PR reviewed before merging — there is NO automated code
+    reviewer (see "Review before merge" below). Zero comments means the
+    PR is unreviewed, not approved: request a human review or run the
+    repo-native `.github/review-team/` reviewer fleet, then triage every
+    finding (fix or reply).
+11. Merge once review is done and findings addressed:
     gh pr merge --squash --delete-branch
 12. Pull master locally; deploy to server with standard command.
 13. Verify (logs clean, dashboard correct, parity check).
@@ -757,26 +756,46 @@ Multiple commits on a branch don't need to be perfectly clean —
 `gh pr merge --squash` collapses them into one with the PR title +
 description as the merged commit.
 
-### Working with Copilot review
+### Review before merge — there is no automated code reviewer
 
-GitHub Copilot's PR review (auto-enabled on this repo) posts within
-~60s of **opening** the PR. It does NOT re-review on subsequent
-pushes — its only pass is on initial open. Treat it as a one-shot
-pair-programmer:
+**Measured 2026-08-31** (`gh pr view <N> --json statusCheckRollup` on
+recent PRs): the only checks that run on every PR are
 
-- **Real bugs** — fix in a follow-up commit on the branch, push, then
-  reply inline with the fix-commit hash so the comment shows resolved.
-- **Style nits** — fix or dismiss with reasoning in a reply.
-- **Spurious flags** (e.g. "this could throw" on already-handled cases)
-  — leave a one-line reply explaining; don't waste cycles arguing.
-- **Don't merge with unaddressed bug-flag comments** even if you
-  disagree — at minimum reply explaining why you're proceeding.
+- `gitleaks` — secret scan (`.github/workflows/secret-scan.yml`)
+- GitHub code scanning, CodeQL default setup (configured in repo
+  settings; no workflow file in the repo): `Analyze (actions)`,
+  `Analyze (javascript-typescript)`, `Analyze (python)`
 
-If Copilot posts no comments within ~5 min of PR open, it's done —
-proceed to merge. After fixing comments and pushing, do NOT wait for a
-second review — there won't be one.
+Both are security/static scans. **Nothing on GitHub reviews the code.**
 
-Reply to a specific comment:
+Copilot's PR review was active on this repo, then silently stopped:
+the last Copilot review landed on PR #134 (2026-05-17), and
+every PR since (#135 → #160 as of 2026-08-31) has zero reviews. The
+previous "wait ~60s for Copilot, then merge" instructions were removed
+2026-08-31 because an agent following them read the absence of Copilot
+comments as approval and merged five PRs (#156–#160) with no code
+review at all. Absence of review comments is not a signal — it only
+means no reviewer has looked.
+
+**Merge rule: a PR with no review is unreviewed, not approved.** Before
+`gh pr merge`, one of these must be true:
+
+1. **A human reviewed the diff** — approve, request-changes, or inline
+   comments that are all addressed (fix or reply, triage below).
+2. **An explicit agent review pass ran and its findings were triaged.**
+   The repo ships repo-native reviewer prompts for the `review-team`
+   skill in `.github/review-team/` (11 lenses, added in PR #156). Run
+   it, classify every finding (real bug / style nit / spurious), fix or
+   reply, and record in the PR that the fleet pass happened.
+3. **The operator explicitly waived review** for a trivial change —
+   the operator's call, same spirit as the direct-to-master exceptions.
+
+If no review is available, **leave the PR open** (the Kanban card stays
+in review). Do not merge to unblock. The local gates remain mandatory
+but are not sufficient: `pytest` / `vitest` + `build` green proves the
+tests pass, not that the code is right.
+
+Reply to an inline review comment (any reviewer):
 ```
 gh api -X POST repos/<owner>/<repo>/pulls/<N>/comments/<comment-id>/replies \
   -f body="..."
@@ -786,42 +805,10 @@ List comment IDs:
 gh api repos/<owner>/<repo>/pulls/<N>/comments --jq '.[] | {id, path, line}'
 ```
 
-#### Auto-cycle: scripts/pr-watch.sh
-
-Default workflow for the agent: after `gh pr create`, immediately arm
-the watcher via Bash `run_in_background`:
-```
-./scripts/pr-watch.sh <PR_NUMBER>
-```
-
-The script polls Copilot's review (handles BOTH bot user-logins —
-`copilot-pull-request-reviewer[bot]` for the review object,
-`Copilot` for inline comments — easy to get wrong). Single completion
-notification dumps:
-- `COPILOT_REVIEW_READY pr=N comments=K` header
-- Review summary (first ~50 lines of body)
-- One `===COMMENT id=N path=F:L ===` block per actionable Copilot
-  comment (replies / human comments are filtered out)
-
-When the notification fires, the agent:
-1. Reads the dump from the task output file
-2. For each `===COMMENT===` block: classifies (real bug / style nit /
-   spurious) and applies the fix
-3. Runs `pytest` — **always**, even if `comments=0`. There is no test/build
-   CI (only gitleaks + CodeQL run server-side), so the suite is the merge gate.
-4. Commits + pushes the fix-bundle (skip if no fixes were needed)
-5. Replies inline to each addressed comment via `gh api`
-6. Merges via `gh pr merge --squash --delete-branch`
-7. Deploys via the standard SSH command
-
-Whole cycle (open → fix → merge → deploy) runs without operator
-prompting between steps. The user only sees the final "deployed"
-notification or an interrupt request if something genuinely surprising
-comes up.
-
-If `comments=0` in the dump: review is clean — skip steps 2, 4, 5
-(no fixes to apply, no commit to push, nothing to reply to) but
-**still run pytest** before merging.
+`scripts/pr-watch.sh` polls for a Copilot review and is currently inert
+on this repo — no Copilot review will arrive, so it just times out. It
+is kept only in case Copilot code review is re-enabled; if that
+happens, update this section first, then re-arm the script.
 
 ### When to ask the user vs. just do it
 
