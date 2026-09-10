@@ -32,7 +32,7 @@ separate release cadence to track.
 
 Use **GitHub's Private Vulnerability Reporting** for this repo:
 
-1. Go to the repo's [Security tab](https://github.com/kanylbullen/hypertrade/security)
+1. Go to the repo's [Security tab](https://github.com/kanylbullen/xupertrade/security)
 2. Click **Report a vulnerability**
 3. Describe the issue with enough detail to reproduce
 
