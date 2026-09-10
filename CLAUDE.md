@@ -88,7 +88,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 ## 2. Repo layout (the parts that matter)
 
 ```
-~/hypertrade/
+~/xupertrade/
 ├── bot/
 │   ├── hypertrade/
 │   │   ├── main.py                  # entry point — auto-instantiates every registered strategy
@@ -152,9 +152,9 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 
 ## 3. Operating environment
 
-- **Local working tree:** `~/hypertrade/` (Linux, x86_64).
+- **Local working tree:** `~/xupertrade/` (Linux, x86_64).
 - **Remote server:** `root@$DEPLOY_HOST` at `$DEPLOY_IP`, code at `/opt/hypertrade/`. SSH key: `~/.ssh/hypertrade`. Always log in as `root`. Concrete values for the maintainer's deployment are in their local `~/.bashrc` / SSH config — **never commit them here**.
-- **Git remote:** `https://github.com/kanylbullen/hypertrade.git`, branch `master`.
+- **Git remote:** `https://github.com/kanylbullen/xupertrade.git`, branch `master`.
 - **Postgres:** runs in compose, published on **`127.0.0.1:5432` only**.
   Not reachable from the LAN. Use `docker compose exec -T postgres psql -U
   postgres -d hypertrade`, or tunnel for a GUI client:
