@@ -773,6 +773,29 @@ def _control_routes(
     app.router.add_route("OPTIONS", "/api/control/{tail:.*}", options_handler)
 
 
+_QUIET_ACCESS_LOG_PATHS = frozenset({"/api/control/heartbeat", "/health"})
+
+
+class _QuietHeartbeatAccessLogger(web.AccessLogger):
+    """Access logger that skips successful heartbeat/health probes.
+
+    The dashboard watchdog polls `/api/control/heartbeat` (and `/health`)
+    every HEARTBEAT_WATCHDOG_POLL_SECONDS (60s default) per bot — pure
+    poll noise at 2xx, no signal. Together with the per-strategy candle
+    line in engine/runner.py this was the other half of the ~1,000
+    lines/hour per bot found in bot/reports/analysis-2026-09-15.md § 1.
+    Any non-2xx response on these paths (auth failure, 5xx) DOES
+    indicate a problem, so it still logs — only the successful,
+    expected-every-poll case is silenced. Every other route logs
+    unconditionally via the normal aiohttp access log.
+    """
+
+    def log(self, request: web.BaseRequest, response: web.StreamResponse, time: float) -> None:
+        if request.path in _QUIET_ACCESS_LOG_PATHS and 200 <= response.status < 300:
+            return
+        super().log(request, response, time)
+
+
 def create_app(
     control: BotControl | None = None,
     exchange: Exchange | None = None,
@@ -813,7 +836,7 @@ async def start_api_server(
         repo=repo,
         telegram=telegram,
     )
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log_class=_QuietHeartbeatAccessLogger)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()

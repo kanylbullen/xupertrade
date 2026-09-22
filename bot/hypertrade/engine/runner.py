@@ -745,7 +745,13 @@ class EngineRunner:
 
         # Update exchange price (use latest/forming candle for real-time pricing)
         latest_price = candles["close"].iloc[-1]
-        logger.info("[%s] %s %s — %d candles, price: $%.2f", strategy.name, strategy.symbol, strategy.timeframe, len(candles), latest_price)
+        # DEBUG not INFO: one line per strategy per tick (22 strategies x
+        # every 60s) was ~1,000 lines/hour per bot and the single biggest
+        # log-volume source (bot/reports/analysis-2026-09-15.md § 1). The
+        # "Tick started" summary line above and every signal/open/close/
+        # skip/reconcile line stay at INFO — those are the API (CLAUDE.md
+        # § 6 "Logs are the API"); this one is per-tick telemetry.
+        logger.debug("[%s] %s %s — %d candles, price: $%.2f", strategy.name, strategy.symbol, strategy.timeframe, len(candles), latest_price)
         if hasattr(self.exchange, "set_price"):
             self.exchange.set_price(strategy.symbol, latest_price)
 
