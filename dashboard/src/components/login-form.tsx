@@ -2,19 +2,12 @@
 
 import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
-
-/** Reject hostile or non-sensical redirect targets. Must be a same-origin
- *  app path that won't bounce the user straight back to /login. */
-function safeNext(raw: string): string {
-  if (!raw || !raw.startsWith("/")) return "/";
-  // No protocol-relative or absolute URLs
-  if (raw.startsWith("//")) return "/";
-  // Don't loop back to the login page itself
-  if (raw === "/login" || raw.startsWith("/login?")) return "/";
-  // Don't redirect into API routes — they aren't user-facing pages
-  if (raw.startsWith("/api/")) return "/";
-  return raw;
-}
+// Shared with the server-side OIDC redirect path. This file used to
+// carry a second copy of these rules, which meant the `/\evil.com`
+// open redirect had to be fixed in two places — and `window.location
+// .href` normalises the backslash exactly like `new URL` does, so the
+// client copy was just as exploitable.
+import { safeNext } from "@/lib/safe-next";
 
 export function LoginForm({
   next,
