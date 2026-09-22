@@ -113,13 +113,10 @@ describe("getAuthConfig", () => {
 
   it("falls back to oidc when the mode key is gone but Phase re-seeded OIDC", async () => {
     clearAuthEnv();
-    // Host is `idp.*` on purpose. The repo's gitleaks rule
-    // `operator-service-subdomain` reports the bare subdomain word as
-    // the secret, while its RFC 2606 allowlist is written against the
-    // full hostname — so the documentation carve-out never actually
-    // applies, and any newly added line using one of those words as a
-    // subdomain fails the scan. `idp` says the same thing and is not
-    // one of them.
+    // `idp` rather than `auth` as the subdomain: it says the same
+    // thing without needing the gitleaks `operator-service-subdomain`
+    // carve-out at all. (That carve-out was dead until the companion
+    // commit on this branch fixed it — see `.gitleaks.toml`.)
     process.env.OIDC_ISSUER = "https://idp.example.com/";
     process.env.OIDC_CLIENT_ID = "client-id";
     const { client } = makeRedisStub([
