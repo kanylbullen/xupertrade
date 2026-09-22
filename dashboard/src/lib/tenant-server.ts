@@ -52,6 +52,12 @@ export async function requireTenantServer(): Promise<Tenant> {
   // mode (no auth set up). Resolve the operator tenant — the only
   // sensible identity in a deployment with auth turned off.
   const cfg = await fetchAuthConfig().catch(() => null);
+  // SECURITY: mirror proxy.ts's locked branch. proxy.ts redirects
+  // before a server component runs, but this helper is the last line
+  // of defence for any path the matcher misses — and the operator
+  // tenant it would otherwise resolve below is precisely the data the
+  // locked state exists to withhold.
+  if (cfg?.mode === "locked") redirect("/login?error=auth-locked");
   if (cfg?.mode === "disabled") {
     const op = await db
       .select()

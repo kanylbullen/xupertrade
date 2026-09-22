@@ -262,6 +262,26 @@ describe("requireTenantServer", () => {
     expect(t).toBe(operator);
   });
 
+  it("redirects with auth-locked and never touches the DB in locked mode", async () => {
+    // SECURITY: "locked" means the stored auth mode is gone on an
+    // install that has tenants. The operator row this helper would
+    // otherwise resolve IS the data being withheld, so we must bail
+    // before any select.
+    mockedFetchAuthConfig.mockResolvedValue({
+      mode: "locked",
+      basic_user_set: false,
+      oidc_issuer: "",
+      oidc_client_id: "",
+      oidc_scopes: "",
+    } as never);
+    setCookie(null);
+
+    await expect(requireTenantServer()).rejects.toThrow(
+      /NEXT_REDIRECT;\/login\?error=auth-locked/,
+    );
+    expect(mockedSelect).not.toHaveBeenCalled();
+  });
+
   it("falls back to cookie path if disabled-mode operator row is missing", async () => {
     // Defensive: if cfg.mode is "disabled" but Phase 6b never ran, the
     // operator row doesn't exist. Don't silently render with no

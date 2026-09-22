@@ -46,6 +46,14 @@ export async function proxy(req: NextRequest) {
   if (cfg === null) {
     return _redirectToLogin(req, pathname, "bot-unreachable");
   }
+  // SECURITY: "locked" is what the resolver returns when the stored
+  // auth mode is gone (flushed Redis, recreated container) on an
+  // installation that already has tenants. Treat it as the opposite
+  // of "disabled": nothing renders, and /login explains why. See
+  // `auth-config.ts:resolveMode`.
+  if (cfg.mode === "locked") {
+    return _redirectToLogin(req, pathname, "auth-locked");
+  }
   if (cfg.mode === "disabled") return NextResponse.next();
 
   const cookie = req.cookies.get(SESSION_COOKIE)?.value;
