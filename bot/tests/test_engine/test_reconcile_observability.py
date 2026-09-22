@@ -58,31 +58,98 @@ def _published(event_bus) -> list:
 
 
 @pytest.mark.asyncio
-async def test_paused_bot_does_not_let_reconcile_place_orders():
+async def test_paused_bot_reconciles_as_a_dry_run():
+    """A pause has to stop WRITES, not just orders. Pass 1 was still
+    closing rows, writing Trades and booking PnL while paused."""
     runner, repo, _ = _runner(paused=True)
     await runner._run_reconcile("Periodic")
-    assert repo.reconcile_positions.await_args.kwargs[
-        "close_exchange_orphans"
-    ] is False
+    kwargs = repo.reconcile_positions.await_args.kwargs
+    assert kwargs["dry_run"] is True
+    assert kwargs["close_exchange_orphans"] is False
 
 
 @pytest.mark.asyncio
 async def test_running_bot_still_closes_exchange_orphans():
     runner, repo, _ = _runner(paused=False)
     await runner._run_reconcile("Periodic")
-    assert repo.reconcile_positions.await_args.kwargs[
-        "close_exchange_orphans"
-    ] is True
+    kwargs = repo.reconcile_positions.await_args.kwargs
+    assert kwargs["dry_run"] is False
+    assert kwargs["close_exchange_orphans"] is True
 
 
 @pytest.mark.asyncio
 async def test_unreadable_pause_flag_is_treated_as_paused():
-    """Fail safe: a Redis blip must not turn into market orders."""
+    """Fail safe: a Redis blip must not turn into writes or orders."""
     runner, repo, _ = _runner(pause_raises=True)
     await runner._run_reconcile("Periodic")
-    assert repo.reconcile_positions.await_args.kwargs[
-        "close_exchange_orphans"
-    ] is False
+    kwargs = repo.reconcile_positions.await_args.kwargs
+    assert kwargs["dry_run"] is True
+    assert kwargs["close_exchange_orphans"] is False
+
+
+# --- the startup reconcile (review item 4) ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_before_restoring_state():
+    """The boot reconcile moved out of `main.py` into `startup()`, where
+    the pause gate, the PnL callback and the event bus exist. It must
+    still run BEFORE state restoration, or a strategy gets restored into
+    a row reconcile is about to close."""
+    order: list[str] = []
+    runner, repo, _ = _runner(paused=False)
+
+    async def reconcile(*_a, **_k):
+        order.append("reconcile")
+        return ReconcileResult()
+
+    async def get_open_positions():
+        order.append("restore")
+        return []
+
+    repo.reconcile_positions = AsyncMock(side_effect=reconcile)
+    repo.get_open_positions = AsyncMock(side_effect=get_open_positions)
+
+    await runner.startup()
+
+    assert order == ["reconcile", "restore"]
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_respects_the_pause_gate():
+    runner, repo, _ = _runner(paused=True)
+    repo.get_open_positions = AsyncMock(return_value=[])
+
+    await runner.startup()
+
+    kwargs = repo.reconcile_positions.await_args.kwargs
+    assert kwargs["dry_run"] is True
+    assert kwargs["close_exchange_orphans"] is False
+
+
+@pytest.mark.asyncio
+async def test_startup_reconcile_books_pnl_through_the_callback():
+    """The `main.py` version had no callback at all, so a boot-time
+    close never reached the daily-loss counter."""
+    runner, repo, _ = _runner(paused=False)
+    repo.get_open_positions = AsyncMock(return_value=[])
+
+    await runner.startup()
+
+    cb = repo.reconcile_positions.await_args.kwargs["on_strategy_close"]
+    assert cb == runner._on_reconcile_close
+
+
+@pytest.mark.asyncio
+async def test_startup_survives_a_failing_reconcile():
+    """A reconcile that blows up must not stop the bot booting."""
+    runner, repo, _ = _runner()
+    repo.reconcile_positions = AsyncMock(side_effect=RuntimeError("boom"))
+    repo.get_open_positions = AsyncMock(return_value=[])
+
+    await runner.startup()
+
+    repo.get_open_positions.assert_awaited_once()
 
 
 # --- event publishing -------------------------------------------------
@@ -404,3 +471,57 @@ def test_non_transient_causes_still_publish():
     wrapped = ExchangeReadError("get_positions failed")
     wrapped.__cause__ = ValueError("bad payload")
     assert _is_transient_network_error(wrapped) is False
+
+
+# --- _resolve_close_size with no DB (review item 11) ------------------
+
+
+def _close_size_runner(exchange, repo=None):
+    runner = EngineRunner(
+        exchange=exchange, strategies=[], repo=repo,
+        event_bus=None, control=MagicMock(),
+    )
+    runner.portfolio = MagicMock()
+    runner.portfolio.record_pnl = AsyncMock()
+    return runner
+
+
+@pytest.mark.asyncio
+async def test_close_size_without_db_raises_on_a_read_failure():
+    """With no DB the exchange IS the source of truth, so an unreadable
+    exchange must not return None — that reads as "no position" and
+    silently drops the close signal. Raising routes it into the tick's
+    handler and, for a transient cause, the outage aggregator."""
+    exchange = MagicMock()
+    exchange.get_position = AsyncMock(side_effect=ExchangeReadError("502"))
+    runner = _close_size_runner(exchange)
+
+    with pytest.raises(ExchangeReadError):
+        await runner._resolve_close_size("strat", "BTC", "long")
+
+
+@pytest.mark.asyncio
+async def test_close_size_without_db_returns_the_exchange_size():
+    exchange = MagicMock()
+    exchange.get_position = AsyncMock(
+        return_value=Position(symbol="BTC", side="long", size=1.5, entry_price=100.0)
+    )
+    runner = _close_size_runner(exchange)
+
+    assert await runner._resolve_close_size("strat", "BTC", "long") == 1.5
+
+
+@pytest.mark.asyncio
+async def test_close_size_clamp_falls_back_to_db_size_on_a_read_failure():
+    """With a DB row the clamp is only a safety net, so a read failure
+    degrades to the DB size rather than raising."""
+    db_pos = MagicMock()
+    db_pos.side = "long"
+    db_pos.size = 2.0
+    repo = MagicMock()
+    repo.get_open_position = AsyncMock(return_value=db_pos)
+    exchange = MagicMock()
+    exchange.get_position = AsyncMock(side_effect=ExchangeReadError("502"))
+    runner = _close_size_runner(exchange, repo=repo)
+
+    assert await runner._resolve_close_size("strat", "BTC", "long") == 2.0

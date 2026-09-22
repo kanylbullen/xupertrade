@@ -187,6 +187,15 @@ class EngineRunner:
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
 
+        Also owns the startup reconcile. It used to run in `main.py`
+        before the runner existed, which meant it had no pause gate, no
+        PnL callback and no event bus: a boot during an HL blip flattened
+        the book silently, even on a paused bot. Here it goes through
+        `_run_reconcile`, so it gets all three. It runs BEFORE state
+        restoration, exactly as the `main.py` call did, so a restored
+        strategy is never restored into a row reconcile is about to
+        close.
+
         NOTE: PR 4c removed `_kick_caddy_tls_restore` (the dashboard now
         owns Caddy admin via `dashboard/src/lib/caddy-admin.ts`). The
         callers in this method were accidentally left behind and crashed
@@ -195,6 +204,12 @@ class EngineRunner:
         """
         if not self.repo:
             return
+
+        try:
+            await self._run_reconcile("Startup")
+        except Exception:
+            logger.exception("Startup reconcile failed (continuing without it)")
+
         try:
             positions = await self.repo.get_open_positions()
         except Exception:
@@ -318,10 +333,11 @@ class EngineRunner:
           heard that the book had been flattened. Any action, failure or
           read-failure skip now publishes an `ErrorOccurred`.
         - Reconcile ran before the tick's `paused` check, so pausing the
-          bot did not stop it market-closing the very positions the
-          pause was meant to preserve. Pass 2 (the only part that places
-          orders) is now gated on the pause flag, and a pause flag we
-          cannot read is treated AS paused.
+          bot did not stop it closing rows, writing `Trade` rows, booking
+          PnL and market-closing the very positions the pause was meant
+          to preserve. A paused pass is now a DRY RUN: it reports what it
+          would have closed and writes nothing. A pause flag we cannot
+          read is treated AS paused.
         """
         if not self.repo:
             return None
@@ -333,19 +349,20 @@ class EngineRunner:
             except Exception:
                 logger.warning(
                     "Reconcile: could not read the paused flag — assuming "
-                    "PAUSED, so no exchange-orphan market orders this pass",
+                    "PAUSED, so this pass writes nothing and orders nothing",
                 )
                 paused = True
         if paused:
             logger.info(
-                "Reconcile: bot is paused — DB-side reporting only, "
-                "no exchange-orphan market orders",
+                "Reconcile: bot is paused — dry run. Divergences are "
+                "reported; no rows closed, no trades written, no orders.",
             )
 
         result = await self.repo.reconcile_positions(
             self.exchange,
             close_exchange_orphans=not paused,
             on_strategy_close=self._on_reconcile_close,
+            dry_run=paused,
         )
 
         if result.skipped:
@@ -773,17 +790,17 @@ class EngineRunner:
         """
         try:
             positions = await self.exchange.get_positions()
-        except ExchangeReadError as e:
-            logger.error(
-                "Flat-all: exchange read failed (%s) — NOT treating the "
-                "book as flat and NOT acknowledging the request", e,
-            )
-            return FlatAllStatus(ok=False, reason=f"exchange read failed: {e}")
         except Exception as e:
-            logger.exception("Failed to fetch positions for flat-all")
+            # One handler: whatever the type, we did not get to look at
+            # the book, so the answer is the same. Flat-all is a rare
+            # operator action, so the traceback is worth having.
+            logger.exception(
+                "Flat-all: exchange read failed — NOT treating the book as "
+                "flat and NOT acknowledging the request",
+            )
             return FlatAllStatus(
                 ok=False,
-                reason=f"exchange read raised {type(e).__name__}: {e}",
+                reason=f"exchange read failed ({type(e).__name__}): {e}",
             )
 
         if not positions:
@@ -1872,18 +1889,15 @@ class EngineRunner:
             # (could happen after partial reconcile), close only what exists.
             try:
                 ex_pos = await self.exchange.get_position(symbol)
-            except ExchangeReadError as e:
+            except Exception as e:
+                # The clamp is a safety net, not the source of truth —
+                # whatever failed, we fall back to the DB size and say
+                # so. One handler; the type is in the message.
                 logger.warning(
-                    "[%s] CLOSE_%s for %s — exchange read failed (%s); "
-                    "closing the DB size unclamped",
-                    strategy_name, expected_side.upper(), symbol, e,
-                )
-                ex_pos = None
-            except Exception:
-                logger.exception(
-                    "[%s] CLOSE_%s for %s — exchange read raised; "
+                    "[%s] CLOSE_%s for %s — exchange read failed (%s: %s); "
                     "closing the DB size unclamped",
                     strategy_name, expected_side.upper(), symbol,
+                    type(e).__name__, e,
                 )
                 ex_pos = None
             if ex_pos is not None and ex_pos.side == expected_side:

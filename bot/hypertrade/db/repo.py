@@ -31,8 +31,18 @@ from hypertrade.db.models import (
     VaultNavPoint,
     VaultSnapshot,
 )
+from hypertrade.reconcile.fills import FillLedger, fill_order_ids
 
 logger = logging.getLogger(__name__)
+
+# HyperLiquid caps `userFillsByTime` at 2000 records per response and
+# does not page here. Reconcile asks for a window starting at the oldest
+# closeable row's `opened_at`, which on a long-held position can be
+# months wide — if the account is busy enough to hit the cap, the recent
+# closing fill we actually need may be missing and the row prices at the
+# mid instead. Cheap to detect, so we say so rather than silently
+# degrading.
+_HL_FILL_PAGE_CAP = 2000
 
 
 # Tables that alembic is the sole authority for — `init_db()` skips
@@ -637,8 +647,26 @@ class Repository:
             )
             return list(result.scalars().all())
 
+    async def _recorded_order_ids(self, order_ids: set[str]) -> set[str]:
+        """Which of `order_ids` already have a `trades` row in this mode.
+
+        One query per reconcile pass. Its output is what keeps another
+        strategy's already-booked close from being handed to an orphan
+        as its own closing fill.
+        """
+        if not order_ids:
+            return set()
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Trade.order_id).where(
+                    Trade.mode == self._mode,
+                    Trade.order_id.in_(list(order_ids)),
+                )
+            )
+            return {oid for oid in result.scalars().all() if oid}
+
     async def _price_orphan_close(
-        self, exchange, row: PositionRecord, fills: list[dict],
+        self, exchange, row: PositionRecord, ledger,
         mid_cache: dict[str, float],
     ) -> "_OrphanClosePrice | None":
         """Work out what a row that vanished from the exchange closed at.
@@ -647,27 +675,25 @@ class Repository:
         than no number at all:
 
         1. The exchange's own closing fill(s) for this coin/side since
-           `opened_at` — authoritative price AND fee.
-        2. The current mid price, clearly marked as an estimate. Fee is
-           the configured taker rate, since the close did cost one.
+           `opened_at`, taken from the pass's `FillLedger` — authoritative
+           price AND fee. The ledger spends each fill once and skips
+           fills already booked as `trades` rows, so one close can never
+           price two rows or double-count a fee.
+        2. The current mid price, clearly marked ESTIMATED. Fee is the
+           configured taker rate, since the close did cost one.
         3. Nothing. The row stays OPEN and is reported, rather than
            being closed at a fabricated PnL.
         """
-        from hypertrade.reconcile.fills import (  # noqa: PLC0415
-            realized_pnl,
-            select_closing_fills,
-            summarize_closing_fills,
-        )
+        from hypertrade.reconcile.fills import realized_pnl  # noqa: PLC0415
 
         size = float(row.size)
         entry = float(row.entry_price)
         opened_ms = _to_epoch_ms(row.opened_at)
 
-        matched = select_closing_fills(
-            fills, symbol=row.symbol, position_side=row.side,
-            since_ms=opened_ms,
+        summary = ledger.take(
+            symbol=row.symbol, position_side=row.side,
+            size=size, since_ms=opened_ms,
         )
-        summary = summarize_closing_fills(matched, size=size)
         if summary is not None:
             return _OrphanClosePrice(
                 exit_price=summary.price,
@@ -701,10 +727,58 @@ class Repository:
                     size=size, fee=fee,
                 ),
                 order_id=None,
-                reason="reconcile: orphan close (estimated @ mid)",
+                # ESTIMATED leads the reason so it is the first thing
+                # visible in a trades listing: this PnL is booked like a
+                # real one (the money did move) but was priced from the
+                # mid, not from a fill.
+                reason="ESTIMATED reconcile: orphan close @ mid",
                 estimated=True,
             )
         return None
+
+    @staticmethod
+    def _classify_closes(
+        db_by_symbol: dict[str, list[PositionRecord]], ex_by_symbol: dict,
+    ) -> list[tuple[PositionRecord, str]]:
+        """DB rows the exchange does not back. Pure; no writes, no logs."""
+        to_close: list[tuple[PositionRecord, str]] = []
+        for symbol, db_pos_list in db_by_symbol.items():
+            ex_pos = ex_by_symbol.get(symbol)
+            if ex_pos is None:
+                to_close.extend((p, "orphan") for p in db_pos_list)
+                continue
+            to_close.extend(
+                (p, "wrong-side") for p in db_pos_list if p.side != ex_pos.side
+            )
+        return to_close
+
+    @staticmethod
+    def _log_size_mismatches(
+        db_by_symbol: dict[str, list[PositionRecord]], ex_by_symbol: dict,
+    ) -> None:
+        """Same-side size drift. Logged only — attribution is ambiguous.
+
+        Only flag a diff of more than 0.5% of the position OR more than
+        0.1% absolute; smaller diffs are normal exchange-side rounding.
+        """
+        for symbol, db_pos_list in db_by_symbol.items():
+            ex_pos = ex_by_symbol.get(symbol)
+            if ex_pos is None:
+                continue
+            same_side_db_total = sum(
+                p.size for p in db_pos_list if p.side == ex_pos.side
+            )
+            diff = abs(same_side_db_total - ex_pos.size)
+            if diff > max(ex_pos.size * 0.005, 1e-4):
+                logger.warning(
+                    "Reconcile: %s size mismatch — DB total %.6f vs exchange %.6f "
+                    "(diff %.6f, strategies: %s)",
+                    symbol,
+                    same_side_db_total,
+                    ex_pos.size,
+                    diff,
+                    [p.strategy_name for p in db_pos_list if p.side == ex_pos.side],
+                )
 
     async def reconcile_positions(
         self,
@@ -712,6 +786,7 @@ class Repository:
         close_exchange_orphans: bool = True,
         on_strategy_close=None,
         confirm_delay_seconds: float = 2.0,
+        dry_run: bool = False,
     ) -> "ReconcileResult":
         """Compare DB open positions vs exchange reality:
 
@@ -741,29 +816,32 @@ class Repository:
           anything; a raising re-read skips, and a re-read that finds
           positions means the first answer was a blip.
 
+        `dry_run=True` (the runner passes it while the bot is PAUSED)
+        reports every would-be close in `failures` and writes nothing at
+        all — no rows closed, no `Trade` rows, no PnL booked, and no
+        orders. A pause has to stop writes, not just orders.
+
         `on_strategy_close(strategy_name, pnl)` is called once per
         DB-side close, AFTER the commit, so a rolled-back close never
         resets a strategy or moves the daily-PnL counter. It may be sync
         or async; an awaitable return value is awaited.
         """
         from hypertrade.exchange.base import (  # noqa: PLC0415
-            ExchangeReadError,
             OrderStatus,
             OrderType,
         )
 
         result = ReconcileResult()
+        if dry_run:
+            # Belt and braces: a caller that sets dry_run but forgets
+            # close_exchange_orphans still places no orders.
+            close_exchange_orphans = False
 
         # --- 1. Read the exchange. A failure here is NOT "flat". -------
+        # ExchangeReadError is the expected type; anything else (a mock,
+        # an SDK path we have not seen) gets the same protection.
         try:
             ex_positions = await exchange.get_positions()
-        except ExchangeReadError as e:
-            result.skipped = f"exchange read failed: {e}"
-            logger.warning(
-                "Reconcile: skipped — exchange read failed (%s). "
-                "No DB change, no orders.", e,
-            )
-            return result
         except Exception as e:
             result.skipped = f"exchange read failed: {e}"
             logger.warning(
@@ -776,25 +854,30 @@ class Repository:
         result.db_open = len(db_positions)
         result.exchange_open = len(ex_positions)
 
-        # --- 2. "Exchange is flat" is the expensive claim. Confirm it. -
-        if not ex_positions and db_positions:
+        ex_by_symbol = {p.symbol: p for p in ex_positions}
+        db_by_symbol: dict[str, list[PositionRecord]] = {}
+        for p in db_positions:
+            db_by_symbol.setdefault(p.symbol, []).append(p)
+
+        # --- 2. Classify, then confirm before believing it. ------------
+        # Any close candidate — an orphan, a wrong-side row, one coin or
+        # the whole book — is an expensive claim about a read that can
+        # lie. Confirming only the all-empty case still let a partial
+        # 502 (ETH answered, BTC missing) close a row.
+        to_close = self._classify_closes(db_by_symbol, ex_by_symbol)
+        if to_close:
             logger.warning(
-                "Reconcile: exchange reports flat while DB holds %d open "
-                "row(s) — re-reading in %.1fs before closing anything",
-                len(db_positions), confirm_delay_seconds,
+                "Reconcile: %d row(s) look closeable against %d exchange "
+                "position(s) — re-reading in %.1fs to confirm",
+                len(to_close), len(ex_positions), confirm_delay_seconds,
             )
             if confirm_delay_seconds > 0:
                 await asyncio.sleep(confirm_delay_seconds)
             try:
                 ex_positions = await exchange.get_positions()
-            except ExchangeReadError as e:
-                result.skipped = f"confirming exchange read failed: {e}"
-                logger.warning(
-                    "Reconcile: skipped — confirming read failed (%s). "
-                    "No DB change, no orders.", e,
-                )
-                return result
             except Exception as e:
+                # ExchangeReadError or anything else: without a
+                # confirmation we do not act.
                 result.skipped = f"confirming exchange read failed: {e}"
                 logger.warning(
                     "Reconcile: skipped — confirming read raised %s: %s. "
@@ -802,48 +885,33 @@ class Repository:
                 )
                 return result
             result.exchange_open = len(ex_positions)
-            if ex_positions:
+            ex_by_symbol = {p.symbol: p for p in ex_positions}
+            before = len(to_close)
+            to_close = self._classify_closes(db_by_symbol, ex_by_symbol)
+            if not to_close:
                 logger.warning(
-                    "Reconcile: confirming read returned %d position(s) — "
-                    "the first read was a blip, not a flat book",
-                    len(ex_positions),
+                    "Reconcile: the confirming read cleared all %d candidate "
+                    "close(s) — the first read was a blip, not reality",
+                    before,
+                )
+            elif len(to_close) < before:
+                logger.warning(
+                    "Reconcile: the confirming read cleared %d of %d "
+                    "candidate close(s)", before - len(to_close), before,
                 )
 
-        ex_by_symbol = {p.symbol: p for p in ex_positions}
-        db_by_symbol: dict[str, list[PositionRecord]] = {}
-        for p in db_positions:
-            db_by_symbol.setdefault(p.symbol, []).append(p)
+        self._log_size_mismatches(db_by_symbol, ex_by_symbol)
 
-        # --- 3. Classify. No writes yet. -------------------------------
-        to_close: list[tuple[PositionRecord, str]] = []
-        for symbol, db_pos_list in db_by_symbol.items():
-            ex_pos = ex_by_symbol.get(symbol)
-            if ex_pos is None:
-                for p in db_pos_list:
-                    to_close.append((p, "orphan"))
-                continue
-
-            for p in db_pos_list:
-                if p.side != ex_pos.side:
-                    to_close.append((p, "wrong-side"))
-
-            # Size mismatch detection. Only flag if the diff is more
-            # than 0.5% of the position OR more than 0.1% absolute —
-            # smaller diffs are normal exchange-side rounding.
-            same_side_db_total = sum(
-                p.size for p in db_pos_list if p.side == ex_pos.side
-            )
-            diff = abs(same_side_db_total - ex_pos.size)
-            if diff > max(ex_pos.size * 0.005, 1e-4):
-                logger.warning(
-                    "Reconcile: %s size mismatch — DB total %.6f vs exchange %.6f "
-                    "(diff %.6f, strategies: %s)",
-                    symbol,
-                    same_side_db_total,
-                    ex_pos.size,
-                    diff,
-                    [p.strategy_name for p in db_pos_list if p.side == ex_pos.side],
+        # --- 3. Paused means paused: report, write nothing. ------------
+        if dry_run and to_close:
+            for row, kind in to_close:
+                msg = (
+                    f"PAUSED — not closed ({kind}): {row.strategy_name} "
+                    f"{row.side} {row.size} {row.symbol}"
                 )
+                result.failures.append(msg)
+                logger.warning("Reconcile: %s", msg)
+            to_close = []
 
         # --- 4. Price every close from the exchange before writing. ----
         planned: list[tuple[PositionRecord, str, _OrphanClosePrice]] = []
@@ -858,10 +926,31 @@ class Repository:
                 logger.exception(
                     "Reconcile: fetch_user_fills failed — falling back to mid price",
                 )
+            if len(fills) >= _HL_FILL_PAGE_CAP:
+                logger.warning(
+                    "Reconcile: fetch_user_fills returned %d records (HL caps "
+                    "a page at %d) — the window from %s may be truncated and "
+                    "a close older than the newest %d fills would price at "
+                    "the mid instead",
+                    len(fills), _HL_FILL_PAGE_CAP, since_ms, _HL_FILL_PAGE_CAP,
+                )
+            ledger = FillLedger(
+                fills,
+                exclude_order_ids=await self._recorded_order_ids(
+                    fill_order_ids(fills)
+                ),
+            )
+            if ledger.excluded_count:
+                logger.info(
+                    "Reconcile: %d of %d fill(s) are already booked as trades "
+                    "rows and are not available to price an orphan",
+                    ledger.excluded_count,
+                    ledger.excluded_count + ledger.usable_count,
+                )
             mid_cache: dict[str, float] = {}
             for row, kind in to_close:
                 priced = await self._price_orphan_close(
-                    exchange, row, fills, mid_cache,
+                    exchange, row, ledger, mid_cache,
                 )
                 if priced is None:
                     msg = (
@@ -876,6 +965,7 @@ class Repository:
 
         # --- 5. Apply: close + Trade row in ONE transaction. -----------
         closed: list[tuple[str, float]] = []
+        closed_symbols: set[str] = set()
         if planned:
             now = datetime.now(timezone.utc)
             async with self._session_factory() as session:
@@ -910,12 +1000,16 @@ class Repository:
                         f"closed {kind}: {db_row.strategy_name} "
                         f"{db_row.side} {db_row.size} {db_row.symbol} "
                         f"@ {priced.exit_price:.6f} "
-                        f"({'estimated' if priced.estimated else 'fill'}), "
+                        # "ESTIMATED" in the action text so Telegram shows
+                        # it: the PnL is booked like a real one, but the
+                        # price came from the mid, not from a fill.
+                        f"({'ESTIMATED @ mid' if priced.estimated else 'fill'}), "
                         f"pnl {priced.pnl:+.4f}"
                     )
                     result.actions.append(msg)
                     logger.warning("Reconcile: %s", msg)
                     closed.append((db_row.strategy_name, priced.pnl))
+                    closed_symbols.add(db_row.symbol)
                 await session.commit()
 
         # Callbacks only after the commit landed — a rolled-back close
@@ -935,7 +1029,15 @@ class Repository:
         # Outside the session because it places market orders. Threshold:
         # ignore dust (likely HL rounding artifacts).
         if close_exchange_orphans:
-            db_symbols = set(db_by_symbol.keys())
+            # Recompute from what is STILL open. `db_by_symbol` is the
+            # pre-close snapshot, so a symbol whose only row pass 1 just
+            # wrong-side-closed would be skipped here for one more cycle
+            # — leaving an untracked exchange position that the next
+            # strategy OPEN nets against.
+            if closed_symbols:
+                db_symbols = {p.symbol for p in await self._open_position_rows()}
+            else:
+                db_symbols = set(db_by_symbol.keys())
             for sym, ex_pos in ex_by_symbol.items():
                 if sym in db_symbols:
                     continue  # has DB tracking, handled above
@@ -987,7 +1089,18 @@ class Repository:
                         pnl=None,
                         reason="reconcile: exchange-orphan close",
                     )
-                except Exception:
+                except Exception as e:
+                    # The close DID happen, so it stays an action — but
+                    # an unbookkept fill is exactly the divergence this
+                    # whole PR exists to stop, so it is also a failure
+                    # the operator must see, with the order id to
+                    # reconcile by hand.
+                    fail = (
+                        f"UNBOOKKEPT exchange-orphan close on {sym} "
+                        f"(order_id={order.id}, {ex_pos.side} {ex_pos.size} "
+                        f"@ {fill_price:.6f}): Trade row failed to write: {e}"
+                    )
+                    result.failures.append(fail)
                     logger.exception(
                         "Reconcile: exchange-orphan closed on %s but the Trade "
                         "row failed to write (order_id=%s)", sym, order.id,

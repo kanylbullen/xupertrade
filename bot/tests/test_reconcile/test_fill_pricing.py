@@ -99,12 +99,19 @@ def test_overshooting_fill_is_partially_consumed_and_fee_prorated():
     assert s.fee == pytest.approx(0.2)  # a quarter of the fill's fee
 
 
-def test_partial_coverage_still_prices():
-    """Better a price from 0.5 of the size than entry_price for all of
-    it — the caller records the row's full size at this price."""
-    s = summarize_closing_fills([_fill(sz="0.5", px="110.0")], size=1.0)
+def test_partial_coverage_returns_none():
+    """Full coverage or nothing. An orphan is a row the exchange no
+    longer holds, so its closing fills must add up; when they do not we
+    are missing fills, and blending a real fill with a mid guess makes a
+    PnL nobody can audit. The caller falls back to the mid for the
+    whole row instead."""
+    assert summarize_closing_fills([_fill(sz="0.5", px="110.0")], size=1.0) is None
+
+
+def test_float_noise_still_counts_as_covered():
+    """A fill one part in 1e12 short of the row must not fall back."""
+    s = summarize_closing_fills([_fill(sz="0.9999999999999", px="110.0")], size=1.0)
     assert s is not None
-    assert s.size == pytest.approx(0.5)
     assert s.price == pytest.approx(110.0)
 
 
