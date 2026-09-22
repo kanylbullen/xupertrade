@@ -59,4 +59,42 @@ describe("getClientIp", () => {
       getClientIp(makeReq({ "x-forwarded-for": ",, 198.51.100.20" })),
     ).toBe("198.51.100.20");
   });
+
+  // analysis-2026-09-15 § 5, Medium: CF-Connecting-IP is only
+  // trustworthy because Caddy deletes it on the LAN path and
+  // cloudflared is the only other thing that can set it. These pin
+  // the dashboard half of that contract — the proxy half lives in
+  // `caddy/Caddyfile` and `lib/caddy-admin.ts:dashboardReverseProxy`.
+  it("ignores a CF-Connecting-IP that isn't an IP address", () => {
+    // A value that survives the proxy but isn't an address is not a
+    // client IP; letting it through would put attacker-chosen text
+    // inside the Redis rate-limit key.
+    expect(
+      getClientIp(
+        makeReq({
+          "cf-connecting-ip": "bucket-of-my-choosing",
+          "x-forwarded-for": "198.51.100.7",
+        }),
+      ),
+    ).toBe("198.51.100.7");
+  });
+
+  it("accepts an IPv6 CF-Connecting-IP", () => {
+    expect(
+      getClientIp(makeReq({ "cf-connecting-ip": "2606:4700:4700::1111" })),
+    ).toBe("2606:4700:4700::1111");
+  });
+
+  it("does not fall left past a non-parsing right-most XFF entry", () => {
+    // Everything left of the right-most entry is client-supplied.
+    // "our upstream wrote something odd" must not become "trust the
+    // attacker's value instead".
+    expect(
+      getClientIp(makeReq({ "x-forwarded-for": "1.1.1.1, not-an-ip" })),
+    ).toBe("unknown");
+  });
+
+  it("ignores a non-IP x-real-ip", () => {
+    expect(getClientIp(makeReq({ "x-real-ip": "../../etc" }))).toBe("unknown");
+  });
 });

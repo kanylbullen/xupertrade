@@ -43,6 +43,43 @@ describe("buildHttpsConfig", () => {
   });
 });
 
+// analysis-2026-09-15 § 5, Medium. The Caddyfile is only the
+// bootstrap — the moment TLS is configured one of these JSON
+// documents replaces it wholesale, so the header handling has to be
+// pinned here or the fix silently stops applying on the path that
+// actually runs in production.
+describe.each([
+  [
+    "buildHttpsConfig",
+    () =>
+      buildHttpsConfig({
+        domain: "x.example.com",
+        email: "ops@example.com",
+        cfToken: "cf-tok",
+      }),
+  ],
+  ["buildInternalHttpsConfig", () => buildInternalHttpsConfig("x.example.com")],
+])("%s reverse-proxy headers", (_name, build) => {
+  it("deletes CF-Connecting-IP on the way upstream", () => {
+    // Only cloudflared may set this, and cloudflared bypasses Caddy
+    // entirely. On Caddy's path it's client input that would let a
+    // LAN caller rotate its passphrase-unlock rate-limit bucket.
+    expect(JSON.stringify(build())).toContain(
+      '"delete":["CF-Connecting-IP"]',
+    );
+  });
+
+  it("SETS X-Forwarded-For to the observed peer, not append", () => {
+    expect(JSON.stringify(build())).toContain(
+      '"set":{"X-Forwarded-For":["{http.request.remote.host}"]}',
+    );
+  });
+
+  it("still proxies to the dashboard", () => {
+    expect(JSON.stringify(build())).toContain('"dial":"dashboard:3000"');
+  });
+});
+
 describe("buildInternalHttpsConfig", () => {
   it("uses passed domain when provided", () => {
     const cfg = buildInternalHttpsConfig("internal.example.com");
