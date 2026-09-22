@@ -1,10 +1,14 @@
 import Link from "next/link";
 
 import { ServerStatsCard } from "@/components/admin/server-stats-card";
+import { requireOperatorServer } from "@/lib/tenant-server";
 
 export const dynamic = "force-dynamic";
 
-export default function AdminServerPage() {
+export default async function AdminServerPage() {
+  // Self-gating: `admin/layout.tsx` renders concurrently with this
+  // page, so its notFound() doesn't prevent this body from running.
+  await requireOperatorServer();
   return (
     <main className="space-y-4">
       <header>

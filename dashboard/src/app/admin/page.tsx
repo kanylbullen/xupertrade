@@ -1,10 +1,14 @@
 import Link from "next/link";
 
 import { TenantTable } from "@/components/admin/tenant-table";
+import { requireOperatorServer } from "@/lib/tenant-server";
 
 export const dynamic = "force-dynamic";
 
-export default function AdminOverviewPage() {
+export default async function AdminOverviewPage() {
+  // Self-gating: `admin/layout.tsx` renders concurrently with this
+  // page, so its notFound() doesn't prevent this body from running.
+  await requireOperatorServer();
   return (
     <main className="space-y-6">
       <header className="flex items-center justify-between">

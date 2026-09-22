@@ -24,6 +24,11 @@ vi.mock("next/navigation", () => ({
     err.name = "NEXT_REDIRECT";
     throw err;
   }),
+  notFound: vi.fn(() => {
+    const err = new Error("NEXT_NOT_FOUND");
+    err.name = "NEXT_NOT_FOUND";
+    throw err;
+  }),
 }));
 
 // requireTenantServer calls isSessionRevoked(), whose `client`
@@ -54,7 +59,7 @@ vi.mock("../db", () => ({
 import { cookies } from "next/headers";
 import { fetchAuthConfig, getSessionSecret, verifySession } from "../auth";
 import { db } from "../db";
-import { requireTenantServer } from "../tenant-server";
+import { requireOperatorServer, requireTenantServer } from "../tenant-server";
 
 const mockedCookies = vi.mocked(cookies);
 const mockedGetSecret = vi.mocked(getSessionSecret);
@@ -298,5 +303,66 @@ describe("requireTenantServer", () => {
     setCookie(null);
 
     await expect(requireTenantServer()).rejects.toThrow(/NEXT_REDIRECT;\/login/);
+  });
+});
+
+/**
+ * analysis-2026-09-15 § 5, Low. The /admin page shells relied on
+ * `admin/layout.tsx` alone, and a layout is not a gate: in the App
+ * Router it renders concurrently with the page beneath it, so its
+ * notFound() stops the response but not the page body's own work.
+ */
+describe("requireOperatorServer", () => {
+  function signedInAs(row: Record<string, unknown>) {
+    authEnabled();
+    setCookie("good.cookie");
+    mockedGetSecret.mockResolvedValue("secret");
+    mockedVerify.mockReturnValue({
+      sub: "someone@example.com",
+      iat: 1,
+      exp: 9999999999,
+    });
+    chainSelectReturning([row]);
+  }
+
+  it("returns the tenant when they are the operator", async () => {
+    const operator = {
+      id: "00000000-0000-0000-0000-000000000001",
+      authentikSub: "someone@example.com",
+      isOperator: true,
+      isActive: true,
+    };
+    signedInAs(operator);
+    await expect(requireOperatorServer()).resolves.toBe(operator);
+  });
+
+  it("404s a signed-in non-operator", async () => {
+    signedInAs({
+      id: "11111111-2222-3333-4444-555555555555",
+      authentikSub: "someone@example.com",
+      isOperator: false,
+      isActive: true,
+    });
+    await expect(requireOperatorServer()).rejects.toThrow("NEXT_NOT_FOUND");
+  });
+
+  it("404s a truthy-but-not-true isOperator", async () => {
+    // Mirrors `lib/operator.ts`: a non-boolean from a misconfigured
+    // backfill must not grant operator access.
+    signedInAs({
+      id: "11111111-2222-3333-4444-555555555555",
+      authentikSub: "someone@example.com",
+      isOperator: 1,
+      isActive: true,
+    });
+    await expect(requireOperatorServer()).rejects.toThrow("NEXT_NOT_FOUND");
+  });
+
+  it("redirects to /login when there is no session at all", async () => {
+    authEnabled();
+    setCookie(null);
+    await expect(requireOperatorServer()).rejects.toThrow(
+      /NEXT_REDIRECT;\/login/,
+    );
   });
 });
