@@ -115,6 +115,24 @@ const NETWORK = process.env.HYPERTRADE_DOCKER_NETWORK ?? "hypertrade_default";
 const DEFAULT_NANO_CPUS = 1_000_000_000;            // 1 CPU
 
 /**
+ * Log rotation for every spawned bot container, regardless of mode.
+ *
+ * Bare `json-file` (Docker's default, no `daemon.json` override on the
+ * host) has no size cap. bot/reports/analysis-2026-09-15.md § 1 "Host"
+ * found the paper and testnet bot logs at 404 MB / 379 MB after two
+ * weeks — ~1,000 lines/hour per bot from the per-strategy per-tick
+ * candle INFO line (runner.py) and the aiohttp access log for the
+ * dashboard watchdog's heartbeat probe. 50m × 5 files caps a single
+ * bot's log footprint at 250 MB without needing a host-level
+ * `daemon.json` change (which wouldn't apply retroactively to spawned
+ * containers anyway — the driver config is per-container).
+ */
+const DEFAULT_LOG_CONFIG: { Type: string; Config: Record<string, string> } = {
+  Type: "json-file",
+  Config: { "max-size": "50m", "max-file": "5" },
+};
+
+/**
  * Per-mode container memory cap.
  *
  * paper/testnet have been stable at 512 MiB for weeks. The mainnet bot
@@ -377,6 +395,7 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     networkName: NETWORK,
     memoryBytes: memoryBytesForMode(params.mode),
     nanoCpus: DEFAULT_NANO_CPUS,
+    logConfig: DEFAULT_LOG_CONFIG,
     restartPolicy: "unless-stopped",
     labels: {
       "hypertrade.tenant_id": params.tenantId,
