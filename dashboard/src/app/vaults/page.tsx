@@ -6,6 +6,7 @@ import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
+import { requestNow } from "@/lib/now";
 import { and, eq } from "drizzle-orm";
 
 type Vault = {
@@ -70,6 +71,11 @@ export default async function VaultsPage() {
   // when no mainnet bot is running.
   const mode = "mainnet" as const;
 
+  // Read the clock once here, at the top of the request, and pass it
+  // down, so every position card judges its lockup against the same
+  // instant — see lib/now.ts.
+  const now = requestNow();
+
   const tenant = await requireTenantServer();
   const botRows = await db
     .select()
@@ -117,7 +123,7 @@ export default async function VaultsPage() {
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
           HyperLiquid vaults that pass our quality filter (age, AUM, ROI,
-          Sharpe, drawdown, manager equity, fee). Mainnet-only — vaults don't
+          Sharpe, drawdown, manager equity, fee). Mainnet-only — vaults don&apos;t
           exist on testnet. Read-only research; no auto-deposit. Polled daily.
         </p>
       </div>
@@ -131,7 +137,7 @@ export default async function VaultsPage() {
       )}
 
       {myPositions && myPositions.positions.length > 0 && (
-        <MyPositionsCard data={myPositions} />
+        <MyPositionsCard data={myPositions} now={now} />
       )}
       {myPositions && myPositions.address && myPositions.positions.length === 0 && (
         <Card className="mb-6">
@@ -238,7 +244,7 @@ export default async function VaultsPage() {
               Quality filter: age ≥ 180d · AUM $200k–$20M · ROI 90/180d &gt; 0%
               · max DD ≤ 25% · Sharpe(180d) &gt; 1.5 · manager equity ≥ 5% ·
               fee ≤ 15%. ROI 365d waived for vaults &lt; 365d old. Vaults
-              meeting all rules appear here; failures don't.
+              meeting all rules appear here; failures don&apos;t.
             </p>
           </CardContent>
         </Card>
@@ -269,7 +275,13 @@ function fmtNum(v: number | null, decimals: number): string {
   return v.toFixed(decimals);
 }
 
-function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
+function MyPositionsCard({
+  data,
+  now,
+}: {
+  data: MyPositionsResponse;
+  now: number;
+}) {
   const totalAllTimePnl = data.positions.reduce(
     (s, p) => s + p.all_time_pnl_usd,
     0,
@@ -316,7 +328,7 @@ function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
       <CardContent>
         <div className="space-y-4">
           {data.positions.map((p) => (
-            <PositionCard key={p.vault_address} p={p} />
+            <PositionCard key={p.vault_address} p={p} now={now} />
           ))}
         </div>
       </CardContent>
@@ -324,11 +336,11 @@ function MyPositionsCard({ data }: { data: MyPositionsResponse }) {
   );
 }
 
-function PositionCard({ p }: { p: MyPosition }) {
+function PositionCard({ p, now }: { p: MyPosition; now: number }) {
   const allTimeColor = p.all_time_pnl_usd >= 0 ? "text-green-500" : "text-red-500";
   const allTimeSign = p.all_time_pnl_usd >= 0 ? "+" : "";
   const lockMs = p.locked_until ? new Date(p.locked_until).getTime() : 0;
-  const locked = lockMs > Date.now();
+  const locked = lockMs > now;
   const stillQualifies = p.qualified;
   const verdict = !p.snapshot_at
     ? { tone: "outline" as const, text: "no scoring yet" }

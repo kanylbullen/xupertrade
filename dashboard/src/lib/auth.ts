@@ -79,16 +79,6 @@ export function invalidateAuthCache(): void {
   _cached = null;
 }
 
-function defaultConfig(): AuthConfig {
-  return {
-    mode: "disabled",
-    basic_user_set: false,
-    oidc_issuer: "",
-    oidc_client_id: "",
-    oidc_scopes: "openid profile email",
-  };
-}
-
 /** Fetch the dashboard's session-cookie HMAC secret.
  *
  *  PR 4a: now reads/initializes the secret directly via Redis

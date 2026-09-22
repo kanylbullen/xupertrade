@@ -51,19 +51,6 @@ export type PgFixture = {
  *   table.
  */
 
-const TENANT_DATA_TABLES = [
-  "trades",
-  "positions",
-  "equity_snapshots",
-  "funding_payments",
-  "backtest_runs",
-  "strategy_configs",
-  "manual_onchain_levels",
-  "hodl_purchases",
-  "user_vault_entries",
-  "tenant_telegram_links",
-] as const;
-
 const SCHEMA_SQL = `
   -- tenants table (Phase 1) — no pgcrypto / no server default;
   -- application supplies UUIDs (matches alembic 0009).

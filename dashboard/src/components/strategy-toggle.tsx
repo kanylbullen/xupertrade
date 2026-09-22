@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 import { Switch } from "@/components/ui/switch";
 
 import { type Mode, withMode } from "@/lib/mode";
@@ -9,7 +9,7 @@ export function StrategyToggle({ name, mode }: { name: string; mode: Mode }) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       const res = await fetch(withMode("/api/control/config", mode), { cache: "no-store" });
       if (!res.ok) return;
@@ -18,13 +18,18 @@ export function StrategyToggle({ name, mode }: { name: string; mode: Mode }) {
     } catch {
       // ignore
     }
-  }
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 10_000);
-    return () => clearInterval(t);
   }, [name, mode]);
+
+  // `refresh` is async: the setState lands in the resolved promise,
+  // never synchronously in the effect body. Kicking off the first
+  // poll through the same callback the interval uses keeps that
+  // explicit (and satisfies react-hooks/set-state-in-effect).
+  useEffect(() => {
+    const poll = () => void refresh();
+    poll();
+    const t = setInterval(poll, 10_000);
+    return () => clearInterval(t);
+  }, [refresh]);
 
   function toggle(next: boolean) {
     setEnabled(next);

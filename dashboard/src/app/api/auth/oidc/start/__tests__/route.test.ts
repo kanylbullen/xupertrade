@@ -56,12 +56,16 @@ beforeEach(() => {
     resetInSeconds: 60,
   });
   mockedGetOidcConfig.mockResolvedValue({
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    config: {} as any,
+    // The route only hands this to `client.buildAuthorizationUrl`,
+    // which is mocked above — an empty stand-in is all it needs.
+    config: {} as client.Configuration,
     cfg: {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      mode: "oidc",
+      basic_user_set: false,
+      oidc_issuer: "https://idp.example",
+      oidc_client_id: "client-id",
       oidc_scopes: "openid profile email",
-    } as any,
+    },
   });
 });
 

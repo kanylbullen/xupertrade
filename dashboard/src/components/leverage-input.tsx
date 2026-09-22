@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 
 import { type Mode, withMode } from "@/lib/mode";
 
@@ -11,7 +11,7 @@ export function LeverageInput({ name, mode }: { name: string; mode: Mode }) {
   const [draft, setDraft] = useState<number | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     try {
       const res = await fetch(withMode("/api/control/config", mode), { cache: "no-store" });
       if (!res.ok) return;
@@ -19,18 +19,28 @@ export function LeverageInput({ name, mode }: { name: string; mode: Mode }) {
       const lev: Info | undefined = data.leverage?.[name];
       if (lev) {
         setInfo(lev);
-        if (draft === null) setDraft(lev.current);
+        // Functional update so `draft` stays out of the deps — it
+        // changes on every keystroke, and depending on it would
+        // re-create `refresh` and tear down the poll interval while
+        // the operator is still typing. Semantics are unchanged:
+        // seed the input once, never clobber what's being typed.
+        setDraft((d) => (d === null ? lev.current : d));
       }
     } catch {
       // ignore
     }
-  }
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 10_000);
-    return () => clearInterval(t);
   }, [name, mode]);
+
+  // `refresh` is async: the setState lands in the resolved promise,
+  // never synchronously in the effect body. Kicking off the first
+  // poll through the same callback the interval uses keeps that
+  // explicit (and satisfies react-hooks/set-state-in-effect).
+  useEffect(() => {
+    const poll = () => void refresh();
+    poll();
+    const t = setInterval(poll, 10_000);
+    return () => clearInterval(t);
+  }, [refresh]);
 
   function commit(value: number) {
     if (!info) return;
@@ -54,6 +64,11 @@ export function LeverageInput({ name, mode }: { name: string; mode: Mode }) {
         withMode(`/api/control/strategy/${encodeURIComponent(name)}/leverage`, mode),
         { method: "DELETE" }
       ).catch(() => null);
+      // Drop the draft so the refresh below re-seeds the input with
+      // the strategy default the DELETE just restored. Without this
+      // the box would keep showing the override we just removed, and
+      // the next blur would POST it straight back.
+      setDraft(null);
       await refresh();
     });
   }
