@@ -26,6 +26,11 @@ import {
   isValidMode,
   requiredSecretsForMode,
 } from "@/lib/bot-orchestrator";
+import {
+  assertCanStartBot,
+  LimitExceededError,
+  limitExceededResponse,
+} from "@/lib/admin/limits";
 import { requireTenant } from "@/lib/tenant";
 
 import { decryptAndStart } from "./_decrypt-and-start";
@@ -98,6 +103,21 @@ export async function POST(req: Request): Promise<Response> {
       { error: `maximum ${MAX_BOTS_PER_TENANT} bots per tenant (one per mode)` },
       { status: 409 },
     );
+  }
+
+  // Operator-set per-tenant cap on concurrent running bots (alembic
+  // 0016). This route is create-AND-start: `decryptAndStart` below
+  // spawns the container, so it is a start and has to respect the cap
+  // exactly like POST /[id]/start does. It didn't, which made the cap
+  // a matter of which button the tenant pressed — and the limits above
+  // are about bot *rows*, not running ones, so nothing else caught it.
+  // Checked before the row reservation so we don't create and then
+  // delete a row we were never allowed to start.
+  try {
+    await assertCanStartBot(tenant);
+  } catch (e) {
+    if (e instanceof LimitExceededError) return limitExceededResponse(e);
+    throw e;
   }
 
   // Validate required secrets are present BEFORE we unlock — cheap check.
