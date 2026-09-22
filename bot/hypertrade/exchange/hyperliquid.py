@@ -32,6 +32,7 @@ from hypertrade.config import settings
 from hypertrade.exchange.base import (
     Balance,
     Exchange,
+    ExchangeReadError,
     Order,
     OrderStatus,
     OrderType,
@@ -550,11 +551,18 @@ class HyperLiquidExchange(Exchange):
         return await self._run_with_retry(self._info.user_state, self._account_address)
 
     async def get_positions(self) -> list[Position]:
+        """Open positions, or ExchangeReadError if HL could not answer.
+
+        Never returns `[]` for a failed read. `[]` used to mean both
+        "flat" and "502 Bad Gateway"; reconcile could not tell them
+        apart and closed the whole book on the second one
+        (`bot/reports/analysis-2026-09-15.md` § 2).
+        """
         try:
             state = await self._user_state()
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to fetch user state")
-            return []
+            raise ExchangeReadError(f"get_positions failed: {e}") from e
 
         out: list[Position] = []
         for ap in state.get("assetPositions", []):
@@ -585,15 +593,22 @@ class HyperLiquidExchange(Exchange):
         return out
 
     async def get_position(self, symbol: str) -> Position | None:
+        """One coin's position. Propagates ExchangeReadError."""
         positions = await self.get_positions()
         return next((p for p in positions if p.symbol == symbol), None)
 
     async def get_balance(self) -> Balance:
+        """Account balance, or ExchangeReadError if HL could not answer.
+
+        A zeroed Balance used to be returned on failure, which wrote a
+        0-equity snapshot into `equity_snapshots` and made the drawdown
+        / kill-switch maths see a blown account.
+        """
         try:
             state = await self._user_state()
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to fetch balance")
-            return Balance(total=0, available=0)
+            raise ExchangeReadError(f"get_balance failed: {e}") from e
 
         margin = state.get("marginSummary", {})
         total = float(margin.get("accountValue", "0") or 0)

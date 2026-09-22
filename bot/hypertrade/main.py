@@ -74,13 +74,20 @@ async def main() -> None:
     # Reconcile DB positions with exchange reality on startup.
     # Closes orphan rows (DB says open, exchange says no position) and rows
     # whose side disagrees with the exchange. Size mismatches are logged.
+    #
+    # This is the same reconcile the runner calls every 5 minutes, so it
+    # inherits the same guards: a failed exchange read skips the whole
+    # pass rather than reading as "flat". Booting during an HL blip used
+    # to flatten the entire book before the first tick.
     if repo is not None:
         try:
-            actions = await repo.reconcile_positions(exchange)
-            if actions:
+            result = await repo.reconcile_positions(exchange)
+            if result.skipped:
+                logger.warning("Startup reconcile skipped — %s", result.skipped)
+            elif result.took_action:
                 logger.warning(
-                    "Reconcile: cleaned up %d stale DB position(s) on startup",
-                    len(actions),
+                    "Startup reconcile: %d action(s), %d failure(s) — %s",
+                    len(result.actions), len(result.failures), result.summary(),
                 )
         except Exception:
             logger.exception("Reconcile failed (continuing without it)")

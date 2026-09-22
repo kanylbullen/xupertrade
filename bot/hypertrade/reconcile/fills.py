@@ -162,3 +162,144 @@ async def reconcile_fills_from_hl(
         report.examined, report.inserted, report.skipped,
     )
     return report
+
+
+# ----------------------------------------------------------------------
+# Pricing an orphan close from the exchange's own fill history.
+#
+# Reconcile used to close a DB row it could not explain with
+# `exit_price = entry_price` and `pnl = 0.0` and no `Trade` row at all,
+# so the money that actually moved never reached per-strategy PnL,
+# /eval, /kelly, the dashboard or the daily-loss counter
+# (`bot/reports/analysis-2026-09-15.md` § 2). The exchange knows what
+# the close filled at — ask it.
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class ClosingFillSummary:
+    """The fills that closed one DB row, collapsed to one price."""
+
+    price: float
+    """Size-weighted average fill price."""
+
+    size: float
+    """Total fill size matched (may be less than the row's size)."""
+
+    fee: float
+    """Sum of the matched fills' fees, pro-rated to `size`."""
+
+    order_id: str | None
+    """`oid` (or `tid`) of the first matched fill, for `Trade.order_id`."""
+
+    def to_dict(self) -> dict:
+        return {
+            "price": self.price,
+            "size": self.size,
+            "fee": self.fee,
+            "order_id": self.order_id,
+        }
+
+
+def _fill_order_id(fill: dict) -> str | None:
+    for key in ("oid", "tid"):
+        value = fill.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def select_closing_fills(
+    fills: list[dict],
+    *,
+    symbol: str,
+    position_side: str,
+    since_ms: int | None = None,
+) -> list[dict]:
+    """Fills on `symbol` that REDUCE a `position_side` position.
+
+    A long is closed by a sell, a short by a buy. Ordered oldest-first
+    so the caller consumes them in the order they happened. `since_ms`
+    (the row's `opened_at`) keeps a previous position's closing fills on
+    the same coin out of the match.
+    """
+    want = "sell" if position_side == "long" else "buy"
+    matched: list[dict] = []
+    for f in fills:
+        if str(f.get("coin", "") or "") != symbol:
+            continue
+        if _normalize_side(str(f.get("side", "") or "")) != want:
+            continue
+        try:
+            ts = int(f.get("time", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if since_ms is not None and ts < since_ms:
+            continue
+        matched.append(f)
+    matched.sort(key=lambda f: int(f.get("time", 0) or 0))
+    return matched
+
+
+def summarize_closing_fills(
+    fills: list[dict], *, size: float,
+) -> ClosingFillSummary | None:
+    """Collapse `fills` into one price + fee for a row of `size`.
+
+    Consumes fills oldest-first until `size` is covered; the last fill
+    is partially consumed if it overshoots, and its fee is pro-rated by
+    the consumed fraction. Returns None when nothing usable is found —
+    the caller then falls back to the mid price, and if that fails too,
+    leaves the row open rather than inventing a close.
+    """
+    if size <= 0:
+        return None
+    remaining = float(size)
+    notional = 0.0
+    consumed = 0.0
+    fee_total = 0.0
+    order_id: str | None = None
+    for f in fills:
+        try:
+            fill_size = float(f.get("sz", 0) or 0)
+            fill_price = float(f.get("px", 0) or 0)
+            fill_fee = float(f.get("fee", 0) or 0)
+        except (TypeError, ValueError):
+            logger.warning("reconcile-price: bad numeric in fill %s — skipping", f)
+            continue
+        if fill_size <= 0 or fill_price <= 0:
+            continue
+        take = min(fill_size, remaining)
+        share = take / fill_size
+        notional += fill_price * take
+        fee_total += fill_fee * share
+        consumed += take
+        remaining -= take
+        if order_id is None:
+            order_id = _fill_order_id(f)
+        if remaining <= 1e-12:
+            break
+    if consumed <= 0:
+        return None
+    return ClosingFillSummary(
+        price=notional / consumed,
+        size=consumed,
+        fee=fee_total,
+        order_id=order_id,
+    )
+
+
+def realized_pnl(
+    *, side: str, entry_price: float, exit_price: float,
+    size: float, fee: float = 0.0,
+) -> float:
+    """Side-aware realised PnL for one closed row, net of `fee`.
+
+    `side` is the POSITION side (long/short), not the closing order's.
+    """
+    gross = (
+        (exit_price - entry_price) * size
+        if side == "long"
+        else (entry_price - exit_price) * size
+    )
+    return gross - fee
