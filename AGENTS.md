@@ -16,9 +16,11 @@ principles · § 7 workflow · § 8 strategy evaluation · § 9 pitfalls ·
 Autonomous crypto trading bot for [HyperLiquid](https://hyperliquid.xyz):
 a Python bot (asyncio engine, registry of pluggable strategies, Postgres +
 Redis) with a Next.js dashboard, Telegram control, Caddy TLS, and a
-backtest CLI — one Docker compose stack running paper / testnet / mainnet
-modes side-by-side. See [README.md](README.md) for the user-facing overview
-and [CLAUDE.md](CLAUDE.md) for architecture, history, and policy.
+backtest CLI. Multi-tenant: the dashboard's orchestrator spawns one Docker
+container per tenant per mode (paper / testnet / mainnet) — there is no
+single compose stack running all three modes side-by-side (CLAUDE.md § 2).
+See [README.md](README.md) for the user-facing overview and
+[CLAUDE.md](CLAUDE.md) for architecture, history, and policy.
 
 ## Worktree context (Kanban)
 
@@ -88,7 +90,7 @@ cd bot && uv run pytest                                      # bot suite (merge 
 cd bot && uv run python -m hypertrade.backtest --strategy <name> --days N   # backtest (auto-saves)
 cd dashboard && npm test                                     # vitest (merge gate for dashboard changes)
 cd dashboard && npm run lint && npm run build                # lint + production build
-docker compose up -d                                         # local stack: postgres, redis, bots, dashboard, caddy
+docker compose up -d                                         # local stack: postgres, redis, dashboard, caddy (no bot — see CLAUDE.md § 2)
 ```
 
 ## Dashboard-specific conventions

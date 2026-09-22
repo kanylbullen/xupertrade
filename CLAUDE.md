@@ -2,8 +2,8 @@
 
 This file is the operating manual for any Claude agent working on this repo.
 The mission is to ship and maintain a **production-grade autonomous crypto
-trader** that executes its 14 strategies faithfully, recovers from failure,
-and never silently diverges from exchange reality.
+trader** that executes its 22 registered strategies faithfully, recovers from
+failure, and never silently diverges from exchange reality.
 
 The agent acts independently: investigates issues, fixes them, writes tests,
 deploys, and verifies. It only stops to ask the user when an action is
@@ -66,7 +66,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 ## 1. Mission and definition of done
 
 **Mission:** Build and maintain a HyperLiquid autotrader that
-1. Executes the 14 implemented strategies with byte-fidelity to their TradingView ports.
+1. Executes the 22 registered strategies with byte-fidelity to their TradingView ports (where a port exists — `vvv_hedge` and `ath_breakout` are in-house designs, not ports).
 2. Survives network outages, exchange errors, DB hiccups, and process restarts without losing position state.
 3. Produces accurate trade records, equity snapshots, and PnL — DB always matches exchange reality.
 4. Surfaces problems via Telegram and the dashboard before they become silent losses.
@@ -93,42 +93,61 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 │   ├── hypertrade/
 │   │   ├── main.py                  # entry point — auto-instantiates every registered strategy
 │   │   ├── config.py                # pydantic-settings (.env), tolerates unknown vars
-│   │   ├── api.py                   # aiohttp HTTP API: control, auth, tls, positions, indicator-status, ...
+│   │   ├── api.py                   # aiohttp HTTP API: control, positions, indicator-status, hodl, vaults, hyperliquid diagnostic (see § 3 for the route list — no auth/tls/oidc endpoints; those were dashboard-side and retired)
 │   │   ├── engine/
 │   │   │   ├── runner.py            # tick loop: heartbeat, periodic reconcile (5min), funding poll (30min), flip-detect, signal exec
-│   │   │   ├── control.py           # Redis-backed state: paused, disabled, leverage, allow_multi_coin, heartbeat, auth, tls
+│   │   │   ├── control.py           # Redis-backed state: paused, disabled, leverage, allow_multi_coin, heartbeat
+│   │   │   ├── portfolio.py         # kill-switch read + daily-PnL persistence (Redis-backed; see Open — Medium for its fail-open gaps)
 │   │   │   └── indicators_status.py # per-strategy live "what is each strategy seeing right now"
 │   │   ├── exchange/
 │   │   │   ├── base.py              # Exchange interface (Position, Balance, Order, OrderType)
 │   │   │   ├── paper.py             # in-memory simulated exchange
 │   │   │   └── hyperliquid.py       # live HL via SDK + tenacity retry on reads only
-│   │   ├── strategies/              # 22 registered strategies (14 Pine ports + 6 new ports + vvv_hedge, ath_breakout custom) + meta/<name>.json descriptors
+│   │   ├── strategies/              # 22 registered strategies (14 Pine ports + 6 new ports + vvv_hedge, ath_breakout custom) + meta/<name>.json descriptors. `golden_cross.py` also lives here but is deliberately NOT registered (backtested, lags buy-and-hold badly — kept for reference only, see registry.py's comment).
+│   │   ├── hodl/                    # advisory "add to your spot stack now" signals — NOT trading strategies, place no orders. altseason/btc_accumulation_zone/btc_ath_breakout/hype_accumulation/macro_backdrop/vault_picks + registry.py; surfaced on the dashboard /hodl page
+│   │   ├── vaults/                  # HyperLiquid vault scanner — daily catalog poll → filter → Sharpe/max-DD/ROI metrics → vault_snapshots row; read-only, no funds deposited/withdrawn; surfaced on /vaults
+│   │   ├── reconcile/               # fills.py: reconcile_fills_from_hl — fetches HL fill history to price/attribute reconcile-driven closes
 │   │   ├── data/                    # candle feed (REST + WS) with retry/backoff
 │   │   ├── events/                  # Redis pub/sub event bus
 │   │   ├── notify/
 │   │   │   ├── telegram.py          # notifier + command bot (/status /strategies /positions /eval /kelly /today /flat)
 │   │   │   └── caddy_admin.py       # builds + applies Caddy JSON config (HTTPS or self-signed)
 │   │   ├── reports/
-│   │   │   └── weekly_eval.py       # /eval and /kelly engine; CLI: `python -m hypertrade.reports.weekly_eval`
+│   │   │   └── weekly_eval.py       # /eval and /kelly engine; CLI: `python -m hypertrade.reports.weekly_eval`. Posts to Telegram/stdout only — does not write a file (see § 8).
 │   │   ├── backtest/
 │   │   │   ├── runner.py            # replays candles, simulates fills+fees, returns BacktestResult
 │   │   │   ├── metrics.py           # pure functions: Sharpe, APR, max DD, periods/year
 │   │   │   └── __main__.py          # CLI: `python -m hypertrade.backtest --strategy X --days N`
 │   │   └── db/
-│   │       ├── models.py            # Trade, PositionRecord, EquitySnapshot, StrategyConfig, FundingPayment, BacktestRun
+│   │       ├── models.py            # Trade, PositionRecord, EquitySnapshot, StrategyConfig, FundingPayment, BacktestRun, TenantBot
 │   │       └── repo.py              # all SQL + reconcile_positions (closes orphans both sides)
-│   ├── tests/                       # pytest, pytest-asyncio (463 passed, 1 skipped, 3 xfailed as of 2026-08-31)
+│   ├── tests/                       # pytest, pytest-asyncio (756 passed, 1 skipped, 3 xfailed as of 2026-09-15)
 │   ├── alembic/versions/            # 16 migrations: 0001 initial → 0016 tenant_admin_limits (see dir for current head)
 │   ├── scripts/migrate.sh
 │   └── Dockerfile
 │
 ├── dashboard/                       # Next.js 16 (App Router, Turbopack)
 │   └── src/
-│       ├── app/                     # /, /trades, /strategies, /options, /status, /login, /admin (operator-only), /api/...
+│       ├── app/                     # /overview/[mode], /trades, /strategies, /backtests, /hodl, /vaults, /options,
+│       │                            # /settings/bots, /settings/credentials, /unlock, /login, /admin/server,
+│       │                            # /admin/[tenantId] (operator-only), /api/... — /status 308-redirects to /settings/bots
 │       ├── proxy.ts                 # Next 16 proxy.ts (was middleware.ts) — auth gate
 │       ├── components/              # PositionCard, IndicatorStatus, BotControls, AuthConfig, TlsConfig, MultiCoinToggle, ...
 │       └── lib/
-│           ├── bot-api.ts           # mode-aware bot API proxy
+│           ├── bot-api.ts           # mode-aware bot API proxy (adds the per-bot X-Api-Key — see bot-api-key.ts)
+│           ├── bot-api-key.ts       # generates + persists each tenant bot's unique API key in Redis (`tenant:bot:<botId>:api_key`)
+│           ├── bot-orchestrator.ts  # tenant_bots row + decrypted secrets → Docker container spec; create/start/stop via docker.ts
+│           ├── docker.ts            # thin dockerode wrapper (bind-mounted host socket) — create/start/stop/remove/inspect/list only
+│           ├── tenant.ts            # tenant session/identity helpers used by client + server code
+│           ├── tenant-server.ts     # server-only tenant resolution (requireTenantServer etc.)
+│           ├── tenant-pg-role.ts    # per-tenant Postgres role provisioning for RLS-style isolation
+│           ├── operator.ts          # operator-only auth/role checks (gates /admin/*)
+│           ├── crypto/              # passphrase.ts (Argon2id + verifier), secrets.ts (AES-256-GCM), k-cache.ts (Redis-backed K cache) — see README "Security model"
+│           ├── admin/               # limits.ts (per-tenant caps), server-stats.ts, strategy-names.ts
+│           ├── session-store.ts     # HMAC-signed session cookie read/write backed by Redis
+│           ├── rate-limit.ts        # Redis-pipeline rate limiter (login, unlock, passphrase attempts)
+│           ├── heartbeat-watchdog.ts # polls each running tenant bot's heartbeat; DMs Telegram directly when one goes stale (a dead bot can't alert on its own death)
+│           ├── telegram-alert.ts    # thin Telegram Bot API client used by the watchdog
 │           ├── db.ts                # Drizzle, same Postgres as bot
 │           ├── queries.ts           # PnL aggregations: per-strategy, daily, totals
 │           ├── auth.ts              # HMAC-signed session cookies, fetchAuthConfig with 30s cache
@@ -139,14 +158,29 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 │   └── Caddyfile                    # bootstrap: self-signed HTTPS for $CADDY_HOST + HTTP→HTTPS redirect
 │
 ├── tv-source/                       # 1:1 with strategies — <name>.pine for source-vs-port audits
-├── docker-compose.yml               # postgres + redis + 3 bot containers + dashboard + caddy
+├── docker-compose.yml               # postgres + redis + dashboard + caddy + cloudflared (profile `public`) + bot-image (profile `build`, produces xupertrade-bot:latest — no bot service runs here, see below)
 ├── README.md                        # user-facing docs
 ├── .env.example
 ├── AGENTS.md                        # fast entry point for coding agents (defers to this file)
 └── CLAUDE.md                        # this file
 ```
 
-**Three bot containers run side-by-side:** `bot-paper` (simulated), `bot-testnet` (HL testnet, real orders, fake money), `bot-mainnet` (opt-in via `--profile mainnet`). They share the Postgres + Redis, separated by `mode='paper'/'testnet'/'mainnet'`. **Telegram lives on the testnet bot only** — it subscribes to events from all three modes.
+**There is no bot service in `docker-compose.yml`** (retired in PR #89; the
+`bot-paper`/`bot-testnet`/`bot-mainnet` compose services described in older
+revisions of this file no longer exist). `bot-image` is profile-gated
+(`build`) and only produces the `xupertrade-bot:latest` image — it has no
+`command` and never runs as a service. Actual bot containers are spawned per
+tenant per mode by the dashboard: `dashboard/src/lib/bot-orchestrator.ts`
+turns a `tenant_bots` DB row + that tenant's decrypted secrets into a Docker
+container spec, and `dashboard/src/lib/docker.ts` (a thin dockerode wrapper
+over the bind-mounted host socket) creates/starts/stops it. Container names
+follow `xupertrade-bot-<16-hex tenant short id>-<mode>` (e.g.
+`xupertrade-bot-3a2f1e4caaaa1111-mainnet`); they publish no host ports and
+are reached over the compose network. **Telegram is env-driven per bot
+instance** (`TELEGRAM_ENABLED`) — the orchestrator hardcodes it to `true`
+only for the `mainnet` bot and `false` for `paper`/`testnet`
+(`bot-orchestrator.ts`), so in the current deployment Telegram runs on the
+**mainnet** bot, not testnet.
 
 ---
 
@@ -168,8 +202,16 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 - **Bot APIs:** paper `:8000`, testnet `:8001`, mainnet `:8002` **inside
   their containers only**. Orchestrator-spawned tenant bots publish no host
   ports at all (`HostConfig.PortBindings` is null); the dashboard reaches
-  them by container name over the compose network. To query one directly:
-  `docker exec <bot-container> wget -qO- localhost:<port>/api/...`.
+  them by container name over the compose network. The bot image
+  (`python:3.13-slim`) has **no `wget` or `curl`** — use Python instead, and
+  most endpoints (`/api/positions`, `/api/control/heartbeat`, etc.) now
+  require the bot's per-tenant `X-Api-Key` (see § 3 "is the bot OK?" check
+  below for how to find it):
+  ```bash
+  docker exec <bot-container> python -c \
+    'import urllib.request,sys; req=urllib.request.Request(sys.argv[1], headers={"X-Api-Key": sys.argv[2]}); print(urllib.request.urlopen(req).read().decode())' \
+    http://localhost:<port>/api/positions "$API_KEY"
+  ```
 - **Dashboard:** `127.0.0.1:3000` (dev/debug + health probes) and via Caddy
   at `:443` (LAN) / Cloudflare tunnel (public). Both real ingress paths
   reach the container over the compose network, not the published port.
@@ -219,18 +261,11 @@ rotation is therefore a two-step dance: update the live DB user with
 in the running cluster), then recreate every container that has a
 `DATABASE_URL` baked into its env so they pick up the new value.
 
-> Heads-up before doing this: as of `a49a95b`, `docker-compose.yml`
-> hardcodes `POSTGRES_PASSWORD: postgres` and
-> `DATABASE_URL: postgresql://postgres:postgres@postgres:5432/hypertrade`
-> on the postgres + dashboard services (no `${VAR}` interpolation). Phase's
-> injected `POSTGRES_PASSWORD` therefore does NOT reach those services
-> today. Either:
-> 1. Land a follow-up that changes the compose lines to
->    `${POSTGRES_PASSWORD:?}` and
->    `postgresql://postgres:${POSTGRES_PASSWORD:?}@postgres:5432/hypertrade`
->    BEFORE rotating, OR
-> 2. Edit the literal value in the compose file on the host alongside
->    the rotation (and keep it out of git).
+> `docker-compose.yml` has required `POSTGRES_PASSWORD` via
+> `${POSTGRES_PASSWORD:?...}` (compose-up fails fast if it's unset/empty)
+> since PR #122 — both the postgres and dashboard services read the
+> Phase-injected value, no hardcoded literal survives a `phase run --`
+> deploy. The steps below are the live rotation dance.
 >
 > Tenant-bot containers spawned by the dashboard read `DATABASE_URL` from
 > the dashboard's environment, so they inherit whatever the dashboard
@@ -301,6 +336,14 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 
 To verify after install: `ssh root@$DEPLOY_HOST 'crontab -l'`.
 
+**Re-verify after every host rebuild, not just after install.** The root
+crontab lives only on the host, not in any Docker volume or the repo — a
+host rebuild (new VM, disk restore, provider migration) silently drops it.
+Found missing entirely on 2026-09-15 (disk had climbed to 83% with 10+ GB
+reclaimable and no prune had run). `crontab -l` costs one SSH round-trip;
+run it as a standing item whenever you touch the host, not only right after
+you install the job.
+
 ### Standard deploy command
 
 **Always split build from `up -d` and verify image age between them.** The
@@ -344,50 +387,39 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 > happens, the new bot logic only applies to bots STARTED after the
 > deploy — not to ones already running.
 
-For mainnet (opt-in via `--profile mainnet`), the same three-step shape
-applies — substitute the mainnet profile/services into steps 1 and 3:
+**There is no per-mode compose profile or `bot-mainnet`/`bot-testnet`
+service any more** (that model predates the multi-tenant orchestrator, see
+§ 2). One `bot-image` build (profile `build`) produces
+`xupertrade-bot:latest` for every mode; step 1 above (`--profile build
+build --no-cache --pull bot-image dashboard`) already covers mainnet bots
+too. To pick up new bot code, restart the running mainnet bot the same way
+as any other tenant bot: dashboard UI `Settings → Bots → restart`, or
+`POST /api/tenant/me/bots/<bot_id>/stop` then `/start`.
 
-```bash
-ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "cd /opt/hypertrade && \
-   git fetch origin && git reset --hard origin/master && \
-   df -h / | tail -1 && \
-   phase run -- docker compose --profile mainnet build --no-cache --pull bot-mainnet"
-# verify image age (as step 2 above), then:
-ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "cd /opt/hypertrade && phase run -- docker compose --profile mainnet up -d --force-recreate bot-mainnet"
-```
-
-`--no-cache --pull` together force a full rebuild from current sources
-*and* refresh the base image, so neither a stale local layer nor a stale
-base layer can quietly survive a deploy. `df -h /` upfront surfaces disk
-pressure before the build crashes mid-COPY (see the disk-full bullet
-under the cache-trap warning below).
-
-> ⚠️ **Cache trap on first build of a profile-gated service.**
-> If a service has never been built before (e.g. bot-mainnet on a
-> testnet-only host), an old image with the same `name:tag` from a
-> long-stopped previous build can silently win the layer cache, and a
-> plain `docker compose build bot-mainnet` does NOT invalidate it —
-> the build "succeeds" in seconds with zero COPY-step output but the
-> resulting image is days/weeks old and missing your latest code.
-> This bit us on the first mainnet boot 2026-05-10: the image lacked
-> the audit-C3 allowlist and all 21 strategies traded on real money
-> for one tick before pause caught it. **Always force `--no-cache` on
-> the first build of any service that hasn't been built recently:**
+> ⚠️ **Cache trap on first build of a service that hasn't been built
+> recently.** An old image with the same `name:tag` from a long-stopped
+> previous build can silently win the layer cache, and a plain `docker
+> compose build <service>` does NOT invalidate it — the build "succeeds"
+> in seconds with zero COPY-step output but the resulting image is
+> days/weeks old and missing your latest code. This bit us on the first
+> mainnet boot 2026-05-10 (back when mainnet ran as its own compose
+> service, `bot-mainnet`, before the orchestrator refactor): the image
+> lacked the audit-C3 allowlist and all 21 strategies traded on real money
+> for one tick before pause caught it. **Always force `--no-cache` on the
+> first build of any service/image that hasn't been built recently:**
 >
 > ```bash
-> phase run -- bash -c 'docker compose --profile mainnet build --no-cache --pull bot-mainnet'
+> phase run -- bash -c 'docker compose --profile build build --no-cache --pull bot-image'
 > ```
 >
 > (`--pull` refreshes the base image too — combining both ensures the
 > entire image is rebuilt from current sources.)
 >
-> When in doubt, look at `docker images | grep bot-mainnet` — if the
-> "CREATED" column says days/weeks ago, force a no-cache rebuild
-> before starting the container.
+> When in doubt, look at `docker images | grep xupertrade-bot` — if the
+> "CREATED" column says days/weeks ago, force a no-cache rebuild before
+> restarting any bot off it.
 >
-> **This trap is not mainnet-specific** — it bit the dashboard the
+> **This trap is not bot-image-specific** — it bit the dashboard the
 > same way on 2026-05-11 during the healthcheck-fix iterations. Five
 > back-to-back PRs rebuilt dashboard but `docker compose build --pull
 > dashboard` hit the layer cache every time and never produced a new
@@ -430,20 +462,35 @@ cache-trap — don't reintroduce it.
 
 ### Standard "is the bot OK?" check
 
+Four things differ from what an older version of this section said:
+`docker compose exec -T postgres` fails once `POSTGRES_PASSWORD` is
+`${POSTGRES_PASSWORD:?}`-required unless wrapped in `phase run --`; the bot
+image has no `wget`; `/api/positions` and `/api/control/heartbeat` now
+require the bot's per-tenant `X-Api-Key` (generated by the orchestrator and
+stored in Redis at `tenant:bot:<botId>:api_key`, keyed by the
+`tenant_bots.id` UUID — not surfaced anywhere in the UI); and `docker logs`
+is unreliable on a long-running bot container (see below).
+
 ```bash
-# DB ↔ exchange parity
+# 0. Find the bot's DB id + container name, then its API key
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade \
+   -c \"SELECT id, container_name, mode FROM tenant_bots WHERE mode='testnet';\""
+# then, with that id:
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "docker exec hypertrade-redis-1 redis-cli GET tenant:bot:<bot-id>:api_key"
+
+# 1. DB ↔ exchange parity
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "echo '=== Exchange ==='; docker exec \$(docker ps --format '{{.Names}}' \
-   | grep -E '^xupertrade-bot-.*-testnet\$') wget -qO- localhost:8001/api/positions; echo; \
-   echo '=== DB ==='; cd /opt/hypertrade && \
-   docker compose exec -T postgres psql -U postgres -d hypertrade \
+   | grep -E '^xupertrade-bot-.*-testnet\$') python -c \
+   'import urllib.request,sys; req=urllib.request.Request(sys.argv[1], headers={\"X-Api-Key\": sys.argv[2]}); print(urllib.request.urlopen(req).read().decode())' \
+   http://localhost:8001/api/positions '<api-key>'; echo; \
+   echo '=== DB ==='; docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade \
    -c \"SELECT strategy_name, symbol, side, size, entry_price FROM positions WHERE mode='testnet' AND is_open=true;\""
 
-# Recent errors — post-PR-4c the bots are tenant-scoped, so the legacy
-# `hypertrade-bot-testnet` container no longer exists. Container names
-# follow `xupertrade-bot-<short_id>-<mode>` (e.g.
-# `xupertrade-bot-0000000000000000-testnet` for the operator's tenant);
-# discover the right one before grepping logs.
+# 2. Recent errors. Container names follow `xupertrade-bot-<16-hex short
+# id>-<mode>`; discover the right one before grepping logs.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "matches=\$(docker ps --format '{{.Names}}' | grep -E '^xupertrade-bot-.*-testnet\$'); \
    case \$(echo \"\$matches\" | grep -c .) in \
@@ -455,6 +502,20 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    echo \"=== \$container ===\"; \
    docker logs \"\$container\" --since 1h 2>&1 | grep -iE 'error|warning' | tail -50"
 ```
+
+**When `docker logs` fails with `invalid character '\x00'`** (seen on all
+three bots after the 2026-09-01 reboot — long-running JSON-file logs can get
+corrupted in place), `docker logs` is unusable; read the raw file instead:
+
+```bash
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "logpath=\$(docker inspect -f '{{.LogPath}}' <container>); \
+   sudo tail -c 2000000 \"\$logpath\" | grep -a -iE 'error|warning' | tail -50"
+```
+
+`tail -c` avoids trying to seek by line count through a file `docker logs`
+already can't parse; `grep -a` forces text mode over any embedded binary
+garbage near the corruption point.
 
 ---
 
@@ -504,7 +565,17 @@ stay in **Done** with the commit hash so the agent has institutional memory.
 
 ### Open — Critical (blocks safe operation)
 
-None currently.
+- [ ] **Reconcile flattens the book on a transient HyperLiquid read failure.**
+  `hyperliquid.py`'s `get_positions()` catches every exception (including a
+  bare HL `502 Bad Gateway`) and returns `[]`; the reconcile pass then reads
+  that as "no exchange positions" and closes every open DB row as an orphan
+  (`pnl=0`, no `Trade` row), and on its next 5-minute pass market-closes the
+  still-real exchange position it now sees with no DB owner — again with no
+  `Trade` row. Confirmed live: every `closed orphan` log line in the last two
+  weeks of the testnet log is immediately preceded by an HL 502 traceback;
+  48 of 155 testnet closes since 2026-05-29 (31%) match this pattern. See
+  `bot/reports/analysis-2026-09-15.md` § 2 for the full trace and fix
+  sketch. Fix in progress on `fix/reconcile-read-failure`.
 
 ### Open — High (impacts trading correctness)
 
@@ -514,12 +585,19 @@ None currently.
 
 - [ ] **Volatility-adjusted sizing (option C from Kelly discussion).** Replace fixed `MAX_POSITION_SIZE_USD` with ATR-normalized sizing: `notional = RISK_BUDGET_USD / (atr × atr_mult)` so every trade has roughly the same dollar-risk regardless of asset volatility. Industry standard, no statistical estimation needed. Add `RISK_BUDGET_USD` config; keep `MAX_POSITION_SIZE_USD` as a hard cap. ~3-4h work, defensive change. Pair with the Kelly report for guidance on the budget level.
 - [ ] **Drawdown-based auto-scaling (option B from Kelly discussion).** Add `MAX_STRATEGY_DRAWDOWN_PCT` per strategy. When 80% of cap reached → halve effective margin until 7-day rolling PnL > 0. Limits exposure on degrading strategies without requiring stationary distribution assumptions like Kelly does.
+- [ ] **Engine money-path hardening (analysis-2026-09-15 § 4, not covered by `fix/reconcile-read-failure`):**
+  - `Order.size` on the HL exchange wrapper is the *requested* size, not the rounded size actually submitted — DB row and fee are computed from the wrong number (this is the live 247× "BTC size mismatch" reconcile warning).
+  - `main.py` sets `repo = None` on a DB error at boot and enters the trading loop anyway; every `if self.repo` gate downstream (flip-detect, same-side dedup, coin/family gate, `MAX_TOTAL_EXPOSURE_USD`) silently no-ops, and `_check_parity_after_trade` then returns `True` unconditionally.
+  - Kill-switch read failure and `set_daily_pnl` persist failure (`engine/portfolio.py`) both fail open — a Redis blip loses the daily-loss counter or lets a kill-switched bot keep trading.
+  - `PositionRecord` (the `positions` table) has no `leverage` column; the exposure-cap check does `getattr(p, "leverage", 1)`, mixing full-notional and margin-divided-by-leverage units in the same cap.
+  - A failed `meta()` fetch at HL-exchange construction leaves `_sz_decimals` empty and every coin silently rounds to 4dp; the bot boots "successfully" anyway.
+  - A failed `update_leverage` push before an open is logged only — the open proceeds at whatever leverage HL already has for that coin.
+  - The HL exchange's read-retry predicate keys off exception *type*, so 4xx `ServerError` gets retried like a transient 5xx (reads only, no double-submit risk, but wasted retry budget on a permanent error).
+- [ ] **Dashboard auth/tenant-isolation hardening (analysis-2026-09-15 § 5)** — auth-mode fail-open when the Redis key is absent, an OIDC open-redirect (`safeNext` blocks `//` but not `/\`), and a few lower-severity gaps. Fix in progress on `fix/dashboard-auth-hardening`.
 
 ### Open — Low
 
-- [ ] **Correlation grouping.** `cdc_macd` and `macd_zero` are mathematically near-identical. Tag strategies with a `family` attribute and let `allow_multi_coin=False` extend to family-level conflicts.
-- [ ] **Optimize `oleg_aryukov` for backtest.** Nadaraya-Watson kernel + RCI loops are O(n²). Fine for live (one call per tick) but a 4k-bar backtest hangs >30 min. Vectorize NW using rolling weighted convolution; replace per-bar RCI loop with a vectorized rank-correlation.
-- [ ] **Surface backtest history in dashboard.** `backtest_runs` table now persists every CLI run. A `/backtests` page would let users compare runs, filter by strategy, and see how parameter changes affect APR/Sharpe over time.
+(none currently)
 
 ### Done
 
@@ -598,7 +676,7 @@ None currently.
 
 #### Misc (2026-04-30 → 05-01)
 - [x] TradingView chart routes VVV to `COINBASE:VVVUSD` (not on Binance) — commit `12d6a45`.
-- [x] Dashboard `/strategies` page now lists all 21 strategies with descriptions — commit `22d7dd7`. Still hardcoded; should be data-driven (see Open — Low).
+- [x] Dashboard `/strategies` page now lists all 21 strategies with descriptions — commit `22d7dd7`. Hardcoded at the time (21 was the live count then); made data-driven by PR #152, see the 2026-07-29 entry below. Registry is at 22 as of 2026-09 (see § 2).
 
 #### Reconcile / state-sync hardening (2026-05-03 → 05-04)
 - [x] PaperExchange persists `{balance, positions}` to Redis after every fill; `load_state()` runs at startup before reconcile — commit `526d3cc`. Without this, every container restart wiped paper state, then startup-reconcile orphan-closed every DB row, then strategies re-entered duplicately on the next signal. Penguin_volatility paper showed 13 such cascade-entries on 2026-05-01.
@@ -617,7 +695,15 @@ None currently.
 - [x] Make `/strategies` page data-driven — page no longer carries its hardcoded 21-descriptor array (which had already drifted: `ath_breakout` shipped and traded but was never documented). Strategy prose moved to `bot/hypertrade/strategies/meta/<name>.json` colocated with each module, read via `meta_loader.py`; the bot's `/strategies` endpoint merges metadata with the live registry (live name/symbol/timeframe always win; unreadable meta files are skipped and an undocumented strategy still lists). Coverage test asserts every registered strategy has a meta file. — squash-merge `97ff1d1` (PR #152, branch `refactor/data-driven-strategies`).
 
 #### Telegram noise: transient HL-fetch failures on strategy ticks (2026-08-31)
-- [x] **Suppress Telegram noise on transient HL-fetch failures (strategy ticks).** Replaces both failure modes the strategy-tick path had: per-strategy-per-tick `ErrorOccurred` publishing (~22 events/min during the 2026-05-09 HL outage) and the PR-#24 error-type filter's full suppression (which left a multi-hour outage Telegram-silent — the empty-DataFrame signature `fetch_candles` returns after its tenacity retries never even reached the filter). Now both failure signatures (empty candles in `_run_strategy`, transient exceptions in the tick catch-all via the reused `_is_transient_network_error` predicate) feed an outage-window aggregator in `EngineRunner._settle_fetch_outage()`: a window clearing before `FETCH_OUTAGE_ALERT_SECONDS` (default 600) never notifies; a window persisting ≥ threshold emits exactly ONE `ErrorOccurred` (`strategy="candle-fetch"`) summarizing affected strategies; recovery closes the window log-only. Non-transient errors still publish immediately. Companion fix for HODL verdict-recovery noise was `fix/vault-picks-error-event` (PR #98). Tests: `bot/tests/test_engine/test_fetch_outage_alert.py` (10 cases). — branch `fix/fetch-outage-dedup` (squash hash + PR number recorded at merge).
+- [x] **Suppress Telegram noise on transient HL-fetch failures (strategy ticks).** Replaces both failure modes the strategy-tick path had: per-strategy-per-tick `ErrorOccurred` publishing (~22 events/min during the 2026-05-09 HL outage) and the PR-#24 error-type filter's full suppression (which left a multi-hour outage Telegram-silent — the empty-DataFrame signature `fetch_candles` returns after its tenacity retries never even reached the filter). Now both failure signatures (empty candles in `_run_strategy`, transient exceptions in the tick catch-all via the reused `_is_transient_network_error` predicate) feed an outage-window aggregator in `EngineRunner._settle_fetch_outage()`: a window clearing before `FETCH_OUTAGE_ALERT_SECONDS` (default 600) never notifies; a window persisting ≥ threshold emits exactly ONE `ErrorOccurred` (`strategy="candle-fetch"`) summarizing affected strategies; recovery closes the window log-only. Non-transient errors still publish immediately. Companion fix for HODL verdict-recovery noise was `fix/vault-picks-error-event` (PR #98). Tests: `bot/tests/test_engine/test_fetch_outage_alert.py` (10 cases). — squash-merge `1fb9db1` (PR #158, branch `fix/fetch-outage-dedup`), merged 2026-08-31.
+
+#### Correlation grouping, oleg_aryukov vectorization, backtest history page (2026-09)
+- [x] **Correlation grouping.** `family` attribute on `Strategy`, resolved via `registry.get_strategy_family()`; `allow_multi_coin=False` now refuses to stack two strategies in the same family (e.g. `cdc_macd`/`macd_zero`, both an EMA12/26-cross ≡ MACD-zero-cross signal) across any coin, not just the same coin. — squash-merge `3b6433a` (PR #157, `feat: strategy family grouping and family-level multi-coin gate`).
+- [x] **Optimize `oleg_aryukov` for backtest.** Vectorized the Nadaraya-Watson kernel and per-bar RCI loop (behavior-preserving — live signal output unchanged). — squash-merge `37e490d` (PR #160, `refactor: vectorize oleg_aryukov`).
+- [x] **Surface backtest history in dashboard.** New `/backtests` page: filters, trend chart, pager over the `backtest_runs` table. — squash-merge `0be8a2f` (PR #159, `feat(dashboard): /backtests page with filters, trend chart, pager`).
+
+#### Full-stack analysis (2026-09-15)
+- [x] Full-stack analysis 2026-09-15 — live production state (operator tenant, all three modes), strategy performance since the 2026-05-29 evaluation, a money-path review of the bot engine, a tenant-isolation review of the dashboard, local quality gates, and documentation drift. Read-only; nothing on the server, in Redis, or in the DB was changed. Surfaced the reconcile read-failure bug (now Open — Critical above), the engine/dashboard hardening items (now Open — Medium above), and this file's drift (fixed by this PR). Report: `bot/reports/analysis-2026-09-15.md` (PR #163).
 
 ---
 
@@ -644,7 +730,7 @@ The reconcile function is the safety net, not the strategy. Don't lean on it for
 
 ### Don't add features without a need
 
-We have 14 strategies and a decent UI. Resist the urge to add more strategies, more pages, more abstractions. The backlog is the product roadmap.
+We have 22 strategies and a decent UI. Resist the urge to add more strategies, more pages, more abstractions. The backlog is the product roadmap.
 
 ### Logs are the API
 
@@ -844,7 +930,13 @@ Every Sunday (or on demand), an agent should:
    - Strategies with 0 trades for 14+ days (data feed broken? signal logic dead?).
    - Strategies with realized PnL more than 2σ below their backtest expectation.
    - Strategies that consistently lose to fees+funding (gross-positive but net-negative).
-5. Write findings to `bot/reports/weekly-YYYY-MM-DD.md` and post a one-paragraph summary to Telegram.
+5. `hypertrade.reports.weekly_eval` computes the evaluation and posts it to
+   Telegram (Sunday 18:00 digest, or on-demand via `/eval [days]`) and CLI
+   stdout — it does not write a file. Full write-ups are hand-written by the
+   agent under `bot/reports/` when the finding warrants a durable report
+   (e.g. `bot/reports/strategy-eval-2026-05-29.md`,
+   `bot/reports/analysis-2026-09-15.md`); there is no automation that
+   creates `bot/reports/weekly-YYYY-MM-DD.md`.
 
 The agent **recommends** disable, the user **decides** disable. Disable is done via the dashboard `/options` page or the `/api/control/strategy/{name}/toggle` endpoint, never by editing strategy code.
 
