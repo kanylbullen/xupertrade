@@ -93,6 +93,26 @@ describe("checkRateLimit", () => {
     expect(r.allowed).toBe(true);
   });
 
+  it("fails open when the INCR command itself errors", async () => {
+    // The counter is unreadable, so we don't know the count. For an
+    // ordinary scope that's still an allow — a rate limit is a
+    // nuisance control and a Redis hiccup shouldn't lock people out.
+    const { client } = makeRedisStub([
+      [new Error("OOM command not allowed"), null],
+      [null, 1],
+      [null, 300],
+    ]);
+    const r = await checkRateLimit("test", "tenant-1", 5, 300, client);
+    expect(r.allowed).toBe(true);
+  });
+
+  it("fails open when pipeline.exec rejects", async () => {
+    const { client, pipeline } = makeRedisStub([]);
+    pipeline.exec.mockRejectedValue(new Error("ECONNREFUSED"));
+    const r = await checkRateLimit("test", "tenant-1", 5, 300, client);
+    expect(r.allowed).toBe(true);
+  });
+
   it("fails open when a per-command error appears in results", async () => {
     // INCR succeeded but TTL command errored. Without per-cmd
     // validation we'd cast the Error to a number and resetInSeconds
@@ -141,5 +161,87 @@ describe("checkRateLimit", () => {
     expect(pipeline.incr).toHaveBeenCalledWith(
       "ratelimit:unlock-link:tenant-A",
     );
+  });
+});
+
+/**
+ * analysis-2026-09-15 § 5, Low. Failing open is right for a nuisance
+ * control, but `tenant-unlock` guards an Argon2id derivation that
+ * decrypts the tenant's HyperLiquid key. An attacker who can make the
+ * pipeline fail would otherwise get unlimited passphrase guesses by
+ * making it fail.
+ */
+describe("checkRateLimit — tenant-unlock fails closed", () => {
+  const BUCKET = "tenant-1:198.51.100.7";
+
+  it("denies when pipeline.exec returns null", async () => {
+    const { client } = makeRedisStub(null);
+    const r = await checkRateLimit("tenant-unlock", BUCKET, 10, 900, client);
+    expect(r.allowed).toBe(false);
+    expect(r.resetInSeconds).toBe(900);
+  });
+
+  it("denies when pipeline.exec rejects", async () => {
+    const { client, pipeline } = makeRedisStub([]);
+    pipeline.exec.mockRejectedValue(new Error("ECONNREFUSED"));
+    const r = await checkRateLimit("tenant-unlock", BUCKET, 10, 900, client);
+    expect(r.allowed).toBe(false);
+  });
+
+  it("denies when the INCR command errors", async () => {
+    // The partial-pipeline case from the finding: INCR failed while
+    // the rest succeeded. The old code read that as a count of 0.
+    const { client } = makeRedisStub([
+      [new Error("OOM command not allowed"), null],
+      [null, 1],
+      [null, 900],
+    ]);
+    const r = await checkRateLimit("tenant-unlock", BUCKET, 10, 900, client);
+    expect(r.allowed).toBe(false);
+  });
+
+  it("denies when INCR returns a non-number", async () => {
+    const { client } = makeRedisStub([
+      [null, "not-a-number"],
+      [null, 1],
+      [null, 900],
+    ]);
+    const r = await checkRateLimit("tenant-unlock", BUCKET, 10, 900, client);
+    expect(r.allowed).toBe(false);
+  });
+
+  it("still allows a normal under-limit attempt", async () => {
+    // Fail-closed must not mean always-closed.
+    const { client } = makeRedisStub([
+      [null, 3],
+      [null, 0],
+      [null, 800],
+    ]);
+    const r = await checkRateLimit("tenant-unlock", BUCKET, 10, 900, client);
+    expect(r.allowed).toBe(true);
+    expect(r.remaining).toBe(7);
+    expect(r.resetInSeconds).toBe(800);
+  });
+
+  it("tolerates a bad TTL read — that one is only cosmetic", async () => {
+    const { client } = makeRedisStub([
+      [null, 3],
+      [null, 0],
+      [new Error("EXECABORT"), null],
+    ]);
+    const r = await checkRateLimit("tenant-unlock", BUCKET, 10, 900, client);
+    expect(r.allowed).toBe(true);
+    expect(r.resetInSeconds).toBe(900);
+  });
+
+  it("still denies over the limit", async () => {
+    const { client } = makeRedisStub([
+      [null, 11],
+      [null, 0],
+      [null, 120],
+    ]);
+    const r = await checkRateLimit("tenant-unlock", BUCKET, 10, 900, client);
+    expect(r.allowed).toBe(false);
+    expect(r.resetInSeconds).toBe(120);
   });
 });
