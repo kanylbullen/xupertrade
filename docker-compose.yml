@@ -271,6 +271,15 @@ services:
   caddy:
     build: ./caddy
     container_name: hypertrade-caddy
+    # --resume: boot from the last config the dashboard pushed through
+    # the admin API (POST /api/tls/configure → /load) instead of the
+    # bootstrap Caddyfile. Without it every container restart — a
+    # deploy, a host reboot, a crash — dropped the pushed Let's Encrypt
+    # config and served the self-signed bootstrap cert until someone
+    # POSTed again. Only pushed configs are autosaved: the Caddyfile
+    # sets `persist_config off`, so a host that never pushed keeps
+    # booting the current Caddyfile, edits included.
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--resume"]
     ports:
       - "80:80"
       - "443:443"
@@ -280,6 +289,14 @@ services:
       # for. Set in .env to match your dashboard hostname so browsers
       # don't get a name-mismatch warning on top of the self-signed one.
       CADDY_HOST: "${CADDY_HOST:-localhost}"
+      # Where the autosave lives: /config/pushed/caddy/autosave.json on
+      # the caddy_config volume. Deliberately NOT the image default
+      # (/config/caddy/): builds before --resume autosaved every config
+      # they loaded there, the bootstrap Caddyfile on each boot included,
+      # so on an existing host that file is a stale snapshot (usually of
+      # an old Caddyfile). Resuming it would silently undo later
+      # Caddyfile fixes, e.g. #168's CF-Connecting-IP strip.
+      XDG_CONFIG_HOME: /config/pushed
     volumes:
       - caddy_data:/data
       - caddy_config:/config
