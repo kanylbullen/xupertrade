@@ -33,6 +33,15 @@ from hypertrade.strategies.registry import get_strategy_family
 logger = logging.getLogger(__name__)
 
 
+class StartupRefused(RuntimeError):
+    """A live-mode (testnet/mainnet) boot precondition failed and the bot
+    cannot make itself safe any other way. `main.run()` turns this into
+    exit status 1 so the container's `unless-stopped` restart policy
+    retries the boot, instead of the process trading without the guards
+    the precondition exists for.
+    """
+
+
 @dataclass
 class FlatAllStatus:
     """Outcome of one flat-all attempt.
@@ -166,6 +175,13 @@ class EngineRunner:
         # `notional / new_leverage`. On a 10× bump that's 10× the
         # expected margin → liquidation path.
         self._pushed_leverage: dict[str, int] = {}
+        # True while strategies do not know about the DB's open positions
+        # (the startup read failed). No strategy runs until a restore
+        # succeeds — see `_halt_for_unrestored_state`.
+        self._restore_pending = False
+        # Backoff between attempts of the startup open-positions read.
+        # Instance attribute so tests can shrink it.
+        self._restore_read_backoff: tuple[float, ...] = (1.0, 2.0, 4.0)
         # Transient fetch-failure outage window (CLAUDE.md backlog
         # Open-Low: "Suppress Telegram noise on transient HL-fetch
         # failures"). Publishing per strategy per tick spammed Telegram
@@ -211,74 +227,188 @@ class EngineRunner:
         except Exception:
             logger.exception("Startup reconcile failed (continuing without it)")
 
-        try:
-            positions = await self.repo.get_open_positions()
-        except Exception:
-            logger.exception("Failed to fetch open positions for state restoration")
+        if not await self._restore_from_db(self._restore_read_backoff):
+            await self._halt_for_unrestored_state()
+
+    async def _restore_from_db(self, backoff: tuple[float, ...]) -> bool:
+        """Read the open positions and restore every strategy from them.
+
+        Retries the read once per entry in `backoff` (seconds to wait
+        before each retry). Returns False only when the read never
+        succeeded — the caller then decides how to stay safe; it used to
+        just `return`, leaving every strategy flat in memory while the
+        exchange held its positions (`analysis-2026-09-15.md` § 4, Low).
+        """
+        delays = list(backoff)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                positions = await self.repo.get_open_positions()
+                break
+            except Exception:
+                if not delays:
+                    logger.exception(
+                        "State restore: reading open positions failed "
+                        "(attempt %d, giving up)", attempt,
+                    )
+                    return False
+                delay = delays.pop(0)
+                logger.warning(
+                    "State restore: reading open positions failed "
+                    "(attempt %d) — retrying in %.0fs", attempt, delay,
+                    exc_info=True,
+                )
+                await asyncio.sleep(delay)
+        await self._restore_strategies(positions)
+        return True
+
+    async def _halt_for_unrestored_state(self) -> None:
+        """The open-positions read failed for good: stop trading.
+
+        Paper keeps the old behaviour (log and continue flat) — nothing
+        real is at risk. On testnet/mainnet the strategies do not know
+        about positions the exchange may hold, so running them means
+        trading next to unmanaged positions (no SL, duplicate opens). The
+        bot pauses via BotControl, tells Telegram, and retries the restore
+        on the first tick it finds un-paused; if that retry fails too it
+        pauses again. Without BotControl there is no pause to set, so
+        the boot is refused and the container restarts.
+        """
+        if settings.is_paper:
+            logger.error(
+                "State restore failed — PAPER mode, continuing with every "
+                "strategy flat in memory",
+            )
             return
 
+        self._restore_pending = True
+        if self.control is None:
+            raise StartupRefused(
+                "could not read open positions for state restoration and "
+                "there is no BotControl to pause the bot with"
+            )
+        try:
+            await self.control.set_paused(True)
+        except Exception as e:
+            raise StartupRefused(
+                "could not read open positions for state restoration, and "
+                f"pausing the bot failed too ({type(e).__name__}: {e})"
+            ) from e
+        message = (
+            "Could not read open positions from the database to restore "
+            "strategy state. Strategies would trade without knowing about "
+            "open positions, so the bot is PAUSED. Fix the database, then "
+            "un-pause: the restore is retried before any strategy runs, "
+            "and the bot pauses again if it still fails."
+        )
+        logger.error("State restore failed — %s", message)
+        await self._publish_error("state-restore", message)
+
+    async def _retry_pending_restore(self) -> bool:
+        """One restore attempt on an un-paused tick while a restore is
+        pending. True → strategies may run. False → re-paused."""
+        if await self._restore_from_db(()):
+            self._restore_pending = False
+            logger.warning(
+                "State restore succeeded after the operator un-paused — "
+                "strategies resume",
+            )
+            return True
+        if self.control is not None:
+            try:
+                await self.control.set_paused(True)
+            except Exception:
+                logger.exception("State restore: re-pausing the bot failed")
+        message = (
+            "Bot was un-paused but open positions still cannot be read "
+            "from the database; paused again. No strategy has run."
+        )
+        logger.error("State restore failed — %s", message)
+        await self._publish_error("state-restore", message)
+        return False
+
+    async def _publish_error(self, strategy: str, message: str) -> None:
+        """Publish an ErrorOccurred; a publish failure is logged, never raised."""
+        if not self.event_bus:
+            return
+        try:
+            await self.event_bus.publish(
+                ErrorOccurred(strategy=strategy, message=message)
+            )
+        except Exception:
+            logger.exception("%s: event publish failed", strategy)
+
+    def _restore_strategy_from_row(self, strat: Strategy, pos) -> None:
+        """Restore one strategy's in-memory position state from its DB row.
+
+        Prefers the exact `state_json` captured at open time; falls back
+        to recompute-based `restore_state` when it was never persisted
+        (legacy rows or strategies that don't override export_state).
+        """
         import json
+        state = None
+        if pos.state_json:
+            try:
+                state = json.loads(pos.state_json)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "[%s] Invalid state_json — falling back to recompute",
+                    pos.strategy_name,
+                )
+        if state is not None:
+            # Defensive sanity check on the persisted dict shape
+            # (audit L7). Strategies' restore_from_json silently
+            # falls back to defaults when expected keys are missing,
+            # which makes silent state corruption hard to spot. We
+            # also need an `isinstance(dict)` guard because
+            # `state_json` can deserialize to non-dict values
+            # (`null`, `[]`, `"foo"` from corrupted/hand-edited rows)
+            # — `set(state.keys())` would AttributeError otherwise
+            # and break startup (audit-bundle-4 review fix).
+            if not isinstance(state, dict):
+                logger.warning(
+                    "[%s] state_json deserialized to non-dict %r — "
+                    "falling back to recompute restore",
+                    pos.strategy_name, type(state).__name__,
+                )
+                strat.restore_state(pos.side, pos.entry_price)
+                return
+            _expected = {"in_long", "in_short", "entry", "sl", "tp"}
+            _missing = _expected - set(state.keys())
+            if _missing and any(
+                hasattr(strat, "_" + k.removeprefix("in_"))
+                or hasattr(strat, "_" + k)
+                for k in _missing
+            ):
+                logger.warning(
+                    "[%s] state_json missing keys %s — fields will "
+                    "use restore_from_json defaults (likely safe but "
+                    "indicates schema drift)",
+                    pos.strategy_name, sorted(_missing),
+                )
+            strat.restore_from_json(pos.side, pos.entry_price, state)
+            logger.info(
+                "Restored %s state from JSON: %s @ %.2f (state=%s)",
+                pos.strategy_name, pos.side, pos.entry_price, state,
+            )
+        else:
+            strat.restore_state(pos.side, pos.entry_price)
+            logger.info(
+                "Restored %s state (recomputed): %s @ %.2f",
+                pos.strategy_name, pos.side, pos.entry_price,
+            )
+
+    async def _restore_strategies(self, positions: list) -> None:
+        """Restore every strategy from the open DB rows (plus the Redis
+        cooldown snapshot for strategies that are flat)."""
         strat_by_name = {s.name: s for s in self.strategies}
         restored = 0
         for pos in positions:
             strat = strat_by_name.get(pos.strategy_name)
             if strat is None:
                 continue
-            # Prefer exact restore from stored state_json. Fall back to
-            # recompute-based restore_state if state was never persisted
-            # (legacy rows or strategies that don't override export_state).
-            state = None
-            if pos.state_json:
-                try:
-                    state = json.loads(pos.state_json)
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(
-                        "[%s] Invalid state_json — falling back to recompute",
-                        pos.strategy_name,
-                    )
-            if state is not None:
-                # Defensive sanity check on the persisted dict shape
-                # (audit L7). Strategies' restore_from_json silently
-                # falls back to defaults when expected keys are missing,
-                # which makes silent state corruption hard to spot. We
-                # also need an `isinstance(dict)` guard because
-                # `state_json` can deserialize to non-dict values
-                # (`null`, `[]`, `"foo"` from corrupted/hand-edited rows)
-                # — `set(state.keys())` would AttributeError otherwise
-                # and break startup (audit-bundle-4 review fix).
-                if not isinstance(state, dict):
-                    logger.warning(
-                        "[%s] state_json deserialized to non-dict %r — "
-                        "falling back to recompute restore",
-                        pos.strategy_name, type(state).__name__,
-                    )
-                    strat.restore_state(pos.side, pos.entry_price)
-                    restored += 1
-                    continue
-                _expected = {"in_long", "in_short", "entry", "sl", "tp"}
-                _missing = _expected - set(state.keys())
-                if _missing and any(
-                    hasattr(strat, "_" + k.removeprefix("in_"))
-                    or hasattr(strat, "_" + k)
-                    for k in _missing
-                ):
-                    logger.warning(
-                        "[%s] state_json missing keys %s — fields will "
-                        "use restore_from_json defaults (likely safe but "
-                        "indicates schema drift)",
-                        pos.strategy_name, sorted(_missing),
-                    )
-                strat.restore_from_json(pos.side, pos.entry_price, state)
-                logger.info(
-                    "Restored %s state from JSON: %s @ %.2f (state=%s)",
-                    pos.strategy_name, pos.side, pos.entry_price, state,
-                )
-            else:
-                strat.restore_state(pos.side, pos.entry_price)
-                logger.info(
-                    "Restored %s state (recomputed): %s @ %.2f",
-                    pos.strategy_name, pos.side, pos.entry_price,
-                )
+            self._restore_strategy_from_row(strat, pos)
             restored += 1
 
         # Audit M6 follow-up: also restore Redis-backed strategy state for
@@ -585,6 +715,16 @@ class EngineRunner:
             for s in self.strategies:
                 if s.name in leverage_overrides:
                     s.leverage = leverage_overrides[s.name]
+
+        # A startup state restore that never succeeded paused the bot
+        # (`_halt_for_unrestored_state`). The first un-paused tick retries
+        # it before any strategy runs; a failure pauses the bot again.
+        if (
+            not paused
+            and self._restore_pending
+            and not await self._retry_pending_restore()
+        ):
+            paused = True
 
         if paused:
             logger.info("Tick skipped — bot is paused")
