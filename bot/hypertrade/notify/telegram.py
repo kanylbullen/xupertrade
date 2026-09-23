@@ -1008,7 +1008,11 @@ class TelegramNotifier:
 
         token = uuid.uuid4().hex
         await self._control.request_flat_all(token)
-        return f"{_mode_prefix()} ✅ Flat-all requested (token <code>{token[:8]}…</code>)."
+        return (
+            f"{_mode_prefix()} ✅ Flat-all requested (token "
+            f"<code>{token[:8]}…</code>). Once every close fills the bot "
+            f"PAUSES itself; send /resume when you want it trading again."
+        )
 
     # --- Mainnet variants (audit C4) ---------------------------------------
     # Each delegates to the testnet implementation pattern, but writes to
@@ -1062,5 +1066,7 @@ class TelegramNotifier:
         await self._mainnet_control.request_flat_all(token)
         return (
             f"{MODE_BADGE['mainnet']} ✅ MAINNET flat-all requested "
-            f"(token <code>{token[:8]}…</code>)."
+            f"(token <code>{token[:8]}…</code>). Once every close fills "
+            f"the bot PAUSES itself; send /resume_mainnet when you want it "
+            f"trading again."
         )

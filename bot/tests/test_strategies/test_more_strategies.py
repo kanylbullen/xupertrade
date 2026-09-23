@@ -330,6 +330,40 @@ class TestHashMomentumStrategy:
             f"{strat._bars_since_close}"
         )
 
+    @pytest.mark.asyncio
+    async def test_restored_cooldown_counts_the_bars_since_the_snapshot(self):
+        """The Redis snapshot is written when the position closes and not
+        again when the cooldown expires. Restoring its counter and adding
+        1 on the next new bar re-imposed nearly the whole 6-bar (~20 h)
+        cooldown on every restart, however long ago the close was. The
+        first bar after a restart now adds every bar elapsed since the
+        snapshot's bar."""
+        df = _flat_df(self.WARMUP + 5, price=100.0)
+        close_bar = df["timestamp"].iloc[-2]  # hash_momentum's closed bar
+        snapshot = {
+            "in_long": False, "in_short": False, "entry": 100.0,
+            "sl": 97.8, "tp": 105.5, "bars_since_close": 0,
+            "last_closed_bar_ts": pd.Timestamp(close_bar).isoformat(),
+        }
+
+        # Restart ten bars after the close.
+        later = _flat_df(self.WARMUP + 15, price=100.0)
+        strat = HashMomentumStrategy(cooldown_bars=6)
+        strat.restore_cooldown_only(snapshot)
+        assert strat._bars_since_close == 0
+        await strat.on_candle(later)
+        assert strat._bars_since_close == 10
+        assert strat._bars_since_close >= strat.cooldown_bars
+
+        # Restart inside the cooldown: two bars later, still cooling down.
+        soon = _flat_df(self.WARMUP + 7, price=100.0)
+        strat = HashMomentumStrategy(cooldown_bars=6)
+        strat.restore_cooldown_only(snapshot)
+        for _ in range(30):  # repeated ticks on the same bar
+            await strat.on_candle(soon)
+        assert strat._bars_since_close == 2
+        assert strat._bars_since_close < strat.cooldown_bars
+
 
 # ===========================================================================
 # MACD Zero-Line Strategy (stateless: long/exit on MACD zero-cross)

@@ -270,7 +270,7 @@ async def test_reconcile_close_books_pnl_into_the_portfolio():
 
     await runner._on_reconcile_close("hash_momentum", -12.5)
 
-    strategy.reset_state.assert_called_once()
+    strategy.reset_position.assert_called_once()
     runner.portfolio.record_pnl.assert_awaited_once_with(-12.5)
 
 
@@ -283,7 +283,7 @@ async def test_reconcile_close_without_pnl_only_resets_state():
 
     await runner._on_reconcile_close("hash_momentum", None)
 
-    strategy.reset_state.assert_called_once()
+    strategy.reset_position.assert_called_once()
     runner.portfolio.record_pnl.assert_not_awaited()
 
 
@@ -329,6 +329,7 @@ def _tick_control(pending="tok-1"):
     control.get_pending_flat_request = AsyncMock(return_value=pending)
     control.acknowledge_flat_request = AsyncMock()
     control.is_paused = AsyncMock(return_value=True)  # skip the strategy loop
+    control.set_paused = AsyncMock()  # a completed flat-all pauses the bot
     control.get_disabled_strategies = AsyncMock(return_value=set())
     control.get_all_leverage_overrides = AsyncMock(return_value={})
     return control
@@ -353,6 +354,7 @@ async def test_tick_does_not_acknowledge_flat_all_on_read_failure():
     await runner.tick()
 
     control.acknowledge_flat_request.assert_not_awaited()
+    control.set_paused.assert_not_awaited()
     exchange.place_order.assert_not_called()
     messages = [e.message for e in _published(event_bus)]
     assert any("Flat-all did not complete" in m for m in messages)
@@ -375,6 +377,7 @@ async def test_tick_acknowledges_a_flat_all_that_actually_worked(monkeypatch):
     await runner.tick()
 
     control.acknowledge_flat_request.assert_awaited_once_with("tok-1")
+    control.set_paused.assert_awaited_once_with(True)
 
 
 @pytest.mark.asyncio
