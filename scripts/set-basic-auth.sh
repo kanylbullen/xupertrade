@@ -3,8 +3,8 @@
 #
 # This is the way back in when /login says "Authentication is locked":
 # the stored auth mode is gone (Redis flushed, or its volume removed),
-# nobody can sign in, and Options -> Authentication, where the user is
-# normally set, sits behind the same lock. It also works as a plain
+# nobody can sign in, and POST /api/auth/configure, the only in-app way
+# to set the user, sits behind the same lock. It also works as a plain
 # password reset.
 #
 # Usage (interactive; -t so the password prompt gets a terminal):
@@ -21,7 +21,7 @@
 #   2. Prompts for the password twice, without echo. Every character
 #      counts, leading and trailing whitespace included.
 #   3. bcrypt-hashes it (cost 12, the dashboard's own @node-rs/bcrypt —
-#      the same call Options -> Authentication makes) inside the
+#      the same call POST /api/auth/configure makes) inside the
 #      dashboard container, with the password on stdin.
 #   4. Writes `dashboard:auth:basic:user` and `dashboard:auth:basic:hash`
 #      in one MULTI/EXEC, fed to redis-cli on stdin. The stored mode:

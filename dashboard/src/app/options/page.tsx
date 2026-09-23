@@ -102,10 +102,11 @@ export default async function OptionsPage({
           - /api/tls/{config,configure} stay behind requireOperator
             (Phase 6c PR γ #59). Underlying Caddy config still lives
             in Redis where the removed UI wrote it.
-          - /api/auth/configure is currently NOT operator-gated —
-            tenant-isolation gap left over from PR ε that the
-            followup PR will close along with migrating both stores
-            from Redis to Phase-injected env vars. */}
+          - /api/auth/configure is operator-gated too (#67). At every
+            start lib/phase-sync.ts copies each auth key whose Phase
+            env var is set into Redis; the rest (basic user/hash, and
+            the mode unless AUTH_MODE is basic|oidc) keep whatever was
+            last written. */}
 
       {/* Strategy controls */}
       <Card>

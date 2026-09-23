@@ -241,8 +241,8 @@ export type CaddyStatus =
 
 /**
  * Query Caddy's running config for cert subjects + issuer.
- * Mirrors `caddy_admin.py:get_status`. Used by the Options page
- * TLS card to surface "issued for" + issuer state.
+ * Mirrors `caddy_admin.py:get_status`. Used by GET /api/tls/config
+ * to report "issued for" + issuer state.
  */
 export async function getCaddyStatus(): Promise<CaddyStatus> {
   try {

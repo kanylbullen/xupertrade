@@ -5,9 +5,11 @@
 # to proceed. Default host is 'localhost' which works for SSH-tunneled
 # access; override via CADDY_HOST env to issue for your actual domain.
 #
-# Once a domain + Cloudflare API token are saved on the Options page,
-# the bot POSTs a full Let's Encrypt config to Caddy's admin API on
-# :2019 which replaces this entirely. Real cert, no browser warning.
+# Once an operator POSTs /api/tls/configure with a domain + Cloudflare
+# API token, the dashboard pushes a full Let's Encrypt config to Caddy's
+# admin API on :2019, which replaces this in the running Caddy. Real
+# cert, no browser warning. Caddy runs without --resume, so after the
+# container restarts it serves this file again until the next POST.
 
 {
     admin 0.0.0.0:2019

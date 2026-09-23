@@ -15,8 +15,7 @@ type Me = {
 type AuthCfg = { mode: string };
 
 // Default to "disabled" so we don't flash a placeholder before
-// /api/auth/config resolves on disabled-auth deploys (matches the
-// old SignOut component's render-nothing behavior). The fetch
+// /api/auth/config resolves on disabled-auth deploys. The fetch
 // flips it to the real mode once it lands.
 const DEFAULT_AUTH_MODE = "disabled";
 

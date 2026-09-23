@@ -21,8 +21,8 @@ lives in history. **Never commit any of these:**
 |---|---|---|
 | Telegram bot token | `8639592584:AAGj…` (digits, colon, 35 base64 chars) | Phase secrets manager (see § 3) |
 | HyperLiquid private key | `0x` + 64 hex chars | Phase secrets manager |
-| Cloudflare API token | 40-char base64 | Redis (`dashboard:tls:cf_token`) via Options page |
-| OIDC client secret | provider-specific | Redis (`dashboard:auth:oidc_client_secret`) |
+| Cloudflare API token | 40-char base64 | Redis (`dashboard:tls:cf_token`) via operator-only `POST /api/tls/configure`. `lib/tls-config.ts` reads `TLS_CF_API_TOKEN` first, but `docker-compose.yml` doesn't pass it to the dashboard today |
+| OIDC client secret | provider-specific | Phase (`OIDC_CLIENT_SECRET`), copied into Redis (`dashboard:auth:oidc:client_secret`) at start |
 | `API_KEY` for the bot HTTP API | random string | Phase secrets manager |
 | Phase service token | base64 | only on the host's `~/.phase/` config; NEVER in repo |
 | Personal email used live | `you@yourdomain.com` | Phase (`TELEGRAM_*`, OIDC config); generic placeholder in docs (`you@example.com`) |
@@ -132,7 +132,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 │       │                            # /settings/bots, /settings/credentials, /unlock, /login, /admin/server,
 │       │                            # /admin/[tenantId] (operator-only), /api/... — /status 308-redirects to /settings/bots
 │       ├── proxy.ts                 # Next 16 proxy.ts (was middleware.ts) — auth gate
-│       ├── components/              # PositionCard, IndicatorStatus, BotControls, AuthConfig, TlsConfig, MultiCoinToggle, ...
+│       ├── components/              # AppSidebar, UserMenu, PositionCard, IndicatorStatus, MultiCoinToggle, ...
 │       └── lib/
 │           ├── bot-api.ts           # mode-aware bot API proxy (adds the per-bot X-Api-Key — see bot-api-key.ts)
 │           ├── bot-api-key.ts       # generates + persists each tenant bot's unique API key in Redis (`tenant:bot:<botId>:api_key`)
@@ -217,7 +217,7 @@ only for the `mainnet` bot and `false` for `paper`/`testnet`
   reach the container over the compose network, not the published port.
 - **Caddy reverse proxy:** `:80` (HTTP→HTTPS redirect), `:443` (HTTPS), `:443/udp` (HTTP/3). Admin API on `:2019` (internal Docker network only).
 - **HTTPS:** `https://$DEPLOY_HOST/` — Let's Encrypt cert auto-renewed by Caddy via Cloudflare DNS-01.
-- **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis. If `/login` says **Authentication is locked**, see "Dashboard auth recovery" below.
+- **Auth:** username + password (basic) or OIDC. Configured through Phase (`AUTH_MODE`, `OIDC_*`, copied into Redis at start by `lib/phase-sync.ts`) or, for a basic user, `scripts/set-basic-auth.sh`; operator-only `POST /api/auth/configure` writes the same keys. There is no settings UI for it (removed in #66). Bcrypt hashes + HMAC-signed session cookies stored in Redis. If `/login` says **Authentication is locked**, see "Dashboard auth recovery" below.
 
 ### Dashboard auth recovery (`locked`)
 
@@ -226,8 +226,9 @@ the installation authenticates: the stored `dashboard:auth:mode` is gone
 (Redis flushed, or the `redisdata` volume removed) and no basic user or
 OIDC config survived, or a stored/env mode is not a real mode. Every
 page redirects to `/login`, which explains this instead of rendering
-data. **Options → Authentication cannot fix it** — `/options` and
-`/api/auth/configure` sit behind the same lock — and there is **no env
+data. **`POST /api/auth/configure` cannot fix it** — while locked,
+`proxy.ts` redirects every non-public path to `/login`, that route
+included, even for a valid session — and there is **no env
 var for a basic user**: `getAuthConfig` reads only `AUTH_MODE` and
 `OIDC_*` from env. If `AUTH_MODE` in Phase is itself a typo, fix it
 there first — env wins over everything below. Otherwise any one of
@@ -271,7 +272,7 @@ the operator tenant's trades and positions included, to anyone who can
 reach the dashboard for as long as it is set. Since #171 it is
 env-only — `phase-sync.ts` never copies `disabled` into Redis — so it
 stops applying once removed, but it is not a recovery path, and not a
-bootstrap one either: Options → Authentication needs a signed-in
+bootstrap one either: `POST /api/auth/configure` needs a signed-in
 operator, and `disabled` signs nobody in.
 
 **Check for a leftover stored `disabled`.** Builds before #171 copied

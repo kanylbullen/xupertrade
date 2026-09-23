@@ -110,7 +110,7 @@ export default async function LoginPage({
  * secret or its value.
  *
  * Every path listed here has to work from outside the dashboard:
- * Options → Authentication sits behind this same lock, and there is
+ * POST /api/auth/configure sits behind this same lock, and there is
  * no env var for a basic user — `getAuthConfig` reads only
  * `AUTH_MODE` and `OIDC_*` from env. The full procedure is in
  * CLAUDE.md § 3, "Dashboard auth recovery".

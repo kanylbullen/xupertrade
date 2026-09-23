@@ -135,7 +135,7 @@ describe("getAuthConfig", () => {
 
   it("honours an explicitly stored disabled mode", async () => {
     // A value that is PRESENT cannot be the flush we're defending
-    // against — the operator chose "Off" on the Options page.
+    // against — the operator stored "disabled" on purpose.
     clearAuthEnv();
     const { client } = makeRedisStub([
       "disabled",
