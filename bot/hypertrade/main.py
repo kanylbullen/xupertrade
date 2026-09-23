@@ -71,19 +71,13 @@ async def main() -> None:
         logger.warning("Database unavailable — running without persistence")
         repo = None
 
-    # Reconcile DB positions with exchange reality on startup.
-    # Closes orphan rows (DB says open, exchange says no position) and rows
-    # whose side disagrees with the exchange. Size mismatches are logged.
-    if repo is not None:
-        try:
-            actions = await repo.reconcile_positions(exchange)
-            if actions:
-                logger.warning(
-                    "Reconcile: cleaned up %d stale DB position(s) on startup",
-                    len(actions),
-                )
-        except Exception:
-            logger.exception("Reconcile failed (continuing without it)")
+    # The startup reconcile used to run HERE, before the event bus,
+    # BotControl and the portfolio existed — so it had no pause gate
+    # (a paused bot's book got flattened anyway), no way to book the
+    # realised PnL, and no way to tell Telegram. It now runs as the
+    # first thing `EngineRunner.startup()` does, where all three are
+    # wired. Same position in the boot order relative to
+    # `PaperExchange.load_state()` (line ~47) and to state restoration.
 
     # Set up event bus
     event_bus: EventBus

@@ -19,7 +19,7 @@ from hypertrade.config import settings
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.indicators_status import get_all_status
 from hypertrade.events.bus import channel_for
-from hypertrade.exchange.base import Exchange
+from hypertrade.exchange.base import Exchange, ExchangeReadError
 from hypertrade.notify.rate_limit import check_rate_limit
 from hypertrade.strategies.base import Strategy
 
@@ -753,8 +753,17 @@ class TelegramNotifier:
     async def _cmd_status(self, _args: list[str]) -> str:
         if not self._exchange or not self._control:
             return "Status unavailable (control/exchange not wired)"
-        balance = await self._exchange.get_balance()
-        positions = await self._exchange.get_positions()
+        try:
+            balance = await self._exchange.get_balance()
+            positions = await self._exchange.get_positions()
+        except ExchangeReadError as e:
+            # "Equity $0.00, 0 open positions" while the exchange is
+            # unreachable is a lie the operator would act on.
+            return (
+                f"{_mode_prefix()} ⚠️ Exchange unreadable right now "
+                f"(<code>{html.escape(str(e))}</code>). Equity and positions "
+                f"unknown — try again shortly."
+            )
         paused = await self._control.is_paused()
         disabled = sorted(await self._control.get_disabled_strategies())
         active = [s.name for s in self._strategies if s.name not in disabled]
@@ -804,7 +813,14 @@ class TelegramNotifier:
     async def _cmd_positions(self, _args: list[str]) -> str:
         if not self._exchange:
             return "Exchange unavailable"
-        positions = await self._exchange.get_positions()
+        try:
+            positions = await self._exchange.get_positions()
+        except ExchangeReadError as e:
+            return (
+                f"{_mode_prefix()} ⚠️ Exchange unreadable right now "
+                f"(<code>{html.escape(str(e))}</code>). This is NOT "
+                f"“no open positions” — try again shortly."
+            )
         if not positions:
             return f"{_mode_prefix()} No open positions."
         lines = [f"{_mode_prefix()} <b>Open positions</b>"]
@@ -971,7 +987,18 @@ class TelegramNotifier:
         if not self._control:
             return "Control unavailable"
         if not args or args[0].lower() != "confirm":
-            positions = await self._exchange.get_positions() if self._exchange else []
+            try:
+                positions = (
+                    await self._exchange.get_positions() if self._exchange else []
+                )
+            except ExchangeReadError as e:
+                return (
+                    f"{_mode_prefix()} ⚠️ Exchange unreadable "
+                    f"(<code>{html.escape(str(e))}</code>) — cannot say how "
+                    f"many positions a flat-all would close. Send "
+                    f"<code>/flat confirm</code> anyway to queue it; the bot "
+                    f"only acknowledges the request once every close filled."
+                )
             return (
                 f"{_mode_prefix()} ⚠️ This will close <b>{len(positions)}</b> open positions.\n"
                 f"Reply with <code>/flat confirm</code> to proceed."

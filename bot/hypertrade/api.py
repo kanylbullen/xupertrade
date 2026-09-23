@@ -15,7 +15,7 @@ from hypertrade.db.repo import Repository
 from hypertrade.strategies.meta_loader import metadata_for
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.indicators_status import get_all_status
-from hypertrade.exchange.base import Exchange
+from hypertrade.exchange.base import Exchange, ExchangeReadError
 from hypertrade.strategies.base import Strategy
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,12 @@ async def hyperliquid_diagnostic(request: web.Request) -> web.Response:
                 "open_positions": len(positions),
                 "btc_mid_price": btc_price,
             }
+        )
+    except ExchangeReadError as e:
+        logger.warning("HyperLiquid diagnostic — exchange read failed: %s", e)
+        return _cors(
+            {"ok": False, "error": "exchange read failed", "detail": str(e)},
+            status=503,
         )
     except Exception as e:
         logger.exception("HyperLiquid diagnostic failed")
@@ -172,6 +178,13 @@ async def positions_handler(request: web.Request) -> web.Response:
                 for p in positions
             ]
         })
+    except ExchangeReadError as e:
+        # 503, not an empty list: the dashboard must not render "no open
+        # positions" because HyperLiquid returned a 502.
+        logger.warning("Positions unavailable — exchange read failed: %s", e)
+        return _cors(
+            {"error": "exchange read failed", "detail": str(e)}, status=503,
+        )
     except Exception as e:
         logger.exception("Failed to get positions from exchange")
         return _cors({"error": str(e)}, status=500)
@@ -270,8 +283,18 @@ def _control_routes(
         disabled = sorted(await control.get_disabled_strategies())
         overrides = await control.get_all_leverage_overrides()
         allow_multi = await control.get_allow_multi_coin()
-        positions = await exchange.get_positions()
-        balance = await exchange.get_balance()
+        try:
+            positions = await exchange.get_positions()
+            balance = await exchange.get_balance()
+        except ExchangeReadError as e:
+            # Same reasoning as /api/positions: reporting 0 positions and
+            # $0 equity because the exchange was unreachable is worse
+            # than reporting nothing.
+            logger.warning("State unavailable — exchange read failed: %s", e)
+            return _cors(
+                {"error": "exchange read failed", "detail": str(e)},
+                status=503,
+            )
         leverage = {
             s.name: {
                 "default": s.__class__.leverage,

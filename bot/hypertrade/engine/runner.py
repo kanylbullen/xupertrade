@@ -4,12 +4,13 @@ import asyncio
 import logging
 import socket
 import time
+from dataclasses import dataclass
 
 import aiohttp
 
 from hypertrade.config import settings
 from hypertrade.data.feed import fetch_candles
-from hypertrade.db.repo import Repository
+from hypertrade.db.repo import ReconcileResult, Repository
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.portfolio import PortfolioManager
 from hypertrade.engine.signals import Signal, SignalAction
@@ -24,11 +25,26 @@ from hypertrade.events.types import (
     TickCompleted,
     TradeExecuted,
 )
-from hypertrade.exchange.base import Exchange, OrderType
+from hypertrade.exchange.base import Exchange, ExchangeReadError, OrderType
 from hypertrade.strategies.base import Strategy
 from hypertrade.strategies.registry import get_strategy_family
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FlatAllStatus:
+    """Outcome of one flat-all attempt.
+
+    Exists so the caller can tell "the book is flat" from "I never got
+    to look at the book". The second one must not acknowledge the
+    operator's request (`bot/reports/analysis-2026-09-15.md` § 4, High).
+    """
+
+    ok: bool
+    closed: int = 0
+    failed: int = 0
+    reason: str = ""
 
 
 class TradeDbDivergence(Exception):
@@ -56,6 +72,13 @@ _TRANSIENT_NETWORK_ERRORS = (
 
 def _is_transient_network_error(exc: BaseException) -> bool:
     """True for HL/network outages where the bot recovers on its own."""
+    # An ExchangeReadError is a wrapper, never the diagnosis — look at
+    # what it wraps. Without this, every read that now raises instead of
+    # returning `[]` would be classed non-transient and publish one
+    # Telegram error per strategy per tick for the whole outage, which
+    # is exactly the noise the outage aggregator exists to prevent.
+    if isinstance(exc, ExchangeReadError) and exc.__cause__ is not None:
+        return _is_transient_network_error(exc.__cause__)
     if isinstance(exc, _TRANSIENT_NETWORK_ERRORS):
         return True
     # HL SDK ServerError uses a single class for all 4xx/5xx — only
@@ -119,6 +142,13 @@ class EngineRunner:
         self.control = control
         self.portfolio = PortfolioManager(exchange, control=control)
         self._last_reconcile = 0.0  # epoch seconds
+        # Last reconcile summary we sent to Telegram. A divergence
+        # reconcile cannot resolve (an unpriceable row, a multi-hour HL
+        # outage) repeats verbatim every 5 minutes; publishing it every
+        # time is the "Telegram is for humans" failure the fetch-outage
+        # aggregator exists to avoid. Identical consecutive summaries
+        # are logged but published once.
+        self._last_reconcile_notice: str | None = None
         self._last_funding_poll = 0.0
         self._last_hodl_check = 0.0
         self._last_hodl_zones: dict[str, str] = {}  # signal_name -> last verdict
@@ -157,6 +187,15 @@ class EngineRunner:
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
 
+        Also owns the startup reconcile. It used to run in `main.py`
+        before the runner existed, which meant it had no pause gate, no
+        PnL callback and no event bus: a boot during an HL blip flattened
+        the book silently, even on a paused bot. Here it goes through
+        `_run_reconcile`, so it gets all three. It runs BEFORE state
+        restoration, exactly as the `main.py` call did, so a restored
+        strategy is never restored into a row reconcile is about to
+        close.
+
         NOTE: PR 4c removed `_kick_caddy_tls_restore` (the dashboard now
         owns Caddy admin via `dashboard/src/lib/caddy-admin.ts`). The
         callers in this method were accidentally left behind and crashed
@@ -165,6 +204,12 @@ class EngineRunner:
         """
         if not self.repo:
             return
+
+        try:
+            await self._run_reconcile("Startup")
+        except Exception:
+            logger.exception("Startup reconcile failed (continuing without it)")
+
         try:
             positions = await self.repo.get_open_positions()
         except Exception:
@@ -278,6 +323,100 @@ class EngineRunner:
                 restored, len(positions),
             )
 
+    async def _run_reconcile(self, label: str) -> "ReconcileResult | None":
+        """Run one reconcile pass and make sure the outcome is visible.
+
+        Two things the old call site got wrong, both from
+        `bot/reports/analysis-2026-09-15.md` § 2:
+
+        - Results only ever reached `logger.warning`, so Telegram never
+          heard that the book had been flattened. Any action, failure or
+          read-failure skip now publishes an `ErrorOccurred`.
+        - Reconcile ran before the tick's `paused` check, so pausing the
+          bot did not stop it closing rows, writing `Trade` rows, booking
+          PnL and market-closing the very positions the pause was meant
+          to preserve. A paused pass is now a DRY RUN: it reports what it
+          would have closed and writes nothing. A pause flag we cannot
+          read is treated AS paused.
+        """
+        if not self.repo:
+            return None
+
+        paused = False
+        if self.control:
+            try:
+                paused = await self.control.is_paused()
+            except Exception:
+                logger.warning(
+                    "Reconcile: could not read the paused flag — assuming "
+                    "PAUSED, so this pass writes nothing and orders nothing",
+                )
+                paused = True
+        if paused:
+            logger.info(
+                "Reconcile: bot is paused — dry run. Divergences are "
+                "reported; no rows closed, no trades written, no orders.",
+            )
+
+        result = await self.repo.reconcile_positions(
+            self.exchange,
+            close_exchange_orphans=not paused,
+            on_strategy_close=self._on_reconcile_close,
+            dry_run=paused,
+        )
+
+        if result.skipped:
+            logger.warning("%s reconcile: %s", label, result.skipped)
+        elif result.took_action:
+            logger.warning(
+                "%s reconcile: %d action(s), %d failure(s) — %s",
+                label, len(result.actions), len(result.failures),
+                result.summary(),
+            )
+
+        notice = result.summary() if (result.skipped or result.took_action) else None
+        if notice is None:
+            self._last_reconcile_notice = None
+        elif notice == self._last_reconcile_notice:
+            logger.info(
+                "Reconcile: same outcome as the previous pass — not "
+                "re-publishing to Telegram (%s)", notice,
+            )
+        elif self.event_bus:
+            self._last_reconcile_notice = notice
+            try:
+                await self.event_bus.publish(
+                    ErrorOccurred(
+                        strategy="reconcile",
+                        message=f"{label} reconcile — {notice}",
+                    )
+                )
+            except Exception:
+                logger.exception("Reconcile: event publish failed")
+        else:
+            self._last_reconcile_notice = notice
+        return result
+
+    async def _on_reconcile_close(
+        self, strategy_name: str, pnl: float | None = None,
+    ) -> None:
+        """Reconcile closed a DB row outside the normal signal path.
+
+        Resets the strategy's in-memory state AND books the realised PnL
+        into the portfolio. Before this, reconcile closes were invisible
+        to `portfolio.record_pnl`, so the `MAX_DAILY_LOSS_USD` kill
+        switch never saw the losses it exists to stop.
+        """
+        self._reset_strategy_state(strategy_name)
+        if pnl is None:
+            return
+        try:
+            await self.portfolio.record_pnl(float(pnl))
+        except Exception:
+            logger.exception(
+                "Reconcile: failed to record PnL %.4f for %s", pnl, strategy_name,
+            )
+
     def _reset_strategy_state(self, strategy_name: str) -> None:
         """Called by reconcile when it closes a DB position outside the
         normal signal path. Without this, the strategy keeps _in_position=True
@@ -311,15 +450,7 @@ class EngineRunner:
         # divergence between DB and exchange.
         if self.repo and (time.time() - self._last_reconcile) > 300:
             try:
-                actions = await self.repo.reconcile_positions(
-                    self.exchange,
-                    on_strategy_close=self._reset_strategy_state,
-                )
-                if actions:
-                    logger.warning(
-                        "Periodic reconcile: %d action(s) — %s",
-                        len(actions), "; ".join(actions),
-                    )
+                await self._run_reconcile("Periodic")
             except Exception:
                 logger.exception("Periodic reconcile failed")
             self._last_reconcile = time.time()
@@ -393,12 +524,36 @@ class EngineRunner:
                     "Vault scan failed — will retry on next tick"
                 )
 
-        # Honor flat-all request before everything else
+        # Honor flat-all request before everything else. The request is
+        # acknowledged ONLY on full success: acknowledging a flat-all
+        # that never read the exchange (or left closes failing) tells
+        # the operator the book is flat when it is not.
         if self.control:
             pending = await self.control.get_pending_flat_request()
             if pending:
-                await self._flat_all_positions()
-                await self.control.acknowledge_flat_request(pending)
+                status = await self._flat_all_positions()
+                if status.ok:
+                    await self.control.acknowledge_flat_request(pending)
+                else:
+                    logger.error(
+                        "Flat-all NOT acknowledged (%s) — the request stays "
+                        "pending and retries next tick", status.reason,
+                    )
+                    if self.event_bus:
+                        try:
+                            await self.event_bus.publish(
+                                ErrorOccurred(
+                                    strategy="flat-all",
+                                    message=(
+                                        f"Flat-all did not complete: "
+                                        f"{status.reason}. Positions may "
+                                        f"still be open; the request stays "
+                                        f"pending and retries next tick."
+                                    ),
+                                )
+                            )
+                        except Exception:
+                            logger.exception("Flat-all: event publish failed")
 
         paused = False
         disabled: set[str] = set()
@@ -489,27 +644,52 @@ class EngineRunner:
             except Exception:
                 logger.exception("Failed to update position P&L")
 
-        # Snapshot equity (always, even when paused)
+        # Snapshot equity (always, even when paused). A failed read is
+        # skipped, not zeroed: `get_balance()` used to answer a 502 with
+        # Balance(total=0), which wrote a $0 equity snapshot and made the
+        # dashboard and the drawdown maths see a blown account.
         try:
             balance = await self.exchange.get_balance()
-            if self.repo:
-                await self.repo.snapshot_equity(
-                    balance.total, balance.available, balance.unrealized_pnl
-                )
+        except ExchangeReadError as e:
+            logger.warning(
+                "Equity snapshot skipped this tick — exchange read failed: %s", e,
+            )
+        except Exception:
+            logger.exception("Failed to read balance for equity snapshot")
+        else:
+            try:
+                if self.repo:
+                    await self.repo.snapshot_equity(
+                        balance.total, balance.available, balance.unrealized_pnl
+                    )
+            except Exception:
+                logger.exception("Failed to snapshot equity")
 
             if self.event_bus:
-                positions = await self.exchange.get_positions()
-                await self.event_bus.publish(
-                    BotHeartbeat(
-                        mode=settings.exchange_mode,
-                        strategies=",".join(s.name for s in self.strategies),
-                        equity=balance.total,
-                        positions=len(positions),
-                        uptime_seconds=int(time.time() - _start_time),
+                try:
+                    positions = await self.exchange.get_positions()
+                except ExchangeReadError as e:
+                    logger.warning(
+                        "Heartbeat position count unavailable — "
+                        "exchange read failed: %s", e,
                     )
-                )
-        except Exception:
-            logger.exception("Failed to snapshot equity")
+                except Exception:
+                    logger.exception("Failed to read positions for heartbeat")
+                else:
+                    try:
+                        await self.event_bus.publish(
+                            BotHeartbeat(
+                                mode=settings.exchange_mode,
+                                strategies=",".join(
+                                    s.name for s in self.strategies
+                                ),
+                                equity=balance.total,
+                                positions=len(positions),
+                                uptime_seconds=int(time.time() - _start_time),
+                            )
+                        )
+                    except Exception:
+                        logger.exception("Failed to publish heartbeat")
 
     async def _settle_fetch_outage(self, now: float | None = None) -> None:
         """Aggregate this tick's transient fetch failures into outage
@@ -600,20 +780,36 @@ class EngineRunner:
                 except Exception:
                     logger.exception("fetch-outage: event publish failed")
 
-    async def _flat_all_positions(self) -> None:
-        """Close every open position with a market order."""
+    async def _flat_all_positions(self) -> "FlatAllStatus":
+        """Close every open position with a market order.
+
+        Returns a status instead of None so the caller can refuse to
+        acknowledge the request. `ok` is true only when the exchange was
+        actually readable AND every close filled — "I could not read the
+        exchange" used to look identical to "there was nothing to close".
+        """
         try:
             positions = await self.exchange.get_positions()
-        except Exception:
-            logger.exception("Failed to fetch positions for flat-all")
-            return
+        except Exception as e:
+            # One handler: whatever the type, we did not get to look at
+            # the book, so the answer is the same. Flat-all is a rare
+            # operator action, so the traceback is worth having.
+            logger.exception(
+                "Flat-all: exchange read failed — NOT treating the book as "
+                "flat and NOT acknowledging the request",
+            )
+            return FlatAllStatus(
+                ok=False,
+                reason=f"exchange read failed ({type(e).__name__}): {e}",
+            )
 
         if not positions:
             logger.info("Flat-all requested — no open positions")
-            return
+            return FlatAllStatus(ok=True, closed=0)
 
         logger.warning("Flat-all closing %d positions", len(positions))
         failed = 0
+        closed = 0
         for pos in positions:
             try:
                 close_side = "sell" if pos.side == "long" else "buy"
@@ -666,6 +862,7 @@ class EngineRunner:
                             reason="Flat-all from dashboard (no open DB rec)",
                         )
                     await self.portfolio.record_pnl(realized_pnl)
+                    closed += 1
                     logger.warning(
                         "Closed %s %s @ %.2f (no DB rec; PnL %.2f)",
                         pos.side, pos.symbol, filled_price, realized_pnl,
@@ -704,6 +901,7 @@ class EngineRunner:
                         rec.strategy_name, rec.side, pos.symbol,
                         filled_price, rec_entry, rec_size, share * 100, rec_pnl,
                     )
+                closed += 1
             except Exception:
                 logger.exception("Failed to close position %s", pos.symbol)
                 failed += 1
@@ -713,6 +911,13 @@ class EngineRunner:
                 "Flat-all completed with %d failures — manual intervention may be required",
                 failed,
             )
+            return FlatAllStatus(
+                ok=False,
+                closed=closed,
+                failed=failed,
+                reason=f"{failed} of {len(positions)} close(s) failed",
+            )
+        return FlatAllStatus(ok=True, closed=closed)
 
     async def _update_position_pnl(self) -> None:
         """Update unrealized P&L for all open positions in the DB."""
@@ -1358,9 +1563,22 @@ class EngineRunner:
 
         try:
             ex_positions = await self.exchange.get_positions()
+        except ExchangeReadError as e:
+            # Deliberately non-blocking: a read failure must not stall
+            # the trade flow. But say plainly that parity was NOT
+            # verified — the True below is "don't pause", not "checked
+            # and fine".
+            logger.warning(
+                "[%s] parity NOT VERIFIED for %s — exchange read failed "
+                "(%s). Proceeding without a parity check; the next "
+                "reconcile pass re-checks it.",
+                settings.exchange_mode, symbol, e,
+            )
+            return True
         except Exception:
             logger.exception(
-                "parity: exchange.get_positions() failed for %s", symbol,
+                "parity NOT VERIFIED for %s — exchange.get_positions() "
+                "raised; proceeding without a parity check", symbol,
             )
             return True  # don't block trade flow when we can't read exchange
         ex_net = 0.0
@@ -1671,7 +1889,16 @@ class EngineRunner:
             # (could happen after partial reconcile), close only what exists.
             try:
                 ex_pos = await self.exchange.get_position(symbol)
-            except Exception:
+            except Exception as e:
+                # The clamp is a safety net, not the source of truth —
+                # whatever failed, we fall back to the DB size and say
+                # so. One handler; the type is in the message.
+                logger.warning(
+                    "[%s] CLOSE_%s for %s — exchange read failed (%s: %s); "
+                    "closing the DB size unclamped",
+                    strategy_name, expected_side.upper(), symbol,
+                    type(e).__name__, e,
+                )
                 ex_pos = None
             if ex_pos is not None and ex_pos.side == expected_side:
                 if db_pos.size > ex_pos.size + 1e-9:
@@ -1684,7 +1911,18 @@ class EngineRunner:
             return db_pos.size
 
         # No DB available — fall back to exchange total (legacy behavior).
-        ex_pos = await self.exchange.get_position(symbol)
+        # A read failure here must NOT read as "no position": that would
+        # silently drop a close signal. Raise so the tick's handler sees
+        # it (and routes a transient one into the outage aggregator).
+        try:
+            ex_pos = await self.exchange.get_position(symbol)
+        except ExchangeReadError:
+            logger.warning(
+                "[%s] CLOSE_%s for %s — no DB and the exchange read "
+                "failed; cannot determine close size",
+                strategy_name, expected_side.upper(), symbol,
+            )
+            raise
         if not (ex_pos and ex_pos.side == expected_side):
             logger.warning(
                 "[%s] CLOSE_%s ignored for %s — no matching exchange position",
