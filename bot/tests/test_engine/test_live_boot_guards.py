@@ -236,6 +236,30 @@ async def test_unpaused_tick_with_db_still_down_repauses(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rows_without_a_running_strategy_are_reported(monkeypatch, caplog):
+    """An open row whose strategy is not instantiated in this bot
+    (allowlist, mainnet opt-in, strategy cap) has nothing managing it.
+    It used to be skipped silently."""
+    monkeypatch.setattr(settings, "exchange_mode", "testnet")
+    orphan_a = _row(strategy="bb_short", side="short")
+    orphan_b = _row(strategy="moon_phases", side="long")
+    runner, strat, repo, ctl, bus = _runner([[_row(), orphan_a, orphan_b]])
+
+    with caplog.at_level("WARNING", logger="hypertrade.engine.runner"):
+        await runner.startup()
+
+    assert strat.restored == [("long", 2000.0)]
+    unmanaged = [r.message for r in caplog.records if "UNMANAGED" in r.message]
+    assert len(unmanaged) == 2
+    assert any("bb_short" in m and "ETH" in m and "short" in m for m in unmanaged)
+    events = _published(bus)
+    assert len(events) == 1
+    assert events[0].strategy == "state-restore"
+    assert "bb_short ETH short" in events[0].message
+    assert "moon_phases ETH long" in events[0].message
+
+
+@pytest.mark.asyncio
 async def test_restore_prefers_state_json(monkeypatch):
     """The extracted per-row restore keeps the startup contract: exact
     state_json when present."""

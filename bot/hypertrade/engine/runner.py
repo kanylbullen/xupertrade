@@ -423,12 +423,30 @@ class EngineRunner:
         cooldown snapshot for strategies that are flat)."""
         strat_by_name = {s.name: s for s in self.strategies}
         restored = 0
+        unmanaged: list[str] = []
         for pos in positions:
             strat = strat_by_name.get(pos.strategy_name)
             if strat is None:
+                # The strategy is not running in this bot (allowlist,
+                # mainnet opt-in, a strategy cap). Nothing will manage this
+                # position: no SL, no exit signal.
+                logger.warning(
+                    "State restore: open %s %s row of %s has no running "
+                    "strategy — the position is UNMANAGED",
+                    pos.symbol, pos.side, pos.strategy_name,
+                )
+                unmanaged.append(f"{pos.strategy_name} {pos.symbol} {pos.side}")
                 continue
             self._restore_strategy_from_row(strat, pos)
             restored += 1
+        if unmanaged:
+            await self._publish_error(
+                "state-restore",
+                f"{len(unmanaged)} open position(s) belong to strategies "
+                f"that are not running in this bot, so nothing manages them "
+                f"(no SL, no exit): {', '.join(sorted(unmanaged))}. Close "
+                f"them or re-enable the strategy.",
+            )
 
         # Audit M6 follow-up: also restore Redis-backed strategy state for
         # strategies that are FLAT but might be in cooldown. The
