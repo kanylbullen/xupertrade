@@ -35,14 +35,62 @@ def _cors(payload, status: int = 200) -> web.Response:
     )
 
 
+class ApiKeyRequiredError(RuntimeError):
+    """Raised at startup when a live-mode bot has no API_KEY.
+
+    Deliberately fatal rather than a warning. See `_assert_api_key_set`.
+    """
+
+
+def _assert_api_key_set() -> None:
+    """Refuse to serve a live-mode API with authentication switched off.
+
+    `_require_auth` treats an empty `settings.api_key` as "auth
+    disabled" and waves everything through — every control route
+    included: pause, resume, flat-all, strategy toggle, leverage,
+    kill-switch. That default exists so `paper` stays trivial to run
+    locally, and it is fine there: a paper bot's worst case is a
+    corrupted simulation.
+
+    On testnet or mainnet the same default means anything that can
+    reach the port can flatten positions or re-leverage the account.
+    Orchestrator-spawned bots always get a generated key, so this
+    should be unreachable in production — which is exactly why it
+    must be loud. An unreachable safety default that silently stops
+    being unreachable is how this kind of thing ships.
+
+    Raised at server start, not per request: a bot that cannot be
+    controlled safely should not accept the first request either.
+    """
+    if settings.api_key:
+        return
+    if settings.is_paper:
+        logger.warning(
+            "API_KEY is empty — the bot API is UNAUTHENTICATED. "
+            "Tolerated in paper mode only."
+        )
+        return
+    raise ApiKeyRequiredError(
+        f"API_KEY is empty but EXCHANGE_MODE={settings.exchange_mode!r}. "
+        "The bot API would accept unauthenticated control requests "
+        "(pause, flat-all, leverage, kill-switch) from anything that "
+        "can reach the port. Set API_KEY in the secrets manager, or "
+        "run with EXCHANGE_MODE=paper."
+    )
+
+
 def _require_auth(request: web.Request) -> web.Response | None:
     """Returns 401 response if API key is configured and missing/wrong, else None.
 
     Uses `hmac.compare_digest` for constant-time comparison so the response
     timing doesn't leak how many leading characters matched.
+
+    An empty key disables auth entirely. That is only ever reachable in
+    paper mode — `_assert_api_key_set` refuses to start the server on
+    testnet or mainnet without one.
     """
     if not settings.api_key:
-        return None  # auth disabled
+        return None  # auth disabled (paper only)
     provided = request.headers.get("X-Api-Key", "")
     if not hmac.compare_digest(provided, settings.api_key):
         return _cors({"error": "Unauthorized"}, status=401)
@@ -852,6 +900,9 @@ async def start_api_server(
     repo: Repository | None = None,
     telegram=None,
 ) -> web.AppRunner:
+    # Before binding anything: a live-mode bot with no API_KEY would
+    # serve its control routes unauthenticated. Fail the boot instead.
+    _assert_api_key_set()
     app = create_app(
         control=control,
         exchange=exchange,

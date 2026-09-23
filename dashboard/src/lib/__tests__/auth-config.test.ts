@@ -14,8 +14,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ensureSessionSecret,
   getAuthConfig,
+  resolveMode,
   setAuthConfig,
 } from "../auth-config";
+
+/** Stand-in for the Postgres tenant probe. `getAuthConfig` only
+ *  reaches it when no mode is stored anywhere. */
+const hasTenants = () => Promise.resolve(true);
+const noTenants = () => Promise.resolve(false);
 
 const ORIG_ENV = { ...process.env };
 
@@ -38,13 +44,22 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+function clearAuthEnv() {
+  delete process.env.AUTH_MODE;
+  delete process.env.OIDC_ISSUER;
+  delete process.env.OIDC_CLIENT_ID;
+  delete process.env.OIDC_CLIENT_SECRET;
+  delete process.env.OIDC_SCOPES;
+}
+
 describe("getAuthConfig", () => {
-  it("returns disabled defaults when Redis is empty + no env", async () => {
-    delete process.env.AUTH_MODE;
-    delete process.env.OIDC_ISSUER;
-    delete process.env.OIDC_CLIENT_ID;
-    delete process.env.OIDC_CLIENT_SECRET;
-    delete process.env.OIDC_SCOPES;
+  it("locks (not disables) when Redis is empty on a provisioned install", async () => {
+    // SECURITY regression guard. This case used to resolve to
+    // "disabled", which let proxy.ts wave every request through and
+    // tenant-server.ts hand out the operator tenant's data. An empty
+    // Redis on an install that has tenants means the config was LOST,
+    // not that auth was switched off.
+    clearAuthEnv();
 
     const { client } = makeRedisStub([
       null,
@@ -56,10 +71,101 @@ describe("getAuthConfig", () => {
       null,
       null,
     ]);
-    const cfg = await getAuthConfig(client);
-    expect(cfg.mode).toBe("disabled");
+    const cfg = await getAuthConfig(client, hasTenants);
+    expect(cfg.mode).toBe("locked");
     expect(cfg.basic_user).toBe("");
     expect(cfg.oidc_scopes).toBe("openid profile email");
+  });
+
+  it("allows disabled on a fresh install (no tenants yet)", async () => {
+    // A first boot has nothing to leak and must be able to bootstrap.
+    clearAuthEnv();
+
+    const { client } = makeRedisStub([
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const cfg = await getAuthConfig(client, noTenants);
+    expect(cfg.mode).toBe("disabled");
+  });
+
+  it("falls back to basic when the mode key is gone but a basic user survives", async () => {
+    clearAuthEnv();
+    const { client } = makeRedisStub([
+      null, // mode key gone
+      "alice",
+      "$2b$12$hash",
+      "session-secret",
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const cfg = await getAuthConfig(client, hasTenants);
+    expect(cfg.mode).toBe("basic");
+  });
+
+  it("falls back to oidc when the mode key is gone but Phase re-seeded OIDC", async () => {
+    clearAuthEnv();
+    // `idp` rather than `auth` as the subdomain: it says the same
+    // thing without needing the gitleaks `operator-service-subdomain`
+    // carve-out at all. (That carve-out was dead until the companion
+    // commit on this branch fixed it — see `.gitleaks.toml`.)
+    process.env.OIDC_ISSUER = "https://idp.example.com/";
+    process.env.OIDC_CLIENT_ID = "client-id";
+    const { client } = makeRedisStub([
+      null, // mode key gone
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const cfg = await getAuthConfig(client, hasTenants);
+    expect(cfg.mode).toBe("oidc");
+  });
+
+  it("honours an explicitly stored disabled mode", async () => {
+    // A value that is PRESENT cannot be the flush we're defending
+    // against — the operator chose "Off" on the Options page.
+    clearAuthEnv();
+    const { client } = makeRedisStub([
+      "disabled",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const cfg = await getAuthConfig(client, hasTenants);
+    expect(cfg.mode).toBe("disabled");
+  });
+
+  it("honours AUTH_MODE=disabled from env even with no stored config", async () => {
+    clearAuthEnv();
+    process.env.AUTH_MODE = "disabled";
+    const { client } = makeRedisStub([
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const cfg = await getAuthConfig(client, hasTenants);
+    expect(cfg.mode).toBe("disabled");
   });
 
   it("env wins over Redis (Phase 6c env-first override)", async () => {
@@ -100,7 +206,8 @@ describe("getAuthConfig", () => {
     expect(cfg.mode).toBe("basic");
   });
 
-  it("clamps garbage mode value to 'disabled'", async () => {
+  it("clamps a garbage stored mode to 'locked', not 'disabled'", async () => {
+    clearAuthEnv();
     const { client } = makeRedisStub([
       "garbage", // invalid mode
       null,
@@ -111,8 +218,59 @@ describe("getAuthConfig", () => {
       null,
       null,
     ]);
-    const cfg = await getAuthConfig(client);
-    expect(cfg.mode).toBe("disabled");
+    const cfg = await getAuthConfig(client, hasTenants);
+    expect(cfg.mode).toBe("locked");
+  });
+
+  it("clamps a garbage AUTH_MODE to 'locked'", async () => {
+    clearAuthEnv();
+    process.env.AUTH_MODE = "disabeld"; // typo
+    const { client } = makeRedisStub([
+      "oidc",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const cfg = await getAuthConfig(client, hasTenants);
+    expect(cfg.mode).toBe("locked");
+  });
+});
+
+describe("resolveMode", () => {
+  const base = {
+    envMode: "",
+    storedMode: null as string | null,
+    basicConfigured: false,
+    oidcConfigured: false,
+    hasAnyTenant: hasTenants,
+  };
+
+  it("env wins over a stored mode", async () => {
+    await expect(
+      resolveMode({ ...base, envMode: "basic", storedMode: "oidc" }),
+    ).resolves.toBe("basic");
+  });
+
+  it("prefers basic over oidc when both survive a lost mode key", async () => {
+    await expect(
+      resolveMode({ ...base, basicConfigured: true, oidcConfigured: true }),
+    ).resolves.toBe("basic");
+  });
+
+  it("locks when nothing survives and the DB probe says tenants exist", async () => {
+    await expect(resolveMode(base)).resolves.toBe("locked");
+  });
+
+  it("locks when the DB probe itself fails (probe answers 'provisioned')", async () => {
+    // defaultHasAnyTenant swallows DB errors and returns true; a
+    // caller-supplied probe modelling that must still lock.
+    await expect(
+      resolveMode({ ...base, hasAnyTenant: () => Promise.resolve(true) }),
+    ).resolves.toBe("locked");
   });
 });
 

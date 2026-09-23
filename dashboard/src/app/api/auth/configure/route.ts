@@ -3,7 +3,7 @@ import { hash as bcryptHash } from "@node-rs/bcrypt";
 import { invalidateAuthCache } from "@/lib/auth";
 import {
   setAuthConfig,
-  type AuthMode,
+  type ConfigurableAuthMode,
 } from "@/lib/auth-config";
 import { requireOperator } from "@/lib/operator";
 
@@ -21,7 +21,9 @@ const PASSTHROUGH_KEYS = [
 
 type PassthroughKey = (typeof PASSTHROUGH_KEYS)[number];
 
-function isValidMode(v: unknown): v is AuthMode {
+// Settable modes only. "locked" is resolved, never stored — see
+// `auth-config.ts:resolveMode`.
+function isValidMode(v: unknown): v is ConfigurableAuthMode {
   return v === "disabled" || v === "basic" || v === "oidc";
 }
 
@@ -44,7 +46,7 @@ export async function POST(req: Request) {
   const body = raw as Record<string, unknown>;
 
   const updates: {
-    mode?: AuthMode;
+    mode?: ConfigurableAuthMode;
     basic_user?: string;
     basic_hash?: string;
     oidc_issuer?: string;

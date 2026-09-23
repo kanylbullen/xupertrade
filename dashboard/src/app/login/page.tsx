@@ -18,6 +18,8 @@ const ERROR_MESSAGES: Record<string, string> = {
     "Your account has been disabled — contact the operator if you believe this is in error",
   "oidc-not-in-required-group":
     "Sign-in succeeded but your account isn't in the operator-approved group — ask the operator to grant access",
+  "auth-locked":
+    "Sign-in is unavailable — the dashboard can't read its auth configuration",
 };
 
 export default async function LoginPage({
@@ -53,7 +55,9 @@ export default async function LoginPage({
           <p className="text-sm text-muted-foreground mt-1">Sign in to continue</p>
         </div>
 
-        {showOidc ? (
+        {cfg?.mode === "locked" ? (
+          <LockedNotice />
+        ) : showOidc ? (
           <>
             <OidcLogin
               issuer={oidcIssuer}
@@ -94,6 +98,36 @@ export default async function LoginPage({
           <LoginForm next={next} initialError={error} />
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Shown when `resolveMode` returned "locked": the stored auth mode is
+ * gone on an installation that already has tenants, so we refuse to
+ * serve anything rather than fall back to open access. Tells the
+ * operator what happened and how to get out of it, without naming any
+ * secret or its value.
+ */
+function LockedNotice() {
+  return (
+    <div className="space-y-4 rounded-lg border border-red-500/40 bg-card p-6">
+      <p className="text-sm font-medium text-red-400">
+        Authentication is locked
+      </p>
+      <p className="text-sm text-muted-foreground">
+        The dashboard could not read how this installation authenticates
+        users. That normally means the Redis keys were lost — a flush, or
+        a container recreated without its data volume. Rather than fall
+        back to open access, every page is withheld until the
+        configuration is restored.
+      </p>
+      <p className="text-sm text-muted-foreground">
+        Operator: restore Redis from its snapshot, or set{" "}
+        <code className="font-mono">AUTH_MODE</code> (plus the{" "}
+        <code className="font-mono">OIDC_*</code> variables, or a basic
+        user) in the secrets manager and restart the dashboard.
+      </p>
     </div>
   );
 }

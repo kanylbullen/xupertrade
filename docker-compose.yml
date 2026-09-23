@@ -78,6 +78,23 @@ services:
       # If you ever republish this beyond loopback, set `requirepass`
       # first and thread it through both the dashboard and the bots.
       - "127.0.0.1:6379:6379"
+    volumes:
+      # Redis holds the ONLY copy of the session secret, the auth mode,
+      # the basic-auth hash, the OIDC client secret, the Cloudflare API
+      # token, the per-bot API keys and the disabled-strategy sets.
+      # Without a named volume every `docker compose up --force-recreate
+      # redis` threw all of that away. That is not just an
+      # inconvenience: it used to resolve the auth mode to "disabled"
+      # and serve the operator's data to anyone
+      # (`lib/auth-config.ts:resolveMode` now fails closed instead).
+      #
+      # No `command:` override on this service, so redis:7-alpine keeps
+      # its default RDB snapshotting (save 3600 1 / 300 100 / 60 10000)
+      # into /data. Deliberately NOT adding appendonly — the keys here
+      # are configuration, and a minute of write loss on an unclean
+      # kill is acceptable where a doubled disk-write rate on a trading
+      # host is not.
+      - redisdata:/data
     restart: unless-stopped
     logging:
       driver: json-file
@@ -322,5 +339,6 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   caddy_data:
   caddy_config:

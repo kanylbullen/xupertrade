@@ -62,6 +62,31 @@ export async function assertCanStartBot(
   });
 }
 
+/** Stable, public-safe error codes per limit kind. Shared so the
+ *  enforcement points can't drift apart on the wire shape. */
+const ERROR_CODE_BY_KIND: Record<LimitExceededError["kind"], string> = {
+  bots_over_cap: "bot-cap-exceeded",
+  strategies_over_cap: "strategy-cap-exceeded",
+  strategy_not_allowed: "strategy-not-allowed",
+};
+
+/** Map a LimitExceededError to the 409 the UI expects. `current` and
+ *  `limit` are operator-set numbers about the caller's own tenant, so
+ *  echoing them back leaks nothing and lets the UI say something
+ *  useful instead of "409". */
+export function limitExceededResponse(e: LimitExceededError): Response {
+  return Response.json(
+    {
+      error: ERROR_CODE_BY_KIND[e.kind],
+      kind: e.kind,
+      current: e.current,
+      limit: e.limit,
+      ...(e.extra ?? {}),
+    },
+    { status: 409 },
+  );
+}
+
 /** Throws when a strategy is not in the tenant's allowlist (NULL =
  * any strategy allowed; [] = no strategies allowed). Comparison is
  * exact-match on the registered name. */

@@ -20,7 +20,11 @@ import {
   isValidMode,
   requiredSecretsForMode,
 } from "@/lib/bot-orchestrator";
-import { assertCanStartBot, LimitExceededError } from "@/lib/admin/limits";
+import {
+  assertCanStartBot,
+  LimitExceededError,
+  limitExceededResponse,
+} from "@/lib/admin/limits";
 import { requireTenant } from "@/lib/tenant";
 
 import { decryptAndStart } from "../../_decrypt-and-start";
@@ -69,17 +73,7 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
   try {
     await assertCanStartBot(tenant);
   } catch (e) {
-    if (e instanceof LimitExceededError) {
-      return Response.json(
-        {
-          error: "bot-cap-exceeded",
-          kind: e.kind,
-          current: e.current,
-          limit: e.limit,
-        },
-        { status: 409 },
-      );
-    }
+    if (e instanceof LimitExceededError) return limitExceededResponse(e);
     throw e;
   }
 
