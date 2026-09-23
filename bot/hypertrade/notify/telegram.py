@@ -81,7 +81,8 @@ def _format_event(event: dict) -> Optional[str]:
         )
     if etype == "error":
         msg = html.escape(str(event.get("message") or ""))
-        return f"{prefix}⚠️ <b>ERROR</b> {event.get('strategy')}: {msg}"
+        strat = html.escape(str(event.get("strategy") or ""))
+        return f"{prefix}⚠️ <b>ERROR</b> {strat}: {msg}"
     if etype == "hodl.verdict_changed":
         asset = html.escape(str(event.get("asset") or ""))
         prev = html.escape(str(event.get("prev_verdict") or ""))
