@@ -5,6 +5,10 @@
  *   - Rate-limit gate: when checkRateLimit denies, return 429 with
  *     Retry-After header and DO NOT call the IdP / mint state cookie.
  *   - When allowed, the existing 307-to-IdP redirect is preserved.
+ *   - Locked auth mode: redirect to /login?error=auth-locked on the
+ *     PUBLIC_URL host, no state cookie, no authorization URL built.
+ *     That `getOidcConfig` refuses before discovery is covered in
+ *     `lib/__tests__/oidc.test.ts`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +46,8 @@ const mockedRateLimit = vi.mocked(checkRateLimit);
 const mockedGetOidcConfig = vi.mocked(getOidcConfig);
 const mockedBuildAuthUrl = vi.mocked(client.buildAuthorizationUrl);
 
+const ORIG_ENV = { ...process.env };
+
 function startReq(ip = "9.9.9.9"): Request {
   return new Request("https://example.com/api/auth/oidc/start", {
     method: "GET",
@@ -50,12 +56,15 @@ function startReq(ip = "9.9.9.9"): Request {
 }
 
 beforeEach(() => {
+  delete process.env.PUBLIC_URL;
+  delete process.env.DASHBOARD_URL;
   mockedRateLimit.mockResolvedValue({
     allowed: true,
     remaining: 59,
     resetInSeconds: 60,
   });
   mockedGetOidcConfig.mockResolvedValue({
+    ok: true,
     // The route only hands this to `client.buildAuthorizationUrl`,
     // which is mocked above — an empty stand-in is all it needs.
     config: {} as client.Configuration,
@@ -70,6 +79,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  process.env = { ...ORIG_ENV };
   vi.clearAllMocks();
 });
 
@@ -112,5 +122,61 @@ describe("GET /api/auth/oidc/start — H-2", () => {
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toContain("idp.example/authorize");
     expect(res.headers.get("set-cookie")).toContain("oidc_state=");
+  });
+});
+
+describe("GET /api/auth/oidc/start — locked and misconfigured", () => {
+  it("locked: redirects to /login?error=auth-locked on the PUBLIC_URL host", async () => {
+    process.env.PUBLIC_URL = "https://public.example.test/";
+    mockedGetOidcConfig.mockResolvedValueOnce({ ok: false, error: "auth-locked" });
+
+    const res = await GET(startReq());
+
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get("location")!);
+    // Not the request's host (the container hostname in production).
+    expect(loc.origin).toBe("https://public.example.test");
+    expect(loc.pathname).toBe("/login");
+    expect(loc.searchParams.get("error")).toBe("auth-locked");
+  });
+
+  it("locked: falls back to DASHBOARD_URL when PUBLIC_URL is unset", async () => {
+    process.env.DASHBOARD_URL = "https://dash.example.test";
+    mockedGetOidcConfig.mockResolvedValueOnce({ ok: false, error: "auth-locked" });
+
+    const res = await GET(startReq());
+
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.origin).toBe("https://dash.example.test");
+    expect(loc.searchParams.get("error")).toBe("auth-locked");
+  });
+
+  it("locked: mints no state cookie and builds no authorization URL", async () => {
+    process.env.PUBLIC_URL = "https://public.example.test";
+    mockedGetOidcConfig.mockResolvedValueOnce({ ok: false, error: "auth-locked" });
+
+    const res = await GET(startReq());
+
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(mockedBuildAuthUrl).not.toHaveBeenCalled();
+    expect(client.randomPKCECodeVerifier).not.toHaveBeenCalled();
+  });
+
+  it("misconfigured: still redirects to /login?error=oidc-misconfigured", async () => {
+    process.env.PUBLIC_URL = "https://public.example.test";
+    mockedGetOidcConfig.mockResolvedValueOnce({
+      ok: false,
+      error: "oidc-misconfigured",
+    });
+
+    const res = await GET(startReq());
+
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.origin).toBe("https://public.example.test");
+    expect(loc.pathname).toBe("/login");
+    expect(loc.searchParams.get("error")).toBe("oidc-misconfigured");
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(mockedBuildAuthUrl).not.toHaveBeenCalled();
   });
 });

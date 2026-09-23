@@ -33,7 +33,16 @@ export async function GET(req: Request) {
   if (!bundle) return loginError(url, "oidc-state-invalid");
 
   const oidc = await getOidcConfig();
-  if (!oidc) return loginError(url, "oidc-misconfigured");
+  if (!oidc.ok) {
+    const res = loginError(url, oidc.error);
+    // Locked: refuse before the token exchange, so no session cookie
+    // is set. Also drop the state cookie — it is one-shot, and the
+    // flow it belongs to cannot finish: once the lock lifts, sign-in
+    // starts over from /api/auth/oidc/start, which mints a fresh one.
+    // (Left alone on `oidc-misconfigured`, as before this change.)
+    if (oidc.error === "auth-locked") clearStateCookie(res);
+    return res;
+  }
   const { config } = oidc;
 
   // Reconstruct the callback URL using the SAME origin we used at auth
@@ -101,13 +110,17 @@ export async function GET(req: Request) {
     maxAge: COOKIE_OPTIONS.maxAge,
   });
   // Clear the state cookie — single-use
+  clearStateCookie(res);
+  return res;
+}
+
+function clearStateCookie(res: NextResponse): void {
   res.cookies.set(STATE_COOKIE, "", {
     httpOnly: true,
     sameSite: "lax",
     path: "/",
     maxAge: 0,
   });
-  return res;
 }
 
 function publicLoginUrl(reqUrl: URL): URL {

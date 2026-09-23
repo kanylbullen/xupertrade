@@ -42,13 +42,16 @@ export async function GET(req: Request) {
     );
   }
 
+  // `auth-locked` (resolved mode is "locked") or `oidc-misconfigured`.
+  // Either way no state cookie is minted and the IdP is never asked.
   const oidc = await getOidcConfig();
-  if (!oidc) {
+  if (!oidc.ok) {
     const publicBase =
       (process.env.PUBLIC_URL || process.env.DASHBOARD_URL || "").trim().replace(/\/+$/, "");
+    const errorPath = `/login?error=${oidc.error}`;
     const errorUrl = publicBase
-      ? new URL("/login?error=oidc-misconfigured", publicBase + "/")
-      : new URL("/login?error=oidc-misconfigured", url);
+      ? new URL(errorPath, publicBase + "/")
+      : new URL(errorPath, url);
     return NextResponse.redirect(errorUrl);
   }
   const { config, cfg } = oidc;
