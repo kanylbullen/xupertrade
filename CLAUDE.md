@@ -21,7 +21,7 @@ lives in history. **Never commit any of these:**
 |---|---|---|
 | Telegram bot token | `8639592584:AAGj…` (digits, colon, 35 base64 chars) | Phase secrets manager (see § 3) |
 | HyperLiquid private key | `0x` + 64 hex chars | Phase secrets manager |
-| Cloudflare API token | 40-char base64 | Redis (`dashboard:tls:cf_token`) via Options page |
+| Cloudflare API token | 40-char base64 | Phase (`TLS_CF_API_TOKEN`), or Redis (`dashboard:tls:cf_token`) via operator-only `POST /api/tls/configure` |
 | OIDC client secret | provider-specific | Redis (`dashboard:auth:oidc_client_secret`) |
 | `API_KEY` for the bot HTTP API | random string | Phase secrets manager |
 | Phase service token | base64 | only on the host's `~/.phase/` config; NEVER in repo |
@@ -217,7 +217,7 @@ only for the `mainnet` bot and `false` for `paper`/`testnet`
   reach the container over the compose network, not the published port.
 - **Caddy reverse proxy:** `:80` (HTTP→HTTPS redirect), `:443` (HTTPS), `:443/udp` (HTTP/3). Admin API on `:2019` (internal Docker network only).
 - **HTTPS:** `https://$DEPLOY_HOST/` — Let's Encrypt cert auto-renewed by Caddy via Cloudflare DNS-01.
-- **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis. If `/login` says **Authentication is locked**, see "Dashboard auth recovery" below.
+- **Auth:** username + password (basic) or OIDC. Configured through Phase (`AUTH_MODE`, `OIDC_*`, copied into Redis at start by `lib/phase-sync.ts`) or, for a basic user, `scripts/set-basic-auth.sh`; operator-only `POST /api/auth/configure` writes the same keys. There is no settings UI for it (removed in #66). Bcrypt hashes + HMAC-signed session cookies stored in Redis. If `/login` says **Authentication is locked**, see "Dashboard auth recovery" below.
 
 ### Dashboard auth recovery (`locked`)
 
@@ -226,8 +226,8 @@ the installation authenticates: the stored `dashboard:auth:mode` is gone
 (Redis flushed, or the `redisdata` volume removed) and no basic user or
 OIDC config survived, or a stored/env mode is not a real mode. Every
 page redirects to `/login`, which explains this instead of rendering
-data. **Options → Authentication cannot fix it** — `/options` and
-`/api/auth/configure` sit behind the same lock — and there is **no env
+data. **`POST /api/auth/configure` cannot fix it** — it needs a
+signed-in operator, and sign-in sits behind the same lock — and there is **no env
 var for a basic user**: `getAuthConfig` reads only `AUTH_MODE` and
 `OIDC_*` from env. If `AUTH_MODE` in Phase is itself a typo, fix it
 there first — env wins over everything below. Otherwise any one of
@@ -271,7 +271,7 @@ the operator tenant's trades and positions included, to anyone who can
 reach the dashboard for as long as it is set. Since #171 it is
 env-only — `phase-sync.ts` never copies `disabled` into Redis — so it
 stops applying once removed, but it is not a recovery path, and not a
-bootstrap one either: Options → Authentication needs a signed-in
+bootstrap one either: `POST /api/auth/configure` needs a signed-in
 operator, and `disabled` signs nobody in.
 
 **Check for a leftover stored `disabled`.** Builds before #171 copied

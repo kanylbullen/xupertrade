@@ -126,8 +126,8 @@ export type TenantProbe = () => Promise<boolean>;
  *     permission: `locked`.
  *  2. A stored `dashboard:auth:mode` — honoured, including
  *     `disabled`. A value that is *present* cannot be the flush we
- *     are defending against, so an operator who picked "Off" on the
- *     Options page keeps it. Garbage again means `locked`.
+ *     are defending against, so an operator who stored "disabled"
+ *     (POST /api/auth/configure) keeps it. Garbage again means `locked`.
  *  3. Key absent — never `disabled` by default. Fall to the strictest
  *     mode the surviving config can actually serve:
  *       - a basic user + hash survive → `basic`

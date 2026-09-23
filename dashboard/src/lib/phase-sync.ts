@@ -13,9 +13,12 @@
  * with OAUTH_RESPONSE_IS_NOT_CONFORM. Forcing Redis to mirror Phase on
  * every boot eliminates that drift class entirely.
  *
- * Design choice A1 (always overwrite): Phase is source of truth.
- * POST /api/auth/configure (operator-only) still writes these keys,
- * but those edits don't survive restart. GET /api/auth/config reports
+ * Design choice A1 (always overwrite): Phase is source of truth for
+ * the keys it sets. POST /api/auth/configure (operator-only) can still
+ * write any auth key, but an edit to a key whose env var is non-empty
+ * is overwritten on the next start. Keys with no env value — the basic
+ * user and hash always, the mode unless AUTH_MODE is basic or oidc —
+ * keep what was written. GET /api/auth/config reports
  * `phase_managed: true` when any of the env vars is non-empty.
  *
  * Server-only — uses ioredis. Must not be bundled into a Client
@@ -106,7 +109,8 @@ export async function syncPhaseAuthConfig(
   if (present.length === 0) {
     // Nothing to write — Phase isn't injecting any of these, or only
     // an AUTH_MODE that must not be persisted. Keep whatever Redis
-    // already holds (typically operator-typed via the UI).
+    // already holds (written by POST /api/auth/configure,
+    // scripts/set-basic-auth.sh, or an earlier sync).
     console.log(
       `[phase-sync] nothing to write from env, skipped (0/${total} keys)`,
     );

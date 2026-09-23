@@ -6,7 +6,7 @@
  *   - some env vars set, others empty/whitespace → only set ones written
  *   - no env vars set → no pipeline opened, written=0
  *   - Redis pipeline.exec rejects → logged WARN, redisError=true, doesn't throw
- *   - isPhaseManagingAuth env-presence detection (drives the UI banner)
+ *   - isPhaseManagingAuth env-presence detection (phase_managed in GET /api/auth/config)
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -205,12 +205,12 @@ describe("syncPhaseAuthConfig", () => {
   });
 });
 
-describe("isPhaseManagingAuth (drives the UI banner)", () => {
-  it("returns false when no env vars are set (banner hidden)", () => {
+describe("isPhaseManagingAuth (phase_managed in GET /api/auth/config)", () => {
+  it("returns false when no env vars are set (reports false)", () => {
     expect(isPhaseManagingAuth()).toBe(false);
   });
 
-  it("returns true when any single env var is non-empty (banner shown)", () => {
+  it("returns true when any single env var is non-empty (reports true)", () => {
     process.env.OIDC_ISSUER = "https://issuer";
     expect(isPhaseManagingAuth()).toBe(true);
   });
@@ -220,7 +220,7 @@ describe("isPhaseManagingAuth (drives the UI banner)", () => {
     expect(isPhaseManagingAuth()).toBe(true);
   });
 
-  it("treats whitespace-only as empty (banner hidden)", () => {
+  it("treats whitespace-only as empty (reports false)", () => {
     process.env.OIDC_CLIENT_ID = "   ";
     process.env.OIDC_SCOPES = "\t\n";
     expect(isPhaseManagingAuth()).toBe(false);
