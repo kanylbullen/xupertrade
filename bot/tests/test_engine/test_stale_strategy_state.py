@@ -533,3 +533,91 @@ async def test_failed_flat_all_does_not_pause():
     ctl.set_paused.assert_not_awaited()
     ctl.acknowledge_flat_request.assert_not_awaited()
     runner._run_strategy.assert_awaited()  # trading continues; retried next tick
+
+
+# ----------------------------------------------------------------------
+# A plain OPEN refused before anything is sent leaves the strategy flat
+# ----------------------------------------------------------------------
+
+
+def _open_short(strat):
+    return Signal(
+        action=SignalAction.OPEN_SHORT, symbol="BTC",
+        strategy_name=strat.name, reason="z-score entry",
+    )
+
+
+def _refusing_runner(strat, *, risk_ok=True):
+    """btc_mean_reversion flat in the DB; daily_long_0830 holds BTC."""
+    runner, ctl, exchange = _runner([strat], open_row=None)
+    runner.repo.get_open_positions = AsyncMock(return_value=[
+        _row("daily_long_0830", side="long", entry=78000.0),
+    ])
+    ctl.get_allow_multi_coin = AsyncMock(return_value=False)
+    runner.portfolio.check_risk_limits = AsyncMock(return_value=risk_ok)
+    return runner, ctl, exchange
+
+
+@pytest.mark.asyncio
+async def test_open_refused_by_the_coin_gate_resets_the_strategy(caplog):
+    strat = BTCMeanReversionStrategy()
+    strat.restore_state("short", 78000.0)  # what it set when it signalled
+    runner, ctl, exchange = _refusing_runner(strat)
+    bar = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging.INFO, logger="hypertrade.engine.runner"):
+        ok = await runner._execute_signal(
+            _open_short(strat), 78000.0, bar_time=bar,
+        )
+        # A standing condition re-emits on the next tick of the same bar.
+        strat.restore_state("short", 78000.0)
+        await runner._execute_signal(_open_short(strat), 78000.0, bar_time=bar)
+
+    assert ok is False
+    exchange.place_order.assert_not_awaited()
+    assert not strat.holds_position()
+    assert _saved(ctl) == {"btc_mean_reversion": None}
+    notes = [
+        r for r in caplog.records
+        if r.levelno >= logging.INFO
+        and "strategy reset to flat" in r.getMessage()
+    ]
+    assert len(notes) == 1  # logged once per (category, bar)
+    assert "daily_long_0830 (long) already holds BTC" in notes[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_open_refused_by_a_risk_limit_resets_the_strategy():
+    strat = BTCMeanReversionStrategy()
+    strat.restore_state("short", 78000.0)
+    runner, ctl, exchange = _refusing_runner(strat, risk_ok=False)
+
+    ok = await runner._execute_signal(_open_short(strat), 78000.0)
+
+    assert ok is False
+    exchange.place_order.assert_not_awaited()
+    assert not strat.holds_position()
+    assert _saved(ctl) == {"btc_mean_reversion": None}
+
+
+@pytest.mark.asyncio
+async def test_refused_open_keeps_the_cooldown():
+    """The reset is reset_position(): a refused hash_momentum OPEN keeps
+    its cooldown counter and bar baseline."""
+    strat = HashMomentumStrategy()
+    strat._bars_since_close = 7
+    strat._last_closed_bar_ts = pd.Timestamp(BAR_TS)
+    strat.restore_state("short", 180.0)
+    runner, _, _ = _refusing_runner(strat)
+    runner.repo.get_open_positions = AsyncMock(return_value=[
+        _row("hash_supertrend", symbol="SOL", side="long", entry=180.0),
+    ])
+
+    await runner._execute_signal(Signal(
+        action=SignalAction.OPEN_SHORT, symbol="SOL",
+        strategy_name=strat.name, reason="momentum",
+    ), 180.0)
+
+    assert not strat.holds_position()
+    assert strat._bars_since_close == 7
+    assert strat._last_closed_bar_ts == BAR_TS

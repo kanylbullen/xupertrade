@@ -605,7 +605,9 @@ class EngineRunner:
                 "Reconcile: failed to record PnL %.4f for %s", pnl, strategy_name,
             )
 
-    async def _reset_strategy_state(self, strategy_name: str, why: str) -> None:
+    async def _reset_strategy_state(
+        self, strategy_name: str, why: str, *, quiet: bool = False,
+    ) -> None:
         """Reset a strategy to flat, in memory AND in its Redis snapshot.
 
         Called whenever the DB says the strategy holds nothing while the
@@ -630,7 +632,8 @@ class EngineRunner:
                 except Exception:
                     logger.exception("reset_position failed for %s", strategy_name)
                     return
-                logger.info(
+                logger.log(
+                    logging.DEBUG if quiet else logging.INFO,
                     "Reset %s to flat in memory and in its Redis snapshot "
                     "(%s)", strategy_name, why,
                 )
@@ -1337,12 +1340,20 @@ class EngineRunner:
         # until UTC midnight.
         if not await self.portfolio.check_risk_limits(is_open=is_open):
             if existing is None:
-                await self._note_refusal(
-                    signal, "risk limit", bar_time,
-                    f"Risk limit breached — execution of "
-                    f"{signal.action.value} {signal.symbol} blocked",
-                    publish=True,
-                )
+                if is_open:
+                    await self._flat_after_refused_open(
+                        signal, "risk limit", bar_time,
+                        f"Risk limit breached — execution of "
+                        f"{signal.action.value} {signal.symbol} blocked",
+                        publish=True,
+                    )
+                else:
+                    await self._note_refusal(
+                        signal, "risk limit", bar_time,
+                        f"Risk limit breached — execution of "
+                        f"{signal.action.value} {signal.symbol} blocked",
+                        publish=True,
+                    )
                 return False
             if await self._flip_close(
                 signal, existing, current_price, leverage, bar_time,
@@ -1416,10 +1427,11 @@ class EngineRunner:
                         signal, existing, category, reason, bar_time,
                     )
                 else:
-                    logger.log(
-                        level, "[%s] Skipping %s %s — %s",
-                        signal.strategy_name, signal.action.value,
-                        signal.symbol, reason,
+                    await self._flat_after_refused_open(
+                        signal, category, bar_time,
+                        f"Skipping {signal.action.value} {signal.symbol} "
+                        f"— {reason}",
+                        level=level,
                     )
                 return False
 
@@ -1878,6 +1890,7 @@ class EngineRunner:
         message: str,
         *,
         publish: bool = False,
+        level: int = logging.WARNING,
     ) -> None:
         """Log (and optionally publish) a refusal once per (category, bar).
 
@@ -1912,9 +1925,42 @@ class EngineRunner:
                 )
                 return
         self._refusal_notes[key] = (category, bar_time, now)
-        logger.warning("[%s] %s", signal.strategy_name, message)
+        logger.log(level, "[%s] %s", signal.strategy_name, message)
         if publish:
             await self._publish_error(signal.strategy_name, message)
+
+    async def _flat_after_refused_open(
+        self,
+        signal: Signal,
+        category: str,
+        bar_time,
+        message: str,
+        *,
+        publish: bool = False,
+        level: int = logging.WARNING,
+    ) -> None:
+        """A plain OPEN (no position to flip) refused before anything was
+        sent: nothing was opened, so the strategy is reset to flat.
+
+        Strategies switch their in-memory state to the side they asked for
+        when they emit the OPEN. Left like that the strategy believed in a
+        position the DB never got, ran SL/TP for it, and — for an
+        edge-triggered entry — never re-entered. The flip counterpart is
+        `_keep_position_after_refused_flip`. Noted once per (category,
+        bar); the reset itself logs at DEBUG, because a standing-condition
+        strategy re-emits the refused OPEN every tick.
+        """
+        await self._note_refusal(
+            signal, category, bar_time,
+            f"{message}; strategy reset to flat",
+            publish=publish, level=level,
+        )
+        await self._reset_strategy_state(
+            signal.strategy_name,
+            why=f"its {signal.action.value} {signal.symbol} was refused "
+                f"({category})",
+            quiet=True,
+        )
 
     def _resync_strategy_to_row(self, row) -> None:
         """Point a strategy back at an open DB row it still owns (same
