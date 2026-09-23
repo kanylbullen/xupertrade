@@ -217,7 +217,48 @@ only for the `mainnet` bot and `false` for `paper`/`testnet`
   reach the container over the compose network, not the published port.
 - **Caddy reverse proxy:** `:80` (HTTP→HTTPS redirect), `:443` (HTTPS), `:443/udp` (HTTP/3). Admin API on `:2019` (internal Docker network only).
 - **HTTPS:** `https://$DEPLOY_HOST/` — Let's Encrypt cert auto-renewed by Caddy via Cloudflare DNS-01.
-- **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis.
+- **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis. If `/login` says **Authentication is locked**, see "Dashboard auth recovery" below.
+
+### Dashboard auth recovery (`locked`)
+
+`lib/auth-config.ts:resolveMode` answers `locked` when it can't tell how
+the installation authenticates: the stored `dashboard:auth:mode` is gone
+(Redis flushed, or the `redisdata` volume removed) and no basic user or
+OIDC config survived, or a stored/env mode is not a real mode. Every
+page redirects to `/login`, which explains this instead of rendering
+data. **Options → Authentication cannot fix it** — `/options` and
+`/api/auth/configure` sit behind the same lock — and there is **no env
+var for a basic user**: `getAuthConfig` reads only `AUTH_MODE` and
+`OIDC_*` from env. If `AUTH_MODE` in Phase is itself a typo, fix it
+there first — env wins over everything below. Otherwise any one of
+these gets you back in:
+
+1. **Restore Redis** from its `dump.rdb` (in the `redisdata` volume).
+   Brings back everything else Redis held too — session secret, per-bot
+   API keys, disabled-strategy sets — so prefer it when a snapshot
+   exists.
+2. **OIDC from Phase:** set `AUTH_MODE=oidc`, `OIDC_ISSUER`,
+   `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` in Phase, then recreate the
+   dashboard (`phase run -- docker compose up -d --force-recreate
+   dashboard`). `lib/phase-sync.ts` copies them into Redis on boot.
+3. **Basic user from the host:**
+   ```bash
+   ssh -t -i ~/.ssh/hypertrade root@$DEPLOY_HOST /opt/hypertrade/scripts/set-basic-auth.sh
+   ```
+   Prompts for a username (defaulting to the operator tenant's
+   `authentik_sub` — a basic username *is* the tenant lookup key, so any
+   other name signs in as a new, empty, non-operator tenant) and a
+   password, hashes it with the dashboard's own bcrypt inside the
+   dashboard container, and writes `dashboard:auth:basic:{user,hash}`
+   (plus `dashboard:auth:mode=basic` if the stored mode is missing or
+   unreadable). Never prints the password or hash; no restart needed.
+   Also the way to reset a forgotten basic password.
+
+**Don't use `AUTH_MODE=disabled` as the way out.** It opens every page,
+the operator tenant's trades and positions included, to anyone who can
+reach the dashboard for as long as it is set. It is deliberately
+env-only — `phase-sync.ts` never copies `disabled` into Redis — so it
+stops applying once removed, but it is not a recovery path.
 
 ### Secrets management — Phase
 
