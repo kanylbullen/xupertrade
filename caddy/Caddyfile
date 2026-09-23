@@ -7,9 +7,12 @@
 #
 # Once an operator POSTs /api/tls/configure with a domain + Cloudflare
 # API token, the dashboard pushes a full Let's Encrypt config to Caddy's
-# admin API on :2019, which replaces this in the running Caddy. Real
-# cert, no browser warning. Caddy runs without --resume, so after the
-# container restarts it serves this file again until the next POST.
+# admin API on :2019, which replaces this entirely. Real cert, no
+# browser warning. Caddy autosaves that config and runs with --resume
+# (docker-compose.yml), so it survives restarts: this file only applies
+# while no autosave exists — first boot, or after the caddy_config
+# volume is removed. Edits here therefore don't reach a Caddy that has
+# already been configured; POST /api/tls/configure again instead.
 
 {
     admin 0.0.0.0:2019
