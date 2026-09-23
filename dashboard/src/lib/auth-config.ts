@@ -26,7 +26,15 @@ import { randomBytes } from "node:crypto";
 
 import { getRedisClient } from "./redis";
 
-export type AuthMode = "disabled" | "basic" | "oidc";
+export type AuthMode = "disabled" | "basic" | "oidc" | "locked";
+
+/**
+ * The three modes an operator can actually *set*. `"locked"` is
+ * resolved-only: `resolveMode` returns it when the stored mode is
+ * missing or unreadable and we refuse to guess. It is never written
+ * to Redis and never accepted from env or the configure endpoint.
+ */
+export type ConfigurableAuthMode = Exclude<AuthMode, "locked">;
 
 export type AuthConfig = {
   mode: AuthMode;
@@ -52,8 +60,99 @@ const KEYS = {
 
 const DEFAULT_OIDC_SCOPES = "openid profile email";
 
-function isValidMode(v: string | null | undefined): v is AuthMode {
+function isValidMode(
+  v: string | null | undefined,
+): v is ConfigurableAuthMode {
   return v === "disabled" || v === "basic" || v === "oidc";
+}
+
+/**
+ * Does this installation already have tenants? Used only by
+ * `resolveMode`'s missing-key branch, to tell a genuinely fresh
+ * install (bootstrap must stay possible) from an existing one whose
+ * Redis was flushed (must fail closed).
+ *
+ * Lazily imported so the Postgres client is only pulled in on the
+ * rare path that needs it — the steady state has a stored mode and
+ * never reaches here.
+ *
+ * On any DB error we answer `true` ("tenants exist"), which pushes
+ * `resolveMode` towards `"locked"`. Fail closed: a Postgres outage
+ * must not look like a fresh install and re-open the dashboard.
+ */
+async function defaultHasAnyTenant(): Promise<boolean> {
+  try {
+    const { db, tenants } = await import("./db");
+    const rows = await db.select({ id: tenants.id }).from(tenants).limit(1);
+    return rows.length > 0;
+  } catch (err) {
+    // Log the error TYPE only — a postgres connection error can carry
+    // the DSN, and DATABASE_URL contains the password (§ 0).
+    console.warn(
+      "[auth-config] tenant probe failed, assuming a provisioned install",
+      err instanceof Error ? err.name : typeof err,
+    );
+    return true;
+  }
+}
+
+export type TenantProbe = () => Promise<boolean>;
+
+/**
+ * Decide the effective auth mode.
+ *
+ * SECURITY (analysis-2026-09-15 § 5, High). This used to be
+ * `envMode || storedMode || "disabled"`, so an ABSENT
+ * `dashboard:auth:mode` key resolved to `"disabled"` — and `proxy.ts`
+ * lets every request through in that mode while `tenant-server.ts`
+ * resolves the operator tenant. A `FLUSHALL`, a `docker compose down
+ * -v`, or (until this PR) simply recreating the volume-less redis
+ * container therefore served the operator's trades, P&L and positions
+ * to anonymous visitors on every server-rendered page. The key going
+ * missing is exactly the case where we know the least, so it is the
+ * case where we must assume the most.
+ *
+ * The decision, in order:
+ *
+ *  1. `AUTH_MODE` in env — honoured, including `disabled`. This is the
+ *     operator saying so out of band, in Phase, where a Redis flush
+ *     cannot reach it. An unrecognised value is a typo, not a
+ *     permission: `locked`.
+ *  2. A stored `dashboard:auth:mode` — honoured, including
+ *     `disabled`. A value that is *present* cannot be the flush we
+ *     are defending against, so an operator who picked "Off" on the
+ *     Options page keeps it. Garbage again means `locked`.
+ *  3. Key absent — never `disabled` by default. Fall to the strictest
+ *     mode the surviving config can actually serve:
+ *       - a basic user + hash survive → `basic`
+ *       - an OIDC issuer + client id survive (these come back from
+ *         Phase env via `phase-sync.ts` on every boot) → `oidc`
+ *       - nothing survives and the DB has no tenants → `disabled`,
+ *         because a first boot has nothing to leak and has to be able
+ *         to bootstrap
+ *       - nothing survives and tenants exist → `locked`: the login
+ *         page explains what happened and no page renders data. The
+ *         operator recovers by setting `AUTH_MODE` (and the OIDC
+ *         vars) in Phase and restarting, or by restoring `dump.rdb`.
+ */
+export async function resolveMode(args: {
+  envMode: string;
+  storedMode: string | null;
+  basicConfigured: boolean;
+  oidcConfigured: boolean;
+  hasAnyTenant?: TenantProbe;
+}): Promise<AuthMode> {
+  if (args.envMode) {
+    return isValidMode(args.envMode) ? args.envMode : "locked";
+  }
+  if (args.storedMode) {
+    return isValidMode(args.storedMode) ? args.storedMode : "locked";
+  }
+  if (args.basicConfigured) return "basic";
+  if (args.oidcConfigured) return "oidc";
+  const probe = args.hasAnyTenant ?? defaultHasAnyTenant;
+  if (!(await probe())) return "disabled";
+  return "locked";
 }
 
 /**
@@ -66,6 +165,7 @@ function isValidMode(v: string | null | undefined): v is AuthMode {
  */
 export async function getAuthConfig(
   client: Redis = getRedisClient(),
+  hasAnyTenant?: TenantProbe,
 ): Promise<AuthConfig> {
   const keysArr = [
     KEYS.mode,
@@ -90,14 +190,29 @@ export async function getAuthConfig(
   const envClientSecret = (process.env.OIDC_CLIENT_SECRET || "").trim();
   const envScopes = (process.env.OIDC_SCOPES || "").trim();
 
-  const mode = envMode || vals[0] || "disabled";
+  const basic_user = vals[1] || "";
+  const basic_hash = vals[2] || "";
+  const oidc_issuer = envIssuer || vals[4] || "";
+  const oidc_client_id = envClientId || vals[5] || "";
+
+  const mode = await resolveMode({
+    envMode,
+    storedMode: vals[0],
+    // "Configured" means usable for an actual sign-in, not merely
+    // non-empty: basic needs both the username and the bcrypt hash,
+    // OIDC needs both the issuer and the client id.
+    basicConfigured: Boolean(basic_user && basic_hash),
+    oidcConfigured: Boolean(oidc_issuer && oidc_client_id),
+    hasAnyTenant,
+  });
+
   return {
-    mode: isValidMode(mode) ? mode : "disabled",
-    basic_user: vals[1] || "",
-    basic_hash: vals[2] || "",
+    mode,
+    basic_user,
+    basic_hash,
     session_secret: vals[3] || "",
-    oidc_issuer: envIssuer || vals[4] || "",
-    oidc_client_id: envClientId || vals[5] || "",
+    oidc_issuer,
+    oidc_client_id,
     oidc_client_secret: envClientSecret || vals[6] || "",
     oidc_scopes: envScopes || vals[7] || DEFAULT_OIDC_SCOPES,
   };
@@ -112,9 +227,15 @@ export async function getAuthConfig(
  * Does NOT touch session_secret here — that has its own
  * atomic-init helper (`ensureSessionSecret`) below to avoid
  * accidentally rotating it.
+ *
+ * `mode` is narrowed to `ConfigurableAuthMode`: `"locked"` is a
+ * resolved state, never a stored one. Writing it would make the
+ * lockout survive a correctly-configured restart.
  */
 export async function setAuthConfig(
-  updates: Partial<Omit<AuthConfig, "session_secret">>,
+  updates: Partial<Omit<AuthConfig, "session_secret" | "mode">> & {
+    mode?: ConfigurableAuthMode;
+  },
   client: Redis = getRedisClient(),
 ): Promise<void> {
   const mapping: Array<[keyof typeof updates, string]> = [

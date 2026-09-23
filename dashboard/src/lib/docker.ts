@@ -43,6 +43,13 @@ export type ContainerSpec = {
   memoryBytes?: number;
   /** CPU cap as nano-CPUs (1e9 = 1 CPU); 0 = unlimited. */
   nanoCpus?: number;
+  /**
+   * Docker log driver config (rotation), passed through verbatim to
+   * `HostConfig.LogConfig`. Omitted → Docker's bare `json-file` driver
+   * with no size cap, which grows unbounded (bot/reports/analysis-2026-09-15.md
+   * § 1: paper/testnet logs hit 404 MB / 379 MB after two weeks).
+   */
+  logConfig?: { Type: string; Config: Record<string, string> };
   /** Restart policy. Default `unless-stopped` matches the operator's bots. */
   restartPolicy?: "no" | "always" | "unless-stopped" | "on-failure";
   /** Optional labels (e.g. `{tenant_id: "...", bot_id: "...", mode: "mainnet"}`). */
@@ -76,6 +83,7 @@ export async function createAndStart(spec: ContainerSpec): Promise<ContainerInfo
       RestartPolicy: { Name: spec.restartPolicy ?? "unless-stopped" },
       ...(spec.memoryBytes ? { Memory: spec.memoryBytes } : {}),
       ...(spec.nanoCpus ? { NanoCpus: spec.nanoCpus } : {}),
+      ...(spec.logConfig ? { LogConfig: spec.logConfig } : {}),
     },
   });
   await container.start();

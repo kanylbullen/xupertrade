@@ -16,7 +16,10 @@ import { ensureSessionSecret, getAuthConfig } from "./auth-config";
 export const SESSION_COOKIE = "hypertrade_session";
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-export type AuthMode = "disabled" | "basic" | "oidc";
+/** Mirrors `auth-config.ts`. `"locked"` is the fail-closed mode the
+ *  resolver returns when the stored auth mode is missing or unreadable
+ *  on an installation that already has tenants — see `resolveMode`. */
+export type AuthMode = "disabled" | "basic" | "oidc" | "locked";
 
 export type AuthConfig = {
   mode: AuthMode;

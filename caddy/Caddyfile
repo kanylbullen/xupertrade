@@ -16,7 +16,23 @@
 # HTTPS on 443 with auto self-signed cert for the configured host.
 {$CADDY_HOST:localhost} {
     tls internal
-    reverse_proxy dashboard:3000
+    reverse_proxy dashboard:3000 {
+        # SECURITY: strip any client-supplied CF-Connecting-IP before
+        # it reaches the dashboard. Only cloudflared sets that header
+        # legitimately, and it reaches the dashboard container
+        # directly over the compose network — never through here. On
+        # this path the header is attacker input, and the dashboard
+        # trusts it first when picking a rate-limit key, so a LAN
+        # client could rotate its own bucket and defeat the
+        # passphrase-unlock limit (10 per 15 min in front of an
+        # Argon2id derivation that decrypts the HyperLiquid key).
+        header_up -CF-Connecting-IP
+        # Caddy sets X-Forwarded-For by default (appending its
+        # observed source to whatever arrived). Stated explicitly so
+        # the contract `lib/client-ip.ts` relies on is visible here:
+        # the LAST hop in this header is the one Caddy observed.
+        header_up X-Forwarded-For {http.request.remote.host}
+    }
 }
 
 # Redirect plain HTTP to HTTPS (works for any host)

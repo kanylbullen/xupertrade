@@ -129,11 +129,9 @@ export function resolveRedirectUri(req: Request): string {
   return new URL("/api/auth/oidc/callback", url).toString();
 }
 
-/** Reject hostile or non-sensical redirect targets after login. */
-export function safeNext(raw: string): string {
-  if (!raw || !raw.startsWith("/")) return "/";
-  if (raw.startsWith("//")) return "/";
-  if (raw === "/login" || raw.startsWith("/login?")) return "/";
-  if (raw.startsWith("/api/")) return "/";
-  return raw;
-}
+/** Re-exported so existing server-side importers (`oidc/start`,
+ *  `oidc/callback`) keep their import path. The implementation lives
+ *  in `lib/safe-next.ts` because the login form is a Client Component
+ *  and cannot import this server-only module — it used to carry its
+ *  own copy of the rules, and therefore its own copy of the bug. */
+export { safeNext } from "./safe-next";

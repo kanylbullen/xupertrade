@@ -6,10 +6,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
+/** Modes the operator can pick here. */
 type Mode = "disabled" | "basic" | "oidc";
 
+/** What the server may report. "locked" is resolved-only — the
+ *  dashboard can't read its stored auth mode and is refusing to serve
+ *  pages. See `lib/auth-config.ts:resolveMode`. */
+type ServerMode = Mode | "locked";
+
 type Config = {
-  mode: Mode;
+  mode: ServerMode;
   basic_user_set: boolean;
   oidc_issuer: string;
   oidc_client_id: string;
@@ -45,7 +51,9 @@ export function AuthConfig() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as Config;
       setCfg(data);
-      setMode(data.mode);
+      // "locked" isn't settable; pre-select "basic" so the operator's
+      // next click is the one that gets them back in.
+      setMode(data.mode === "locked" ? "basic" : data.mode);
       setOidcIssuer(data.oidc_issuer || "");
       setOidcClientId(data.oidc_client_id || "");
       setOidcScopes(data.oidc_scopes || "openid profile email");
@@ -119,9 +127,11 @@ export function AuthConfig() {
           <Badge
             variant="outline"
             className={
-              cfg.mode === "disabled"
-                ? "border-yellow-500 text-yellow-400"
-                : "border-green-500 text-green-400"
+              cfg.mode === "locked"
+                ? "border-red-500 text-red-400"
+                : cfg.mode === "disabled"
+                  ? "border-yellow-500 text-yellow-400"
+                  : "border-green-500 text-green-400"
             }
           >
             {cfg.mode === "disabled" ? "OPEN" : cfg.mode.toUpperCase()}
@@ -133,6 +143,17 @@ export function AuthConfig() {
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
+        {cfg.mode === "locked" && (
+          <div
+            role="alert"
+            data-testid="auth-locked-banner"
+            className="rounded-md border border-red-500/50 bg-red-500/10 px-3 py-2 text-sm text-red-200"
+          >
+            The stored auth mode is missing, so the dashboard is refusing
+            to serve pages rather than falling back to open access.
+            Restore Redis from its snapshot, or save a mode below.
+          </div>
+        )}
         {cfg.phase_managed && (
           <div
             role="alert"

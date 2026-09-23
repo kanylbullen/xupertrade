@@ -15,7 +15,7 @@ from hypertrade.db.repo import Repository
 from hypertrade.strategies.meta_loader import metadata_for
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.indicators_status import get_all_status
-from hypertrade.exchange.base import Exchange
+from hypertrade.exchange.base import Exchange, ExchangeReadError
 from hypertrade.strategies.base import Strategy
 
 logger = logging.getLogger(__name__)
@@ -35,14 +35,62 @@ def _cors(payload, status: int = 200) -> web.Response:
     )
 
 
+class ApiKeyRequiredError(RuntimeError):
+    """Raised at startup when a live-mode bot has no API_KEY.
+
+    Deliberately fatal rather than a warning. See `_assert_api_key_set`.
+    """
+
+
+def _assert_api_key_set() -> None:
+    """Refuse to serve a live-mode API with authentication switched off.
+
+    `_require_auth` treats an empty `settings.api_key` as "auth
+    disabled" and waves everything through — every control route
+    included: pause, resume, flat-all, strategy toggle, leverage,
+    kill-switch. That default exists so `paper` stays trivial to run
+    locally, and it is fine there: a paper bot's worst case is a
+    corrupted simulation.
+
+    On testnet or mainnet the same default means anything that can
+    reach the port can flatten positions or re-leverage the account.
+    Orchestrator-spawned bots always get a generated key, so this
+    should be unreachable in production — which is exactly why it
+    must be loud. An unreachable safety default that silently stops
+    being unreachable is how this kind of thing ships.
+
+    Raised at server start, not per request: a bot that cannot be
+    controlled safely should not accept the first request either.
+    """
+    if settings.api_key:
+        return
+    if settings.is_paper:
+        logger.warning(
+            "API_KEY is empty — the bot API is UNAUTHENTICATED. "
+            "Tolerated in paper mode only."
+        )
+        return
+    raise ApiKeyRequiredError(
+        f"API_KEY is empty but EXCHANGE_MODE={settings.exchange_mode!r}. "
+        "The bot API would accept unauthenticated control requests "
+        "(pause, flat-all, leverage, kill-switch) from anything that "
+        "can reach the port. Set API_KEY in the secrets manager, or "
+        "run with EXCHANGE_MODE=paper."
+    )
+
+
 def _require_auth(request: web.Request) -> web.Response | None:
     """Returns 401 response if API key is configured and missing/wrong, else None.
 
     Uses `hmac.compare_digest` for constant-time comparison so the response
     timing doesn't leak how many leading characters matched.
+
+    An empty key disables auth entirely. That is only ever reachable in
+    paper mode — `_assert_api_key_set` refuses to start the server on
+    testnet or mainnet without one.
     """
     if not settings.api_key:
-        return None  # auth disabled
+        return None  # auth disabled (paper only)
     provided = request.headers.get("X-Api-Key", "")
     if not hmac.compare_digest(provided, settings.api_key):
         return _cors({"error": "Unauthorized"}, status=401)
@@ -86,6 +134,12 @@ async def hyperliquid_diagnostic(request: web.Request) -> web.Response:
                 "open_positions": len(positions),
                 "btc_mid_price": btc_price,
             }
+        )
+    except ExchangeReadError as e:
+        logger.warning("HyperLiquid diagnostic — exchange read failed: %s", e)
+        return _cors(
+            {"ok": False, "error": "exchange read failed", "detail": str(e)},
+            status=503,
         )
     except Exception as e:
         logger.exception("HyperLiquid diagnostic failed")
@@ -172,6 +226,13 @@ async def positions_handler(request: web.Request) -> web.Response:
                 for p in positions
             ]
         })
+    except ExchangeReadError as e:
+        # 503, not an empty list: the dashboard must not render "no open
+        # positions" because HyperLiquid returned a 502.
+        logger.warning("Positions unavailable — exchange read failed: %s", e)
+        return _cors(
+            {"error": "exchange read failed", "detail": str(e)}, status=503,
+        )
     except Exception as e:
         logger.exception("Failed to get positions from exchange")
         return _cors({"error": str(e)}, status=500)
@@ -270,8 +331,18 @@ def _control_routes(
         disabled = sorted(await control.get_disabled_strategies())
         overrides = await control.get_all_leverage_overrides()
         allow_multi = await control.get_allow_multi_coin()
-        positions = await exchange.get_positions()
-        balance = await exchange.get_balance()
+        try:
+            positions = await exchange.get_positions()
+            balance = await exchange.get_balance()
+        except ExchangeReadError as e:
+            # Same reasoning as /api/positions: reporting 0 positions and
+            # $0 equity because the exchange was unreachable is worse
+            # than reporting nothing.
+            logger.warning("State unavailable — exchange read failed: %s", e)
+            return _cors(
+                {"error": "exchange read failed", "detail": str(e)},
+                status=503,
+            )
         leverage = {
             s.name: {
                 "default": s.__class__.leverage,
@@ -773,6 +844,29 @@ def _control_routes(
     app.router.add_route("OPTIONS", "/api/control/{tail:.*}", options_handler)
 
 
+_QUIET_ACCESS_LOG_PATHS = frozenset({"/api/control/heartbeat", "/health"})
+
+
+class _QuietHeartbeatAccessLogger(web.AccessLogger):
+    """Access logger that skips successful heartbeat/health probes.
+
+    The dashboard watchdog polls `/api/control/heartbeat` (and `/health`)
+    every HEARTBEAT_WATCHDOG_POLL_SECONDS (60s default) per bot — pure
+    poll noise at 2xx, no signal. Together with the per-strategy candle
+    line in engine/runner.py this was the other half of the ~1,000
+    lines/hour per bot found in bot/reports/analysis-2026-09-15.md § 1.
+    Any non-2xx response on these paths (auth failure, 5xx) DOES
+    indicate a problem, so it still logs — only the successful,
+    expected-every-poll case is silenced. Every other route logs
+    unconditionally via the normal aiohttp access log.
+    """
+
+    def log(self, request: web.BaseRequest, response: web.StreamResponse, time: float) -> None:
+        if request.path in _QUIET_ACCESS_LOG_PATHS and 200 <= response.status < 300:
+            return
+        super().log(request, response, time)
+
+
 def create_app(
     control: BotControl | None = None,
     exchange: Exchange | None = None,
@@ -806,6 +900,9 @@ async def start_api_server(
     repo: Repository | None = None,
     telegram=None,
 ) -> web.AppRunner:
+    # Before binding anything: a live-mode bot with no API_KEY would
+    # serve its control routes unauthenticated. Fail the boot instead.
+    _assert_api_key_set()
     app = create_app(
         control=control,
         exchange=exchange,
@@ -813,7 +910,7 @@ async def start_api_server(
         repo=repo,
         telegram=telegram,
     )
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log_class=_QuietHeartbeatAccessLogger)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()

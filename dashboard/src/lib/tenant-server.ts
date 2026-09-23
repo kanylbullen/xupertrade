@@ -16,7 +16,7 @@
  */
 
 import { cookies } from "next/headers";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { db, tenants } from "./db";
 import {
@@ -52,6 +52,12 @@ export async function requireTenantServer(): Promise<Tenant> {
   // mode (no auth set up). Resolve the operator tenant — the only
   // sensible identity in a deployment with auth turned off.
   const cfg = await fetchAuthConfig().catch(() => null);
+  // SECURITY: mirror proxy.ts's locked branch. proxy.ts redirects
+  // before a server component runs, but this helper is the last line
+  // of defence for any path the matcher misses — and the operator
+  // tenant it would otherwise resolve below is precisely the data the
+  // locked state exists to withhold.
+  if (cfg?.mode === "locked") redirect("/login?error=auth-locked");
   if (cfg?.mode === "disabled") {
     const op = await db
       .select()
@@ -131,4 +137,27 @@ export async function requireTenantServer(): Promise<Tenant> {
   // onConflictDoNothing race.
   if (created[0].isActive !== true) redirect("/login?error=tenant-disabled");
   return created[0];
+}
+
+/**
+ * Server-component operator gate — `requireOperator` for pages.
+ *
+ * `notFound()` rather than a redirect: `/admin` should not exist from
+ * a regular tenant's point of view, and a 404 says nothing about
+ * whether the route is real. That matches `app/admin/layout.tsx`,
+ * which is where the gate used to live exclusively.
+ *
+ * analysis-2026-09-15 § 5, Low: a layout is not a gate. In the App
+ * Router a layout and the page beneath it render concurrently, so the
+ * layout's `notFound()` stops the response but does not stop the
+ * page's own server-side work from running first. None of today's
+ * admin pages fetch privileged data server-side, so nothing leaked —
+ * but that is a property of the current page bodies, not of the
+ * structure, and it would stop being true the first time one of them
+ * grew a `db.select()`. Each page now gates itself.
+ */
+export async function requireOperatorServer(): Promise<Tenant> {
+  const tenant = await requireTenantServer();
+  if (tenant.isOperator !== true) notFound();
+  return tenant;
 }

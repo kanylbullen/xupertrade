@@ -113,6 +113,11 @@ describe("buildSpec", () => {
     expect(spec.memoryBytes).toBe(512 * 1024 * 1024);
     expect(spec.nanoCpus).toBe(1_000_000_000);
     expect(spec.restartPolicy).toBe("unless-stopped");
+    // Log rotation (own describe block below covers all three modes).
+    expect(spec.logConfig).toEqual({
+      Type: "json-file",
+      Config: { "max-size": "50m", "max-file": "5" },
+    });
   });
 
   describe("TENANT_ALLOWED_STRATEGIES / TENANT_KEY_EXPIRIES injection", () => {
@@ -306,6 +311,29 @@ describe("buildSpec", () => {
         for (const k of MEM_ENV_KEYS) delete process.env[k];
         process.env.HYPERTRADE_BOT_MAINNET_MEMORY_BYTES = bad;
         expect(memoryBytesForMode("mainnet")).toBe(1024 * 1024 * 1024);
+      },
+    );
+  });
+
+  describe("log rotation (bot/reports/analysis-2026-09-15.md § 1)", () => {
+    // Bare json-file (Docker's default) has no size cap: the paper and
+    // testnet bot log files reached 404 MB / 379 MB after two weeks in
+    // production. Every mode gets the same 50m×5 cap — unlike memory,
+    // this isn't mode-dependent.
+    it.each(["paper", "testnet", "mainnet"] as const)(
+      "caps %s logs at 50m x 5 files",
+      (mode) => {
+        const spec = buildSpec({
+          tenantId: TENANT_ID,
+          botId: BOT_ID,
+          mode,
+          decryptedSecrets: {},
+          apiKey: TEST_API_KEY,
+        });
+        expect(spec.logConfig).toEqual({
+          Type: "json-file",
+          Config: { "max-size": "50m", "max-file": "5" },
+        });
       },
     );
   });

@@ -54,7 +54,20 @@ regex = '''(?i)\b(xuper\.fun|molnkontakt\.se)\b'''
 [[rules]]
 id = "operator-service-subdomain"
 description = "Operator-specific service subdomain (auth/phase/secrets/console/admin/api)"
-regex = '''(?i)\b(auth|phase|secrets|console|admin|api)\.[a-z0-9-]+\.(fun|com|net|org|io|dev|se|app)\b'''
+# Both groups are NON-capturing on purpose. gitleaks reports a capture
+# group as the finding's `secret`, and the allowlist `regexes` below
+# are matched against that secret — so while these were capturing, the
+# secret was the bare word `auth` (or the bare TLD), and the RFC 2606
+# carve-outs written against the full hostname could never match. The
+# documentation exemption was dead code for this rule: any newly added
+# line using `auth.example.com` failed the scan, which is what happened
+# on PR #168. With no capture groups the secret is the whole hostname
+# and the carve-outs apply as written.
+#
+# Verified against gitleaks with a negative control: `auth.example.com`
+# is exempt, `auth.<operator-domain>` still trips both this rule and
+# `operator-domain`.
+regex = '''(?i)\b(?:auth|phase|secrets|console|admin|api)\.[a-z0-9-]+\.(?:fun|com|net|org|io|dev|se|app)\b'''
 
 [[rules]]
 id = "absolute-home-path"

@@ -1,6 +1,4 @@
-import { notFound } from "next/navigation";
-
-import { requireTenantServer } from "@/lib/tenant-server";
+import { requireOperatorServer } from "@/lib/tenant-server";
 
 export const dynamic = "force-dynamic";
 
@@ -10,13 +8,16 @@ export const dynamic = "force-dynamic";
  * tenant's perspective. Distinct from the API gate (requireOperator)
  * which returns a structured 403 because API clients need to
  * distinguish the two cases.
+ *
+ * Kept as the outer gate, but no longer the only one: the pages
+ * beneath render concurrently with this layout, so each one calls
+ * `requireOperatorServer` for itself too.
  */
 export default async function AdminLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const tenant = await requireTenantServer();
-  if (tenant.isOperator !== true) notFound();
+  await requireOperatorServer();
   return <>{children}</>;
 }

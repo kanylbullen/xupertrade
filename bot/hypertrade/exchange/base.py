@@ -4,6 +4,23 @@ from datetime import datetime, timezone
 from enum import Enum
 
 
+class ExchangeReadError(Exception):
+    """A read from the exchange could not be completed.
+
+    The point of this type is to keep "the exchange says you are flat"
+    distinguishable from "we could not ask the exchange". Returning an
+    empty list for the second case is what let a single HyperLiquid 502
+    flatten the whole book: reconcile saw zero exchange positions,
+    orphan-closed every open DB row at PnL 0, and five minutes later
+    market-closed the still-real exchange positions
+    (`bot/reports/analysis-2026-09-15.md` § 2).
+
+    Every read that can fail raises this instead. Callers must decide
+    explicitly what to do without an answer — skip the action, return
+    503, refuse to acknowledge — never silently treat it as "flat".
+    """
+
+
 class OrderType(str, Enum):
     MARKET = "market"
     LIMIT = "limit"
@@ -64,14 +81,20 @@ class Exchange(ABC):
 
     @abstractmethod
     async def get_positions(self) -> list[Position]:
+        """Open positions. Raises ExchangeReadError if the read failed.
+
+        An empty list means "flat", never "could not read".
+        """
         ...
 
     @abstractmethod
     async def get_position(self, symbol: str) -> Position | None:
+        """One coin's position. Raises ExchangeReadError if unreadable."""
         ...
 
     @abstractmethod
     async def get_balance(self) -> Balance:
+        """Account balance. Raises ExchangeReadError if unreadable."""
         ...
 
     @abstractmethod

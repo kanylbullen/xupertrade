@@ -31,6 +31,43 @@ export type CaddyApplyResult =
   | { ok: true; message: "ok" }
   | { ok: false; message: string };
 
+/**
+ * The reverse-proxy handler that fronts the dashboard.
+ *
+ * SECURITY (analysis-2026-09-15 § 5, Medium). `CF-Connecting-IP` is
+ * deleted on the way upstream. Only cloudflared sets that header
+ * legitimately, and cloudflared reaches `dashboard:3000` directly over
+ * the compose network — public traffic never touches Caddy (see
+ * `docs/CLOUDFLARE_TUNNEL.md`). On Caddy's path it is therefore pure
+ * client input, and `lib/client-ip.ts` trusts it ahead of everything
+ * else when choosing a rate-limit key. Without the delete, a LAN
+ * client could hand itself a fresh bucket on every request and walk
+ * straight through the passphrase-unlock limit — 10 attempts per 15
+ * minutes guarding an Argon2id derivation that decrypts the tenant's
+ * HyperLiquid key.
+ *
+ * `X-Forwarded-For` is SET, not appended, so the only value the
+ * dashboard sees is the address Caddy actually observed. That is the
+ * header `client-ip.ts` falls back to once CF-Connecting-IP is gone.
+ *
+ * Shared by both configs below: the Caddyfile is only the bootstrap,
+ * and the moment TLS is configured one of these JSON documents
+ * replaces it wholesale. A fix applied to only one of the three is a
+ * fix that silently stops applying.
+ */
+function dashboardReverseProxy(): unknown {
+  return {
+    handler: "reverse_proxy",
+    headers: {
+      request: {
+        delete: ["CF-Connecting-IP"],
+        set: { "X-Forwarded-For": ["{http.request.remote.host}"] },
+      },
+    },
+    upstreams: [{ dial: "dashboard:3000" }],
+  };
+}
+
 export function buildHttpsConfig(args: {
   domain: string;
   email: string;
@@ -70,12 +107,7 @@ export function buildHttpsConfig(args: {
             routes: [
               {
                 match: [{ host: [args.domain] }],
-                handle: [
-                  {
-                    handler: "reverse_proxy",
-                    upstreams: [{ dial: "dashboard:3000" }],
-                  },
-                ],
+                handle: [dashboardReverseProxy()],
                 terminal: true,
               },
             ],
@@ -142,12 +174,7 @@ export function buildInternalHttpsConfig(
             routes: [
               {
                 match: [{ host: [host] }],
-                handle: [
-                  {
-                    handler: "reverse_proxy",
-                    upstreams: [{ dial: "dashboard:3000" }],
-                  },
-                ],
+                handle: [dashboardReverseProxy()],
                 terminal: true,
               },
             ],
