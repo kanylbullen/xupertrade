@@ -1,12 +1,15 @@
 /**
  * Operator-set per-tenant limits. NULL on a tenant column = unlimited
- * (preserves legacy behavior). Enforcement points: bot start, strategy
- * enable. Bot-side reads `allowed_strategies` directly from the DB at
- * startup as defense-in-depth.
+ * (preserves legacy behavior). Enforcement points: bot start
+ * (`reserveBotStart`, both start routes) and strategy enable (the
+ * toggle route). The bot also receives `allowed_strategies` and
+ * `max_active_strategies` as env at spawn (`bot-orchestrator.ts:
+ * buildSpec`) and applies both at boot as defense-in-depth.
  */
 
 import { and, count, eq, sql } from "drizzle-orm";
 
+import { CLAIM_PLACEHOLDER, CLAIM_STALE_AFTER_SECONDS } from "@/lib/bot-claim";
 import { db, tenantBots, tenants, type tenants as tenantsTable } from "@/lib/db";
 
 type TenantRow = typeof tenantsTable.$inferSelect;
@@ -30,35 +33,73 @@ export class LimitExceededError extends Error {
   }
 }
 
-/** Throws LimitExceededError when starting another bot would exceed
- * the tenant's max_active_bots cap. NULL cap = no-op.
+/** The handle `db.transaction` passes to its callback. */
+export type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** Check the tenant's max_active_bots cap and claim the start slot in
+ * ONE transaction. Throws LimitExceededError at cap; otherwise returns
+ * whatever `reserve` returns.
  *
- * Race-safe: takes a tenant-row lock (`SELECT ... FOR UPDATE`) inside
- * a transaction so two concurrent /start calls for the SAME tenant
- * serialize on the cap check. Different tenants don't contend (each
- * locks its own row).
+ * `reserve` must make this start countable: flip the row's
+ * `is_running` to true, or insert it that way. It runs in the same
+ * transaction as the count, while the tenant row is held
+ * `SELECT ... FOR UPDATE`, so a concurrent start for the same tenant
+ * blocks on the lock until this one commits — and under READ
+ * COMMITTED its count, a new statement, then sees the reservation.
+ * Different tenants don't contend (each locks its own row).
+ *
+ * This used to be a bare check. The lock was released at commit, before
+ * anything countable was written — create-and-start only set
+ * `is_running` after the Argon2id unlock and the container spawn — so
+ * two concurrent starts both counted the same number and both passed a
+ * cap of 1. The lock serialized the checks, not the check-and-claim.
+ *
+ * Under the lock, before counting, claims older than
+ * CLAIM_STALE_AFTER_SECONDS are reaped (flipped back to not-running):
+ * their request died mid-start, and without this a capped tenant would
+ * stay blocked by a slot no container occupies until someone stopped
+ * the row by hand. See `lib/bot-claim.ts`.
+ *
+ * NULL cap: no lock, no reap and no count, but `reserve` still runs
+ * inside a transaction so callers have one shape.
  */
-export async function assertCanStartBot(
+export async function reserveBotStart<T>(
   tenant: Pick<TenantRow, "id" | "maxActiveBots">,
-): Promise<void> {
-  if (tenant.maxActiveBots === null || tenant.maxActiveBots === undefined) {
-    return;
-  }
+  reserve: (tx: DbTx) => Promise<T>,
+): Promise<T> {
   const cap = tenant.maxActiveBots;
-  await db.transaction(async (tx) => {
-    await tx.execute(
-      sql`SELECT 1 FROM ${tenants} WHERE ${tenants.id} = ${tenant.id} FOR UPDATE`,
-    );
-    const rows = await tx
-      .select({ n: count() })
-      .from(tenantBots)
-      .where(
-        and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.isRunning, true)),
+  return db.transaction(async (tx) => {
+    if (cap !== null && cap !== undefined) {
+      await tx.execute(
+        sql`SELECT 1 FROM ${tenants} WHERE ${tenants.id} = ${tenant.id} FOR UPDATE`,
       );
-    const current = Number(rows[0]?.n ?? 0);
-    if (current >= cap) {
-      throw new LimitExceededError("bots_over_cap", current, cap);
+      await tx
+        .update(tenantBots)
+        .set({ isRunning: false, containerId: null })
+        .where(
+          and(
+            eq(tenantBots.tenantId, tenant.id),
+            eq(tenantBots.containerId, CLAIM_PLACEHOLDER),
+            // NULL last_started_at never matches: a claim that can't be
+            // aged is never reaped (see lib/bot-claim.ts).
+            sql`${tenantBots.lastStartedAt} <= now() - make_interval(secs => ${CLAIM_STALE_AFTER_SECONDS})`,
+          ),
+        );
+      const rows = await tx
+        .select({ n: count() })
+        .from(tenantBots)
+        .where(
+          and(
+            eq(tenantBots.tenantId, tenant.id),
+            eq(tenantBots.isRunning, true),
+          ),
+        );
+      const current = Number(rows[0]?.n ?? 0);
+      if (current >= cap) {
+        throw new LimitExceededError("bots_over_cap", current, cap);
+      }
     }
+    return reserve(tx);
   });
 }
 

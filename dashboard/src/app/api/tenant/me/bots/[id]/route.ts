@@ -8,6 +8,7 @@
 import { and, eq, sql } from "drizzle-orm";
 
 import { db, tenantBots } from "@/lib/db";
+import { isClaim, isStaleClaim } from "@/lib/bot-claim";
 import { statusBot, stopBot } from "@/lib/bot-orchestrator";
 import { clearBotApiKey } from "@/lib/bot-api-key";
 import { requireTenant } from "@/lib/tenant";
@@ -41,6 +42,17 @@ export async function GET(req: Request, ctx: Params): Promise<Response> {
   const bot = await loadOwnedBot(tenant.id, botId);
   if (bot === null) {
     return Response.json({ error: "bot not found" }, { status: 404 });
+  }
+
+  // A start in flight holds the row with the "claiming" placeholder
+  // and no container exists yet. Asking Docker about it would 404 and
+  // the reconcile below would flip the row to not-running mid-start —
+  // releasing the max_active_bots slot to a concurrent start. Report
+  // the row as-is instead. A STALE claim (the request died) is
+  // reconciled like any other row, so it can't stick. See
+  // `lib/bot-claim.ts`.
+  if (isClaim(bot) && !isStaleClaim(bot)) {
+    return Response.json({ bot, container: null, starting: true });
   }
 
   // Best-effort live status — if the container was removed out from

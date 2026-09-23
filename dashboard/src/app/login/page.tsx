@@ -89,8 +89,8 @@ export default async function LoginPage({
               <LoginForm next={next} initialError={error} />
             ) : (
               <p className="text-sm text-muted-foreground text-center">
-                No basic auth configured either — admin must reset auth via
-                Redis: <code>SET dashboard:auth:mode disabled</code>
+                No basic auth configured either — the operator can set one
+                on the host with <code>scripts/set-basic-auth.sh</code>
               </p>
             )}
           </>
@@ -108,6 +108,12 @@ export default async function LoginPage({
  * serve anything rather than fall back to open access. Tells the
  * operator what happened and how to get out of it, without naming any
  * secret or its value.
+ *
+ * Every path listed here has to work from outside the dashboard:
+ * Options → Authentication sits behind this same lock, and there is
+ * no env var for a basic user — `getAuthConfig` reads only
+ * `AUTH_MODE` and `OIDC_*` from env. The full procedure is in
+ * CLAUDE.md § 3, "Dashboard auth recovery".
  */
 function LockedNotice() {
   return (
@@ -117,17 +123,30 @@ function LockedNotice() {
       </p>
       <p className="text-sm text-muted-foreground">
         The dashboard could not read how this installation authenticates
-        users. That normally means the Redis keys were lost — a flush, or
-        a container recreated without its data volume. Rather than fall
-        back to open access, every page is withheld until the
-        configuration is restored.
+        users. That normally means its Redis data was lost — a flush, or
+        the data volume removed. Rather than fall back to open access,
+        every page is withheld until the configuration is restored.
       </p>
-      <p className="text-sm text-muted-foreground">
-        Operator: restore Redis from its snapshot, or set{" "}
-        <code className="font-mono">AUTH_MODE</code> (plus the{" "}
-        <code className="font-mono">OIDC_*</code> variables, or a basic
-        user) in the secrets manager and restart the dashboard.
-      </p>
+      <div className="space-y-2 text-sm text-muted-foreground">
+        <p>Operator, on the host — any one of:</p>
+        <ul className="list-disc space-y-1 pl-5">
+          <li>
+            restore Redis from its{" "}
+            <code className="font-mono">dump.rdb</code> snapshot;
+          </li>
+          <li>
+            set <code className="font-mono">AUTH_MODE=oidc</code> with{" "}
+            <code className="font-mono">OIDC_ISSUER</code>,{" "}
+            <code className="font-mono">OIDC_CLIENT_ID</code> and{" "}
+            <code className="font-mono">OIDC_CLIENT_SECRET</code> in the
+            secrets manager, then recreate the dashboard container;
+          </li>
+          <li>
+            run <code className="font-mono">scripts/set-basic-auth.sh</code>{" "}
+            to set a username and password.
+          </li>
+        </ul>
+      </div>
     </div>
   );
 }

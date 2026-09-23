@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 
 import { and, eq, sql } from "drizzle-orm";
 
+import { CLAIM_PLACEHOLDER } from "@/lib/bot-claim";
 import { db, tenantBots, tenantSecrets } from "@/lib/db";
 import {
   type BotMode,
@@ -27,9 +28,9 @@ import {
   requiredSecretsForMode,
 } from "@/lib/bot-orchestrator";
 import {
-  assertCanStartBot,
   LimitExceededError,
   limitExceededResponse,
+  reserveBotStart,
 } from "@/lib/admin/limits";
 import { requireTenant } from "@/lib/tenant";
 
@@ -105,21 +106,6 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // Operator-set per-tenant cap on concurrent running bots (alembic
-  // 0016). This route is create-AND-start: `decryptAndStart` below
-  // spawns the container, so it is a start and has to respect the cap
-  // exactly like POST /[id]/start does. It didn't, which made the cap
-  // a matter of which button the tenant pressed — and the limits above
-  // are about bot *rows*, not running ones, so nothing else caught it.
-  // Checked before the row reservation so we don't create and then
-  // delete a row we were never allowed to start.
-  try {
-    await assertCanStartBot(tenant);
-  } catch (e) {
-    if (e instanceof LimitExceededError) return limitExceededResponse(e);
-    throw e;
-  }
-
   // Validate required secrets are present BEFORE we unlock — cheap check.
   const required = requiredSecretsForMode(mode as BotMode);
   if (required.length > 0) {
@@ -143,19 +129,37 @@ export async function POST(req: Request): Promise<Response> {
   // same (tenant, mode) slot. UNIQUE(tenant_id, mode) enforces
   // uniqueness at the DB layer — if we lose the race we map ONLY
   // the postgres unique-violation (23505) to 409.
+  //
+  // The row is inserted already counted as running (placeholder
+  // containerId='claiming', the same shape POST /[id]/start claims
+  // with), inside `reserveBotStart`: the same transaction as the
+  // operator's max_active_bots count (alembic 0016; NULL = no cap),
+  // under the tenant-row lock. This route is create-AND-start, so it
+  // has to respect the cap exactly like /[id]/start — and it has to
+  // be counted from the moment it passes, not from when
+  // decryptAndStart finally writes is_running after the Argon2id
+  // unlock and the container spawn, or two concurrent creates both
+  // pass a cap of 1. decryptAndStart overwrites the placeholder; the
+  // failure path below deletes the row.
   const botId = randomUUID();
   // Derive the container-name stub without going through buildSpec —
   // we don't have an API key yet (decryptAndStart generates one) and
   // buildSpec now requires it.
   const containerNameStub = containerName(tenant.id, mode as BotMode);
   try {
-    await db.insert(tenantBots).values({
-      id: botId,
-      tenantId: tenant.id,
-      mode,
-      containerName: containerNameStub,
-    });
+    await reserveBotStart(tenant, (tx) =>
+      tx.insert(tenantBots).values({
+        id: botId,
+        tenantId: tenant.id,
+        mode,
+        containerName: containerNameStub,
+        containerId: CLAIM_PLACEHOLDER,
+        isRunning: true,
+        lastStartedAt: sql`now()`,
+      }),
+    );
   } catch (err) {
+    if (err instanceof LimitExceededError) return limitExceededResponse(err);
     if (isUniqueViolation(err)) {
       return Response.json(
         { error: `bot for mode=${mode} already exists for this tenant` },
@@ -165,35 +169,55 @@ export async function POST(req: Request): Promise<Response> {
     throw err;
   }
 
-  // Slot is ours. Decrypt + start. On any failure inside, roll back
-  // the row reservation so the next POST can retry cleanly.
-  const result = await decryptAndStart({
-    req,
-    tenant,
-    botId,
-    mode: mode as BotMode,
-  });
-  if (result.kind === "response") {
-    await db
-      .delete(tenantBots)
-      .where(
-        and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
-      )
-      .catch(() => undefined);
-    return result.response;
+  // Slot is ours. Decrypt + start. On ANY failure — a returned error
+  // response or a thrown one (Redis down in the unlock check, a DB
+  // error on the secrets read) — delete the reservation so the next
+  // POST can retry cleanly. Before this was a `finally`, only the
+  // returned case cleaned up: a throw left a row holding a cap slot
+  // with no container behind it, which blocked a cap-1 tenant until
+  // someone stopped or deleted it by hand. decryptAndStart only throws
+  // before it spawns anything, so deleting the row orphans nothing.
+  let started = false;
+  try {
+    const result = await decryptAndStart({
+      req,
+      tenant,
+      botId,
+      mode: mode as BotMode,
+    });
+    if (result.kind === "response") return result.response;
+    started = true;
+    return Response.json({ bot: result.bot });
+  } finally {
+    if (!started) {
+      await db
+        .delete(tenantBots)
+        .where(
+          and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+        )
+        .catch(() => undefined);
+    }
   }
-  return Response.json({ bot: result.bot });
 }
 
 /**
- * Postgres unique-constraint violation. postgres-js wraps errors
- * with a `code` field; 23505 is the SQLSTATE for unique_violation.
+ * Postgres unique-constraint violation. postgres-js puts the SQLSTATE
+ * on a `code` field (23505 = unique_violation), but drizzle-orm ≥ 0.44
+ * wraps every driver error in a `DrizzleQueryError` and keeps the
+ * original on `.cause` — so the top-level check alone never matched,
+ * and losing the (tenant, mode) race answered 500 instead of 409.
  */
 function isUniqueViolation(err: unknown): boolean {
+  const hasCode = (e: unknown): boolean =>
+    typeof e === "object" &&
+    e !== null &&
+    "code" in e &&
+    (e as { code: unknown }).code === "23505";
   return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code: string }).code === "23505"
+    hasCode(err) ||
+    (typeof err === "object" &&
+      err !== null &&
+      "cause" in err &&
+      hasCode((err as { cause: unknown }).cause))
   );
 }

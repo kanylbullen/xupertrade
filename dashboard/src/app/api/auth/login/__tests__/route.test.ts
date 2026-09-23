@@ -197,3 +197,44 @@ describe("POST /api/auth/login — H-2 hardening", () => {
     expect(body.error).toBe("bot-unreachable");
   });
 });
+
+/**
+ * The `locked` branch (post-merge review of #168: untested). `locked`
+ * can carry a basic user — a garbage AUTH_MODE or stored mode locks
+ * regardless of what survives — so the route has to refuse it by name
+ * rather than rely on `basic_user_set` being false.
+ */
+describe("POST /api/auth/login — locked", () => {
+  it("refuses sign-in and mints no session even with a basic user and the right password", async () => {
+    mockedFetchCfg.mockResolvedValueOnce({
+      mode: "locked",
+      basic_user_set: true,
+      oidc_issuer: "",
+      oidc_client_id: "",
+      oidc_scopes: "",
+    });
+    mockedBcryptVerify.mockResolvedValue(true);
+
+    const res = await POST(loginReq({ username: "alice", password: "right" }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("basic-auth-not-enabled");
+    expect(res.headers.get("set-cookie")).toBeNull();
+    // Refused before the credential check and before the session key.
+    expect(mockedGetAuthConfig).not.toHaveBeenCalled();
+    expect(mockedBcryptVerify).not.toHaveBeenCalled();
+    expect(mockedGetSessionSecret).not.toHaveBeenCalled();
+  });
+
+  it("still applies the rate limit first", async () => {
+    // A locked dashboard is not a free guessing oracle either.
+    mockedRateLimit.mockResolvedValueOnce({
+      allowed: false,
+      remaining: 0,
+      resetInSeconds: 900,
+    });
+    const res = await POST(loginReq({ username: "alice", password: "x" }));
+    expect(res.status).toBe(429);
+    expect(mockedFetchCfg).not.toHaveBeenCalled();
+  });
+});

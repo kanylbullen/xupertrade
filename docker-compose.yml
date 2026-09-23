@@ -82,11 +82,17 @@ services:
       # Redis holds the ONLY copy of the session secret, the auth mode,
       # the basic-auth hash, the OIDC client secret, the Cloudflare API
       # token, the per-bot API keys and the disabled-strategy sets.
-      # Without a named volume every `docker compose up --force-recreate
-      # redis` threw all of that away. That is not just an
-      # inconvenience: it used to resolve the auth mode to "disabled"
-      # and serve the operator's data to anyone
-      # (`lib/auth-config.ts:resolveMode` now fails closed instead).
+      # Before this named volume, that lived in the image's anonymous
+      # `/data` volume. Compose carries an anonymous volume over on
+      # `up --force-recreate` (verified: a SAVEd key survives), so a
+      # routine recreate was safe; the data went on `down` + `up`
+      # (the new container gets a fresh anonymous volume), on
+      # `down -v`, on a volume prune, or on FLUSHALL. Any of those
+      # used to resolve the auth mode to "disabled" and serve the
+      # operator's data to anyone (`lib/auth-config.ts:resolveMode`
+      # now fails closed instead). A named volume survives `down` and
+      # a prune of dangling anonymous volumes, and is findable by name
+      # when dump.rdb has to be restored.
       #
       # No `command:` override on this service, so redis:7-alpine keeps
       # its default RDB snapshotting (save 3600 1 / 300 100 / 60 10000)
