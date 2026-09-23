@@ -8,14 +8,19 @@
 # Once an operator POSTs /api/tls/configure with a domain + Cloudflare
 # API token, the dashboard pushes a full Let's Encrypt config to Caddy's
 # admin API on :2019, which replaces this entirely. Real cert, no
-# browser warning. Caddy autosaves that config and runs with --resume
-# (docker-compose.yml), so it survives restarts: this file only applies
-# while no autosave exists — first boot, or after the caddy_config
-# volume is removed. Edits here therefore don't reach a Caddy that has
-# already been configured; POST /api/tls/configure again instead.
+# browser warning. Caddy autosaves that pushed config and runs with
+# --resume (docker-compose.yml), so it survives restarts.
+#
+# This file is never autosaved (`persist_config off` below), so until
+# the first push every boot loads it fresh and edits here apply on the
+# next recreate. After a push they don't: the pushed config wins until
+# it is removed (CLAUDE.md § 9) or replaced by another POST.
 
 {
     admin 0.0.0.0:2019
+    # Keep the bootstrap config out of the autosave. Without this,
+    # --resume would freeze whatever this file said at first boot.
+    persist_config off
 }
 
 # HTTPS on 443 with auto self-signed cert for the configured host.

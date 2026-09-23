@@ -161,17 +161,6 @@ services:
       OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
       OIDC_SCOPES: "${OIDC_SCOPES:-}"
       AUTH_MODE: "${AUTH_MODE:-}"
-      # Optional Phase-held TLS config. `lib/tls-config.ts` reads these
-      # env-first (empty → the `dashboard:tls:*` Redis keys). Unlike
-      # the auth vars above nothing copies them anywhere at startup:
-      # they take effect the next time an operator POSTs
-      # /api/tls/configure, which pushes the merged config to Caddy.
-      # TLS_ENABLED_ENV is "1" for Let's Encrypt, anything else for the
-      # self-signed fallback; leave it empty to use the stored value.
-      TLS_ENABLED_ENV: "${TLS_ENABLED_ENV:-}"
-      TLS_DOMAIN: "${TLS_DOMAIN:-}"
-      TLS_EMAIL: "${TLS_EMAIL:-}"
-      TLS_CF_API_TOKEN: "${TLS_CF_API_TOKEN:-}"
       # Operator-level Telegram alerting for the heartbeat watchdog
       # (feat/heartbeat-watchdog). `phase run` injects these; the
       # watchdog (src/lib/heartbeat-watchdog.ts) sends a DM directly to
@@ -282,14 +271,14 @@ services:
   caddy:
     build: ./caddy
     container_name: hypertrade-caddy
-    # --resume: boot from the last config pushed through the admin API
-    # (autosaved to /config/caddy/autosave.json on the caddy_config
-    # volume) instead of the bootstrap Caddyfile. Without it every
-    # container restart — a deploy, a host reboot, a crash — dropped the
-    # Let's Encrypt config the dashboard pushed and served the
-    # self-signed bootstrap cert until someone POSTed
-    # /api/tls/configure again. The Caddyfile still applies when no
-    # autosave exists (first boot, or after the volume is removed).
+    # --resume: boot from the last config the dashboard pushed through
+    # the admin API (POST /api/tls/configure → /load) instead of the
+    # bootstrap Caddyfile. Without it every container restart — a
+    # deploy, a host reboot, a crash — dropped the pushed Let's Encrypt
+    # config and served the self-signed bootstrap cert until someone
+    # POSTed again. Only pushed configs are autosaved: the Caddyfile
+    # sets `persist_config off`, so a host that never pushed keeps
+    # booting the current Caddyfile, edits included.
     command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile", "--resume"]
     ports:
       - "80:80"
@@ -300,6 +289,14 @@ services:
       # for. Set in .env to match your dashboard hostname so browsers
       # don't get a name-mismatch warning on top of the self-signed one.
       CADDY_HOST: "${CADDY_HOST:-localhost}"
+      # Where the autosave lives: /config/pushed/caddy/autosave.json on
+      # the caddy_config volume. Deliberately NOT the image default
+      # (/config/caddy/): builds before --resume autosaved every config
+      # they loaded there, the bootstrap Caddyfile on each boot included,
+      # so on an existing host that file is a stale snapshot (usually of
+      # an old Caddyfile). Resuming it would silently undo later
+      # Caddyfile fixes, e.g. #168's CF-Connecting-IP strip.
+      XDG_CONFIG_HOME: /config/pushed
     volumes:
       - caddy_data:/data
       - caddy_config:/config
