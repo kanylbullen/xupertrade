@@ -26,6 +26,7 @@ from hypertrade.events.types import (
     TradeExecuted,
 )
 from hypertrade.exchange.base import Exchange, ExchangeReadError, OrderType
+from hypertrade.reconcile.fills import realized_pnl
 from hypertrade.strategies.base import Strategy
 from hypertrade.strategies.registry import get_strategy_family
 
@@ -845,10 +846,10 @@ class EngineRunner:
                     # exchange's full size, using its VWAP entry as the
                     # only entry signal we have.
                     fee = filled_price * pos.size * settings.taker_fee_rate
-                    if pos.side == "long":
-                        realized_pnl = (filled_price - pos.entry_price) * pos.size - fee
-                    else:
-                        realized_pnl = (pos.entry_price - filled_price) * pos.size - fee
+                    pnl = realized_pnl(
+                        side=pos.side, entry_price=pos.entry_price,
+                        exit_price=filled_price, size=pos.size, fee=fee,
+                    )
                     if self.repo:
                         await self.repo.record_trade(
                             order_id=order.id,
@@ -858,14 +859,14 @@ class EngineRunner:
                             size=pos.size,
                             price=filled_price,
                             fee=fee,
-                            pnl=realized_pnl,
+                            pnl=pnl,
                             reason="Flat-all from dashboard (no open DB rec)",
                         )
-                    await self.portfolio.record_pnl(realized_pnl)
+                    await self.portfolio.record_pnl(pnl)
                     closed += 1
                     logger.warning(
                         "Closed %s %s @ %.2f (no DB rec; PnL %.2f)",
-                        pos.side, pos.symbol, filled_price, realized_pnl,
+                        pos.side, pos.symbol, filled_price, pnl,
                     )
                     continue
 
@@ -879,10 +880,10 @@ class EngineRunner:
                     rec_size = float(rec.size)
                     rec_fee = filled_price * rec_size * settings.taker_fee_rate
                     rec_entry = float(rec.entry_price)
-                    if rec.side == "long":
-                        rec_pnl = (filled_price - rec_entry) * rec_size - rec_fee
-                    else:
-                        rec_pnl = (rec_entry - filled_price) * rec_size - rec_fee
+                    rec_pnl = realized_pnl(
+                        side=rec.side, entry_price=rec_entry,
+                        exit_price=filled_price, size=rec_size, fee=rec_fee,
+                    )
                     # Audit H5: single atomic trade+close per row.
                     await self.repo.record_trade_and_close_position(
                         order_id=order.id,
@@ -928,10 +929,12 @@ class EngineRunner:
             current_price = await self.exchange.get_current_price(pos.symbol)
             if current_price <= 0:
                 continue
-            if pos.side == "long":
-                pnl = (current_price - pos.entry_price) * pos.size
-            else:
-                pnl = (pos.entry_price - current_price) * pos.size
+            # Mark-to-market: the same side-aware formula with the
+            # current price as the exit and no fee.
+            pnl = realized_pnl(
+                side=pos.side, entry_price=pos.entry_price,
+                exit_price=current_price, size=pos.size,
+            )
             await self.repo.update_position_pnl(pos.id, pnl)
 
     async def _run_strategy(self, strategy: Strategy) -> None:
@@ -1354,17 +1357,17 @@ class EngineRunner:
                     )
 
         # Calculate realized P&L for closes
-        realized_pnl: float | None = None
+        close_pnl: float | None = None
         if signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
             if self.repo:
                 open_pos = await self.repo.get_open_position(
                     signal.strategy_name, signal.symbol
                 )
                 if open_pos:
-                    if open_pos.side == "long":
-                        realized_pnl = (filled_price - open_pos.entry_price) * size - fee
-                    else:
-                        realized_pnl = (open_pos.entry_price - filled_price) * size - fee
+                    close_pnl = realized_pnl(
+                        side=open_pos.side, entry_price=open_pos.entry_price,
+                        exit_price=filled_price, size=size, fee=fee,
+                    )
 
         # Record to DB — atomic Trade + PositionRecord write. Audit M8:
         # pre-fix the trade and position writes were two separate sessions,
@@ -1426,10 +1429,10 @@ class EngineRunner:
                         size=size,
                         price=filled_price,
                         fee=fee,
-                        pnl=realized_pnl or 0,
+                        pnl=close_pnl or 0,
                         reason=signal.reason,
                     )
-                    await self.portfolio.record_pnl(realized_pnl or 0)
+                    await self.portfolio.record_pnl(close_pnl or 0)
             except Exception as db_exc:
                 # The order is already on the exchange. We failed to
                 # record it. STOP TRADING so we don't open more
