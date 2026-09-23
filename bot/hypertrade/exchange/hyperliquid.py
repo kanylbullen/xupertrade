@@ -10,13 +10,16 @@ moving to mainnet.
 
 import asyncio
 import logging
+import math
 import socket
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import aiohttp
 import requests
 from eth_account import Account
+from hyperliquid.api import API
 from hyperliquid.exchange import Exchange as HLExchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
@@ -56,35 +59,144 @@ _TRANSIENT_NETWORK_ERRORS = (
     requests.exceptions.Timeout,
 )
 
-# HTTP statuses worth retrying. The SDK raises `ServerError` for >= 500
-# and `ClientError` for 4xx (`hyperliquid/api.py:_handle_exception`), both
-# carrying `.status_code`. Gateway / unavailable 5xx plus request-timeout
-# and rate-limit clear on their own; any other status (400 validation,
-# 401/403 auth, 422 bad size, a plain 500) re-fails the same way.
-_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 502, 503, 504})
+# HTTP statuses worth retrying on a READ. The SDK raises `ServerError`
+# for >= 500 and `ClientError` for 4xx (`hyperliquid/api.py:
+# _handle_exception`), both carrying `.status_code`. Reads are idempotent,
+# so a plain 500 is retried along with the gateway / unavailable 5xx and
+# request-timeout / rate-limit: giving up on the first 500 made
+# `get_current_price` answer 0 and a stop-loss close was REJECTED for a
+# whole tick. Everything else (400 validation, 401/403 auth, 422, 501)
+# re-fails the same way. Writes never consult this — see `place_order`.
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
 def _is_retryable_server_error(exc: BaseException) -> bool:
-    """True when retrying `exc` can help: a transient network failure,
-    or an HL HTTP error whose status is in `_RETRYABLE_HTTP_STATUSES`.
+    """True when retrying a READ that raised `exc` can help: a transient
+    network failure, a malformed 200 (`_MalformedResponseError` is a
+    ConnectionError), or an HL HTTP error whose status is in
+    `_RETRYABLE_HTTP_STATUSES`.
 
-    The single retry predicate for the constructor and for reads
-    (`_run_with_retry`). Writes are never retried — see `place_order`.
+    The single retry predicate for the constructor's metadata reads and
+    for `_run_with_retry`. Writes are never retried — see `place_order`.
     Reads `.status_code` rather than matching digits in the message: the
-    message is the response body, and a 500 whose body mentions "502"
-    is still a 500.
+    message is the response body, and a 501 whose body mentions "502"
+    is still a 501.
     """
     if isinstance(exc, (ServerError, ClientError)):
         return getattr(exc, "status_code", None) in _RETRYABLE_HTTP_STATUSES
     return isinstance(exc, _TRANSIENT_NETWORK_ERRORS)
 
 
-class _EmptyMetaError(Exception):
-    """`Info.meta()` answered, but with no usable perp universe."""
+def _order_outcome_unknown(exc: BaseException) -> bool:
+    """True when an order POST failed in a way that says nothing about
+    whether HL received it: our own deadline, the SDK's socket timeout,
+    a dropped connection, or a gateway timeout (504). HL may still have
+    filled the order, so `place_order` polls the position (audit H2)
+    instead of declaring REJECTED. Any other error is a clear no.
+    """
+    if isinstance(exc, ServerError):
+        return getattr(exc, "status_code", None) == 504
+    return isinstance(exc, (
+        TimeoutError,
+        ConnectionError,
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectionError,
+    ))
+
+
+class _MalformedResponseError(ConnectionError):
+    """HL answered 200, but not with the shape the call promises.
+
+    The SDK turns a non-JSON body into `{"error": "Could not parse JSON:
+    …"}` and returns it as though it were the answer (`hyperliquid/
+    api.py:API.post`), so a proxy or CDN error page served with a 200
+    comes back as a "successful" read: `get_positions` answered `[]` and
+    `get_balance` answered $0 — the #167 flat-book bug through a
+    different door. Subclasses ConnectionError on purpose: it is a
+    transport failure, not an answer, so the read retry and the runner's
+    outage aggregator (`runner._is_transient_network_error`) treat it
+    like the 502 it usually stands in for.
+    """
+
+
+class _EmptyMetaError(_MalformedResponseError):
+    """`meta` answered, but with no usable perp universe."""
+
+
+def _require_dict(payload: object, what: str) -> dict:
+    if not isinstance(payload, dict) or "error" in payload:
+        raise _MalformedResponseError(
+            f"{what} returned no usable payload: {str(payload)[:200]}"
+        )
+    return payload
+
+
+def _check_user_state(state: object) -> None:
+    """`clearinghouseState` always carries both keys, even for an empty
+    account — a payload without them is not a flat book."""
+    state = _require_dict(state, "user_state")
+    if not isinstance(state.get("assetPositions"), list) or not isinstance(
+        state.get("marginSummary"), dict
+    ):
+        raise _MalformedResponseError(
+            f"user_state lacks assetPositions/marginSummary: {str(state)[:200]}"
+        )
+
+
+def _check_mids(mids: object) -> None:
+    _require_dict(mids, "all_mids")
+
+
+def _check_list(payload: object) -> None:
+    if payload is not None and not isinstance(payload, list):
+        raise _MalformedResponseError(
+            f"expected a list, got: {str(payload)[:200]}"
+        )
+
+
+def _check_spot_meta(spot_meta: object) -> dict:
+    """Enough shape for the SDK's `Info()` constructor to index it."""
+    spot_meta = _require_dict(spot_meta, "spotMeta")
+    if not isinstance(spot_meta.get("tokens"), list) or not isinstance(
+        spot_meta.get("universe"), list
+    ):
+        raise _MalformedResponseError(
+            f"spotMeta lacks tokens/universe: {str(spot_meta)[:200]}"
+        )
+    return spot_meta
+
+
+class _ErrorBodyTolerant:
+    """Mixin for the SDK's `API._handle_exception`.
+
+    The SDK builds a 4xx `ClientError` from `err["code"]` / `err["msg"]`
+    of the JSON body; a 4xx whose JSON body lacks them (a bare 429 from a
+    rate limiter, say) raises `KeyError('code')` instead, which no retry
+    predicate can recognise as a 429. Re-raise it as the `ClientError`
+    the status says it is. Confined to the HTTP layer: only an exception
+    escaping `_handle_exception`, which only runs on a >= 400 response.
+    Used for reads only; writes keep the stock SDK behaviour.
+    """
+
+    def _handle_exception(self, response):
+        try:
+            super()._handle_exception(response)  # type: ignore[misc]
+        except (KeyError, TypeError, AttributeError) as e:
+            raise ClientError(
+                response.status_code, None, response.text, response.headers,
+            ) from e
+
+
+class _ReadAPI(_ErrorBodyTolerant, API):
+    """Bare SDK HTTP client for the constructor's metadata reads."""
+
+
+class _ReadInfo(_ErrorBodyTolerant, Info):
+    """The SDK `Info` used for every read."""
 
 
 def _parse_sz_decimals(meta: object) -> dict[str, int]:
-    """`{coin: szDecimals}` from an `Info.meta()` response.
+    """`{coin: szDecimals}` from a `meta` response.
 
     Raises `_EmptyMetaError` when nothing usable came back — an empty
     universe, or the SDK's `{"error": "Could not parse JSON: …"}` stand-in
@@ -141,12 +253,16 @@ class HyperLiquidExchange(Exchange):
         # the order-timeout window in normal conditions, and our Python-
         # level wait_for still applies the tighter read-timeout on top.
         sdk_timeout = settings.hl_order_timeout_seconds
-        # Construct Info + Exchange with retry. The SDK's HLExchange
-        # constructor internally creates an Info() with `meta`/`spot_meta`
-        # positional args; if either is None it triggers a network fetch
-        # right there. Without the retry, a transient HL outage during
-        # bot start = container exit + restart-loop until HL recovers
-        # (witnessed 2026-05-09 — bot was in restart-loop for 4.5h).
+        # Construct Info + Exchange with retry. Left to itself, the SDK's
+        # `Info()` (and the one `HLExchange` builds internally) fetches
+        # `meta`/`spot_meta` in its constructor and indexes the answer
+        # unchecked — a non-JSON 200 there is a `KeyError: 'tokens'` that
+        # no retry predicate recognises. So we fetch both ourselves, once
+        # per attempt, validate them, and hand them to both constructors,
+        # which then make no network call at all. Without the retry, a
+        # transient HL outage during bot start = container exit +
+        # restart-loop until HL recovers (witnessed 2026-05-09 — bot was
+        # in restart-loop for 4.5h).
         #
         # Only retry on KNOWN transient errors. A retry-on-any-Exception
         # would mask config / programming bugs (TypeError, AttributeError,
@@ -156,33 +272,38 @@ class HyperLiquidExchange(Exchange):
         #
         # HL price rules: max 5 sig figs AND max (MAX_DECIMALS - szDecimals)
         # decimals (MAX_DECIMALS = 6 for perps); sizes round to szDecimals.
-        # The per-coin szDecimals map is fetched INSIDE this loop so a
-        # transient failure is retried like the two constructors. It used
-        # to be a separate try/except that logged and carried on with an
-        # empty map: every coin then rounded to 4 dp (SOL, szDecimals 2,
-        # 422'd on every order) while the bot reported a clean boot.
+        # The per-coin szDecimals map comes from the same `meta` read. It
+        # used to be a separate try/except after construction that logged
+        # and carried on with an empty map: every coin then rounded to
+        # 4 dp (SOL, szDecimals 2, 422'd on every order) while the bot
+        # reported a clean boot. An empty or malformed answer is now
+        # retried like a 502 (`_MalformedResponseError`) and then fatal.
         self._sz_decimals: dict[str, int] = {}
+        meta_api = _ReadAPI(base_url, timeout=sdk_timeout)
         last_exc: Exception | None = None
         for attempt in range(1, settings.hl_init_retry_attempts + 1):
             try:
-                self._info = Info(
-                    base_url, skip_ws=True, timeout=sdk_timeout,
+                meta = meta_api.post("/info", {"type": "meta", "dex": ""})
+                sz_decimals = _parse_sz_decimals(meta)
+                spot_meta = _check_spot_meta(
+                    meta_api.post("/info", {"type": "spotMeta"})
+                )
+                self._info = _ReadInfo(
+                    base_url, skip_ws=True, meta=meta, spot_meta=spot_meta,
+                    timeout=sdk_timeout,
                 )
                 self._exchange = HLExchange(
                     self._account,
                     base_url=base_url,
+                    meta=meta,
+                    spot_meta=spot_meta,
                     account_address=self._account_address,
                     timeout=sdk_timeout,
                 )
-                self._sz_decimals = _parse_sz_decimals(self._info.meta())
+                self._sz_decimals = sz_decimals
                 break
             except Exception as e:
-                # An empty meta answer is retried too: the likeliest
-                # cause is a non-JSON 200 from something in front of HL.
-                if not (
-                    _is_retryable_server_error(e)
-                    or isinstance(e, _EmptyMetaError)
-                ):
+                if not _is_retryable_server_error(e):
                     # Non-transient (config bug, auth, programming error)
                     # — re-raise as-is so the operator sees the real
                     # cause, not a misleading "HL unreachable".
@@ -201,18 +322,19 @@ class HyperLiquidExchange(Exchange):
             # All attempts failed; raise a clean error that names HL as
             # the cause so the docker exit log shows the real reason
             # (instead of a noisy SDK stack trace).
-            if isinstance(last_exc, _EmptyMetaError):
+            if isinstance(last_exc, _MalformedResponseError):
                 raise RuntimeError(
-                    f"HyperLiquid meta returned no perp szDecimals after "
+                    f"HyperLiquid returned no usable metadata after "
                     f"{settings.hl_init_retry_attempts} attempts — refusing "
-                    f"to start: every order size and price would be "
-                    f"rounded blind. Last answer: {last_exc}"
+                    f"to start: without szDecimals every order size and "
+                    f"price would be rounded blind. Last answer: {last_exc}"
                 ) from last_exc
             raise RuntimeError(
                 f"HyperLiquid API unreachable after "
                 f"{settings.hl_init_retry_attempts} attempts — last error: "
                 f"{type(last_exc).__name__}: {last_exc}"
             ) from last_exc
+        meta_api.session.close()  # metadata only; reads use self._info
         # Bumped from 4 → 16. Even with the SDK timeout above, a long
         # outage where many ticks queue up could still saturate the
         # pool briefly; 16 gives more headroom while still being modest.
@@ -293,7 +415,14 @@ class HyperLiquidExchange(Exchange):
             timeout=deadline,
         )
 
-    async def _run_with_retry(self, fn, *args, timeout: float | None = None, **kwargs):
+    async def _run_with_retry(
+        self,
+        fn,
+        *args,
+        timeout: float | None = None,
+        validate: Callable[[object], object] | None = None,
+        **kwargs,
+    ):
         """Run a HyperLiquid SDK call with retry on transient errors.
 
         Use ONLY for idempotent read calls (get_positions, get_balance,
@@ -305,8 +434,13 @@ class HyperLiquidExchange(Exchange):
         network issue). What is retried is decided by the
         `_is_retryable_server_error` predicate, the same one the
         constructor uses — it used to be an exception-type tuple, which
-        retried every `ServerError` whatever its status and so spent
-        three attempts and ~3 s of backoff on a permanent error.
+        retried every `ServerError` whatever its status and missed
+        `requests`' own ConnectionError/Timeout.
+
+        `validate(result)` runs inside each attempt and raises
+        `_MalformedResponseError` when a 200 is not the promised shape,
+        so a proxy error page is retried like the 502 it stands in for
+        instead of being returned as data.
         """
         try:
             async for attempt in AsyncRetrying(
@@ -322,7 +456,10 @@ class HyperLiquidExchange(Exchange):
                             attempt.retry_state.attempt_number,
                             getattr(fn, "__name__", repr(fn)),
                         )
-                    return await self._run(fn, *args, timeout=timeout, **kwargs)
+                    result = await self._run(fn, *args, timeout=timeout, **kwargs)
+                    if validate is not None:
+                        validate(result)
+                    return result
         except RetryError as e:
             raise e.last_attempt.exception() from e
 
@@ -420,18 +557,28 @@ class HyperLiquidExchange(Exchange):
                 {"limit": {"tif": tif}},
                 timeout=settings.hl_order_timeout_seconds,
             )
-        except asyncio.TimeoutError:
-            # The SDK call timed out — but HL may STILL fill the order.
-            # Returning REJECTED here was the audit H2 bug: the runner
-            # would skip the DB write while the exchange built up a
-            # position. Reconcile catches it 5 min later, but during
-            # those 5 min the strategy can't manage the position.
-            # Poll for ~30s; if a new position appears, treat it as
-            # filled at the observed entry price.
+        except Exception as e:
+            if not _order_outcome_unknown(e):
+                logger.exception(
+                    "HyperLiquid order failed for %s %s %s @ %s",
+                    symbol, side, rounded_size, limit_px,
+                )
+                return self._rejected(symbol, side, rounded_size, order_type, price)
+            # The POST timed out or lost its connection — but HL may
+            # STILL fill the order. Returning REJECTED here was the audit
+            # H2 bug: the runner would skip the DB write while the
+            # exchange built up a position. Reconcile catches it 5 min
+            # later, but during those 5 min the strategy can't manage the
+            # position. Poll for ~30s; if a new position appears, treat
+            # it as filled at the observed entry price. This covers the
+            # SDK's own `requests` timeout as well as our `wait_for`
+            # deadline — the SDK is given the same deadline, so either
+            # can fire first.
             logger.warning(
-                "HyperLiquid order TIMED OUT for %s %s %s — polling for "
-                "delayed fill before declaring REJECTED",
-                symbol, side, rounded_size,
+                "HyperLiquid order outcome UNKNOWN for %s %s %s @ %s "
+                "(%s: %s) — polling for delayed fill before declaring "
+                "REJECTED",
+                symbol, side, rounded_size, limit_px, type(e).__name__, e,
             )
             return await self._poll_for_delayed_fill(
                 symbol=symbol,
@@ -443,12 +590,6 @@ class HyperLiquidExchange(Exchange):
                 pre_signed=pre_signed,
                 limit_px=limit_px,
             )
-        except Exception:
-            logger.exception(
-                "HyperLiquid order failed for %s %s %s @ %s",
-                symbol, side, rounded_size, limit_px,
-            )
-            return self._rejected(symbol, side, rounded_size, order_type, price)
 
         status_str = result.get("status", "")
         if status_str != "ok":
@@ -475,7 +616,21 @@ class HyperLiquidExchange(Exchange):
                     f, symbol=symbol, side=side, submitted=rounded_size,
                     requested=size, filled_price=filled_price,
                 )
-                order_status = OrderStatus.FILLED
+                if filled_size > 0:
+                    order_status = OrderStatus.FILLED
+                else:
+                    # HL said "filled" with a readable size of zero (or
+                    # less): nothing is on the exchange, so nothing may
+                    # be booked. Reporting it FILLED at the submitted
+                    # size would put a phantom position in the DB.
+                    logger.warning(
+                        "HyperLiquid reported a fill of %s for %s %s %s "
+                        "(oid=%s) — treating as REJECTED",
+                        filled_size, symbol, side, rounded_size,
+                        order_id or "?",
+                    )
+                    filled_size = rounded_size
+                    order_status = OrderStatus.REJECTED
             elif "resting" in entry:
                 oid = entry["resting"].get("oid")
                 order_id = str(oid) if oid is not None else ""
@@ -523,22 +678,24 @@ class HyperLiquidExchange(Exchange):
         """The size HL reports as filled (`totalSz`), else what we sent.
 
         An IOC order can fill partly and cancel the rest; `totalSz` is the
-        only place that shows it. HL always sends it on a fill — if it is
-        missing or unreadable, the submitted (rounded) size is the best
-        remaining answer, never the unrounded request.
+        only place that shows it. A readable value is returned as-is,
+        including 0 or less — the caller turns that into REJECTED. Only
+        when the field is absent or unparseable (or not finite) is the
+        submitted (rounded) size the best remaining answer, never the
+        unrounded request.
         """
         try:
             total = float(filled.get("totalSz"))
         except (TypeError, ValueError):
             total = None
-        if total is None or total <= 0:
+        if total is None or not math.isfinite(total):
             logger.warning(
                 "HyperLiquid fill for %s %s has no usable totalSz (%r) — "
                 "booking the submitted size %s",
                 symbol, side, filled.get("totalSz"), submitted,
             )
             return submitted
-        if abs(total - submitted) > 1e-9:
+        if total > 0 and abs(total - submitted) > 1e-9:
             logger.warning(
                 "HyperLiquid %s for %s %s: requested %s, submitted %s, "
                 "filled %s @ %s — booking the filled size",
@@ -565,6 +722,12 @@ class HyperLiquidExchange(Exchange):
         which cannot rest — this is the guard for the first GTC limit
         order someone adds. Returns CANCELLED, or PENDING when the cancel
         could not be confirmed (it may already have filled).
+
+        Known gap, left for whoever adds limit orders: a GTC order can
+        fill partly and rest the remainder, and HL's `resting` status
+        does not say how much filled first. That part is booked nowhere
+        here — reconcile sees it as an exchange orphan. A limit-order
+        caller must read the fills (`fetch_user_fills`) for the oid.
         """
         logger.warning(
             "HyperLiquid order for %s %s %s @ %s is RESTING (tif=%s, oid=%s) "
@@ -758,7 +921,14 @@ class HyperLiquidExchange(Exchange):
         return True
 
     async def _user_state(self) -> dict:
-        return await self._run_with_retry(self._info.user_state, self._account_address)
+        """`clearinghouseState` for the trading account, shape-checked:
+        a 200 without `assetPositions`/`marginSummary` (a proxy error
+        page, parsed by the SDK into `{"error": …}`) raises instead of
+        reading as a flat, empty account."""
+        return await self._run_with_retry(
+            self._info.user_state, self._account_address,
+            validate=_check_user_state,
+        )
 
     async def get_positions(self) -> list[Position]:
         """Open positions, or ExchangeReadError if HL could not answer.
@@ -845,6 +1015,7 @@ class HyperLiquidExchange(Exchange):
                 self._account_address,
                 start_time_ms,
                 end_time_ms,
+                validate=_check_list,
             ) or []
         except Exception:
             logger.exception("Failed to fetch user funding history")
@@ -865,9 +1036,10 @@ class HyperLiquidExchange(Exchange):
             if since_ms is not None:
                 return await self._run_with_retry(
                     self._info.user_fills_by_time, addr, int(since_ms),
+                    validate=_check_list,
                 ) or []
             return await self._run_with_retry(
-                self._info.user_fills, addr,
+                self._info.user_fills, addr, validate=_check_list,
             ) or []
         except Exception:
             logger.exception("Failed to fetch user fills for %s", addr)
@@ -875,7 +1047,9 @@ class HyperLiquidExchange(Exchange):
 
     async def get_current_price(self, symbol: str) -> float:
         try:
-            mids = await self._run_with_retry(self._info.all_mids)
+            mids = await self._run_with_retry(
+                self._info.all_mids, validate=_check_mids,
+            )
             return float(mids.get(symbol, 0))
         except Exception:
             logger.exception("Failed to fetch mid price for %s", symbol)
