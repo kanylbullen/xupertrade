@@ -20,6 +20,7 @@ import pytest
 
 from hypertrade.config import settings
 from hypertrade.engine.portfolio import PortfolioManager
+from hypertrade.events.types import ErrorOccurred
 
 
 def _control(*, kill=None, kill_raises=False, stored=0.0):
@@ -133,6 +134,48 @@ async def test_new_outage_after_recovery_publishes_again():
     await pm.record_pnl(-10.0)
 
     assert bus.publish.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_persist_alert_retried_until_delivered(caplog):
+    """The alert goes over the same Redis whose write failed. Until the
+    bus reports delivery, every later failure tries the publish again;
+    after that, no more publishes this outage. The ERROR log is once."""
+    control = _control()
+    control.set_daily_pnl = AsyncMock(side_effect=ConnectionError("redis down"))
+    bus = _bus()
+    bus.publish = AsyncMock(side_effect=[False, False, True])
+    pm = PortfolioManager(exchange=MagicMock(), control=control, event_bus=bus)
+
+    with caplog.at_level(logging.ERROR, logger="hypertrade.engine.portfolio"):
+        for _ in range(5):
+            await pm.record_pnl(-1.0)
+
+    assert bus.publish.await_count == 3, "two undelivered attempts, then delivered"
+    alerts = [r for r in caplog.records if r.message.startswith("Daily PnL")]
+    assert len(alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_event_bus_reports_delivery():
+    from hypertrade.events.bus import EventBus, NoOpEventBus
+
+    event = ErrorOccurred(strategy="x", message="y")
+
+    unconnected = EventBus(redis_url="redis://unused:6379/0")
+    assert await unconnected.publish(event) is False
+
+    failing = EventBus(redis_url="redis://unused:6379/0")
+    failing._redis = MagicMock()
+    failing._redis.publish = AsyncMock(side_effect=ConnectionError("down"))
+    assert await failing.publish(event) is False
+
+    working = EventBus(redis_url="redis://unused:6379/0")
+    working._redis = MagicMock()
+    working._redis.publish = AsyncMock(return_value=1)
+    assert await working.publish(event) is True
+
+    assert await NoOpEventBus().publish(event) is True
 
 
 @pytest.mark.asyncio

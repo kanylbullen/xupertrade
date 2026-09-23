@@ -45,10 +45,12 @@ class PortfolioManager:
         # The running total holds PnL Redis does not have yet. Retried on
         # the next record_pnl and the next risk check until a write lands.
         self._persist_pending: bool = False
-        # Outage latches: one WARNING / one ErrorOccurred per outage, not
-        # one per call. Cleared by the next successful read / write.
+        # Outage latches: one WARNING / one delivered ErrorOccurred per
+        # outage, not one per call. Cleared by the next successful read /
+        # write.
         self._kill_switch_unreadable: bool = False
-        self._persist_failing: bool = False
+        self._persist_failure_logged: bool = False
+        self._persist_alerted: bool = False
 
     async def _ensure_loaded(self) -> None:
         """Load today's PnL from Redis once per process start and once
@@ -128,32 +130,47 @@ class PortfolioManager:
             await self._report_persist_failure(f"{type(e).__name__}: {e}")
             return
         self._persist_pending = False
-        if self._persist_failing:
-            self._persist_failing = False
+        if self._persist_failure_logged or self._persist_alerted:
+            self._persist_failure_logged = False
+            self._persist_alerted = False
             logger.warning(
                 "daily_pnl persisted again ($%.2f for %s) — Redis write recovered",
                 self._daily_pnl, self._date_str,
             )
 
     async def _report_persist_failure(self, reason: str) -> None:
-        if self._persist_failing:
+        """Log once per outage; publish until the alert is delivered.
+
+        The alert travels over the same Redis whose write just failed, so
+        in a Redis-wide outage the first publish is lost too. The latch is
+        set only once the event bus reports the event as delivered;
+        until then every later failure (next record, next risk check)
+        tries the publish again.
+        """
+        if self._persist_alerted:
             return
-        self._persist_failing = True
         message = (
             f"Daily PnL (${self._daily_pnl:,.2f} for {self._date_str}) could "
             f"not be saved to Redis: {reason}. The MAX_DAILY_LOSS_USD counter "
             f"lives only in this process until a write succeeds — a restart "
             f"now would reset it. Retrying on every trade and risk check."
         )
-        logger.error("%s", message)
+        if not self._persist_failure_logged:
+            self._persist_failure_logged = True
+            logger.error("%s", message)
         if self.event_bus is None:
             return
         try:
-            await self.event_bus.publish(
+            delivered = await self.event_bus.publish(
                 ErrorOccurred(strategy="daily-pnl", message=message)
             )
         except Exception:
             logger.exception("daily-pnl: event publish failed")
+            return
+        # `False` is the bus saying it could not deliver; anything else
+        # (True, or None from a bus that does not report) counts as sent.
+        if delivered is not False:
+            self._persist_alerted = True
 
     async def _kill_switch_active(self) -> bool:
         """The effective kill switch for OPENS.
