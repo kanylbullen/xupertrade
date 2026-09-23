@@ -60,7 +60,10 @@ const KEYS = {
 
 const DEFAULT_OIDC_SCOPES = "openid profile email";
 
-function isValidMode(
+/** Is `v` one of the modes an operator can set? Exported so
+ *  `phase-sync.ts` validates `AUTH_MODE` against the same list the
+ *  resolver does, instead of keeping a second copy. */
+export function isConfigurableAuthMode(
   v: string | null | undefined,
 ): v is ConfigurableAuthMode {
   return v === "disabled" || v === "basic" || v === "oidc";
@@ -143,10 +146,10 @@ export async function resolveMode(args: {
   hasAnyTenant?: TenantProbe;
 }): Promise<AuthMode> {
   if (args.envMode) {
-    return isValidMode(args.envMode) ? args.envMode : "locked";
+    return isConfigurableAuthMode(args.envMode) ? args.envMode : "locked";
   }
   if (args.storedMode) {
-    return isValidMode(args.storedMode) ? args.storedMode : "locked";
+    return isConfigurableAuthMode(args.storedMode) ? args.storedMode : "locked";
   }
   if (args.basicConfigured) return "basic";
   if (args.oidcConfigured) return "oidc";

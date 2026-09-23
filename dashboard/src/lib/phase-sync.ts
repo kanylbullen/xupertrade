@@ -26,6 +26,7 @@ import "server-only";
 
 import type { Redis } from "ioredis";
 
+import { isConfigurableAuthMode } from "./auth-config";
 import { getRedisClient } from "./redis";
 
 /** Env-var → Redis-key mapping. Order matters only for the log. */
@@ -36,6 +37,41 @@ const SYNC_KEYS: Array<{ env: string; redis: string }> = [
   { env: "OIDC_SCOPES", redis: "dashboard:auth:oidc:scopes" },
   { env: "AUTH_MODE", redis: "dashboard:auth:mode" },
 ];
+
+/**
+ * The value of `AUTH_MODE` to copy into Redis, or `""` for none.
+ *
+ * Only `basic` and `oidc` are persisted. Two kinds of value are not:
+ *
+ *  - Garbage. `resolveMode` already turns an unrecognised env value
+ *    into `locked` for as long as it is set. Writing it would plant
+ *    the same garbage in Redis, where it would keep producing `locked`
+ *    after the operator had fixed or removed the env var.
+ *  - `disabled`. The env value alone already opens the dashboard —
+ *    `getAuthConfig` reads env before Redis. Persisting it made that
+ *    opening outlive the variable: remove `AUTH_MODE=disabled` from
+ *    Phase, restart, and the stored copy kept the dashboard open. An
+ *    env-only `disabled` must stop applying the moment it is removed.
+ *
+ * The raw value is never logged. It is operator-typed text in a
+ * secrets manager, and a value pasted into the wrong field can be
+ * anything.
+ */
+function authModeToPersist(value: string): string {
+  if (value === "disabled") {
+    console.log(
+      "[phase-sync] AUTH_MODE=disabled applies from env only; not written to Redis, so it stops applying once the variable is removed",
+    );
+    return "";
+  }
+  if (!isConfigurableAuthMode(value)) {
+    console.warn(
+      "[phase-sync] AUTH_MODE is not one of basic | oidc | disabled; not written to Redis (the dashboard resolves to locked while it is set)",
+    );
+    return "";
+  }
+  return value;
+}
 
 export type PhaseSyncResult = {
   /** How many env vars were non-empty and got written. */
@@ -60,15 +96,19 @@ export async function syncPhaseAuthConfig(
     .map(({ env, redis }) => {
       const raw = process.env[env];
       const trimmed = raw == null ? "" : String(raw).trim();
+      if (env === "AUTH_MODE" && trimmed !== "") {
+        return { redis, value: authModeToPersist(trimmed) };
+      }
       return { redis, value: trimmed };
     })
     .filter((x) => x.value !== "");
 
   if (present.length === 0) {
-    // Nothing to do — Phase isn't injecting any of these. Keep whatever
-    // Redis already holds (typically operator-typed via the UI).
+    // Nothing to write — Phase isn't injecting any of these, or only
+    // an AUTH_MODE that must not be persisted. Keep whatever Redis
+    // already holds (typically operator-typed via the UI).
     console.log(
-      `[phase-sync] no OIDC env vars set, skipped (0/${total} keys)`,
+      `[phase-sync] nothing to write from env, skipped (0/${total} keys)`,
     );
     return { written: 0, total, redisError: false };
   }

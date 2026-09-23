@@ -118,6 +118,74 @@ describe("syncPhaseAuthConfig", () => {
     expect(pipe.exec).not.toHaveBeenCalled();
   });
 
+  it("writes AUTH_MODE=basic like any other value", async () => {
+    process.env.AUTH_MODE = "basic";
+    const { client, pipe } = makeRedisStub();
+    const result = await syncPhaseAuthConfig(client);
+    expect(result).toEqual({ written: 1, total: 5, redisError: false });
+    expect(pipe.set).toHaveBeenCalledWith("dashboard:auth:mode", "basic");
+  });
+
+  it("never persists AUTH_MODE=disabled, so it stops applying once removed from env", async () => {
+    // SECURITY: `getAuthConfig` reads AUTH_MODE from env first, so the
+    // env var alone opens the dashboard while it is set. Copying it into
+    // Redis made the opening outlive the variable: remove it from
+    // Phase, restart, and the stored "disabled" kept serving data.
+    process.env.AUTH_MODE = "disabled";
+    process.env.OIDC_ISSUER = "https://issuer";
+
+    const { client, pipe } = makeRedisStub();
+    const result = await syncPhaseAuthConfig(client);
+
+    expect(result).toEqual({ written: 1, total: 5, redisError: false });
+    expect(pipe.set).toHaveBeenCalledTimes(1);
+    expect(pipe.set).toHaveBeenCalledWith(
+      "dashboard:auth:oidc:issuer",
+      "https://issuer",
+    );
+    expect(pipe.set).not.toHaveBeenCalledWith(
+      "dashboard:auth:mode",
+      expect.anything(),
+    );
+  });
+
+  it("opens no pipeline when AUTH_MODE=disabled is the only env var", async () => {
+    process.env.AUTH_MODE = "  disabled  ";
+    const { client } = makeRedisStub();
+    const result = await syncPhaseAuthConfig(client);
+    expect(result).toEqual({ written: 0, total: 5, redisError: false });
+    expect(client.pipeline).not.toHaveBeenCalled();
+  });
+
+  it("does not persist an unrecognised AUTH_MODE, and does not log its value", async () => {
+    // Writing it would plant garbage in Redis, which resolves to
+    // `locked` and would keep doing so after the env var was fixed.
+    process.env.AUTH_MODE = "disabeld-typo-value";
+    process.env.OIDC_CLIENT_ID = "client-1";
+    const warn = vi.spyOn(console, "warn");
+    const log = vi.spyOn(console, "log");
+
+    const { client, pipe } = makeRedisStub();
+    const result = await syncPhaseAuthConfig(client);
+
+    expect(result).toEqual({ written: 1, total: 5, redisError: false });
+    expect(pipe.set).not.toHaveBeenCalledWith(
+      "dashboard:auth:mode",
+      expect.anything(),
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("AUTH_MODE"));
+    const logged = [...warn.mock.calls, ...log.mock.calls].flat().join(" ");
+    expect(logged).not.toContain("disabeld-typo-value");
+  });
+
+  it("does not persist `locked`, which is resolved-only", async () => {
+    process.env.AUTH_MODE = "locked";
+    const { client } = makeRedisStub();
+    const result = await syncPhaseAuthConfig(client);
+    expect(result.written).toBe(0);
+    expect(client.pipeline).not.toHaveBeenCalled();
+  });
+
   it("logs WARN and returns redisError=true when Redis rejects, doesn't throw", async () => {
     process.env.AUTH_MODE = "oidc";
 
