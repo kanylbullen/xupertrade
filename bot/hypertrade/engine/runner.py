@@ -151,7 +151,9 @@ class EngineRunner:
         self.repo = repo
         self.event_bus = event_bus
         self.control = control
-        self.portfolio = PortfolioManager(exchange, control=control)
+        self.portfolio = PortfolioManager(
+            exchange, control=control, event_bus=event_bus,
+        )
         self._last_reconcile = 0.0  # epoch seconds
         # Last reconcile summary we sent to Telegram. A divergence
         # reconcile cannot resolve (an unpriceable row, a multi-hour HL
