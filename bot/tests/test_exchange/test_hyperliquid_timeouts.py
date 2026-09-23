@@ -110,13 +110,13 @@ async def test_place_order_returns_rejected_on_timeout(fake_exchange):
 async def test_cancel_order_returns_false_on_timeout(fake_exchange):
     """Hung cancel doesn't propagate — returns False so the caller
     can decide on follow-up action."""
-    def hang(_oid):
+    def hang(_coin, _oid):
         time.sleep(2.0)
         return None
     fake_exchange._exchange.cancel = hang
 
     with patch.object(settings, "hl_order_timeout_seconds", 0.3):
-        ok = await fake_exchange.cancel_order("xyz")
+        ok = await fake_exchange.cancel_order("123", "BTC")
     assert ok is False
 
 
@@ -134,82 +134,42 @@ async def test_update_leverage_returns_false_on_timeout(fake_exchange):
 
 
 # --- HL init retry (2026-05-09 outage hardening) ----------------------
+#
+# These drive the real SDK `Info` / `Exchange` constructors; only
+# `requests.Session.post` is faked (`hl_http`, tests/test_exchange/
+# conftest.py). Patching `Info` itself hid that the SDK constructor
+# indexes its own metadata fetch unchecked.
 
-def test_init_raises_clean_runtime_error_when_hl_unreachable():
-    """The SDK's HLExchange __init__ fetches meta/spot_meta synchronously.
-    A HL outage at bot startup used to bubble a noisy SDK ConnectionError
-    + restart-loop. Now it retries `hl_init_retry_attempts` times then
+
+def test_init_raises_clean_runtime_error_when_hl_unreachable(
+    hl_http, build_exchange,
+):
+    """A HL outage at bot startup used to bubble a noisy SDK error +
+    restart-loop. Now it retries `hl_init_retry_attempts` times then
     raises a clean RuntimeError naming HL as the cause."""
-    # Patch BOTH Info AND HLExchange to fail (the outage path hits
-    # whichever the SDK constructs first internally).
-    from hyperliquid.utils.error import ServerError
-    from hypertrade.exchange import hyperliquid as hl_module
+    hl_http.route("meta", (503, "Service Unavailable"))
 
-    call_count = {"n": 0}
-
-    def _failing_info(*args, **kwargs):
-        call_count["n"] += 1
-        raise ServerError(503, "Service Unavailable")
-
-    # Speed up the test — disable the backoff sleep entirely.
-    with patch.object(hl_module, "Info", side_effect=_failing_info), \
-         patch.object(settings, "hl_init_retry_attempts", 3), \
-         patch.object(settings, "hl_init_retry_backoff_seconds", 0.001), \
-         patch.object(settings, "hyperliquid_private_key",
-                      "0x" + "1" * 64):
-        with pytest.raises(RuntimeError, match="HyperLiquid API unreachable"):
-            hl_module.HyperLiquidExchange()
-    assert call_count["n"] == 3, (
-        f"expected 3 init attempts, got {call_count['n']}"
-    )
+    with pytest.raises(RuntimeError, match="HyperLiquid API unreachable"):
+        build_exchange(attempts=3)
+    assert hl_http.count("meta") == 3
 
 
-def test_init_succeeds_on_retry_after_transient_failure():
-    """First N-1 attempts fail, last one succeeds → init completes
-    cleanly (no exception raised). Mocks Info/HLExchange entirely so
-    no network access happens; then asserts both the retry happened
-    AND HyperLiquidExchange() returned successfully.
-    """
-    from hyperliquid.utils.error import ServerError
-    from hypertrade.exchange import hyperliquid as hl_module
+def test_init_succeeds_on_retry_after_transient_failure(
+    hl_http, build_exchange,
+):
+    """First N-1 attempts fail, last one succeeds → init completes and
+    the szDecimals cache is populated from the answer."""
+    from .conftest import META
 
-    call_count = {"info": 0, "ex": 0}
+    hl_http.route("meta", (503, "transient"), (502, "transient"), (200, META))
 
-    def _flaky_info(*args, **kwargs):
-        call_count["info"] += 1
-        if call_count["info"] < 3:
-            raise ServerError(503, "transient")
-        # Return a mock Info whose .meta() returns a minimal valid response
-        # so the post-construction meta-fetch loop on line 109 also passes.
-        info = MagicMock()
-        info.meta.return_value = {"universe": [{"name": "BTC", "szDecimals": 5}]}
-        return info
+    ex = build_exchange(attempts=5)
 
-    def _ok_ex(*args, **kwargs):
-        call_count["ex"] += 1
-        return MagicMock()
-
-    with patch.object(hl_module, "Info", side_effect=_flaky_info), \
-         patch.object(hl_module, "HLExchange", side_effect=_ok_ex), \
-         patch.object(settings, "hl_init_retry_attempts", 5), \
-         patch.object(settings, "hl_init_retry_backoff_seconds", 0.001), \
-         patch.object(settings, "hyperliquid_private_key",
-                      "0x" + "1" * 64):
-        # No try/except — if init fails after retry, the test must fail.
-        ex = hl_module.HyperLiquidExchange()
-
-    assert call_count["info"] == 3, (
-        f"expected 3 Info attempts (2 fail + 1 succeed), got {call_count['info']}"
-    )
-    assert call_count["ex"] == 1, (
-        f"HLExchange should be constructed exactly once after Info "
-        f"succeeded, got {call_count['ex']}"
-    )
-    # Verify the post-init meta cache was populated from our mock Info
-    assert ex._sz_decimals == {"BTC": 5}
+    assert hl_http.count("meta") == 3
+    assert ex._sz_decimals == {"BTC": 5, "ETH": 4, "SOL": 2}
 
 
-def test_init_does_not_retry_on_non_transient_error():
+def test_init_does_not_retry_on_non_transient_error(hl_http):
     """Programming/config errors (TypeError, AuthError, etc.) re-raise
     immediately instead of being misleadingly wrapped as 'HL API
     unreachable'. (PR #24 review fix.)"""
@@ -221,9 +181,9 @@ def test_init_does_not_retry_on_non_transient_error():
         call_count["n"] += 1
         raise TypeError("bug in our config plumbing")
 
-    with patch.object(hl_module, "Info", side_effect=_bug), \
+    with patch.object(hl_module, "HLExchange", side_effect=_bug), \
          patch.object(settings, "hl_init_retry_attempts", 5), \
-         patch.object(settings, "hl_init_retry_backoff_seconds", 0.001), \
+         patch.object(settings, "hl_init_retry_backoff_seconds", 0.0), \
          patch.object(settings, "hyperliquid_private_key",
                       "0x" + "1" * 64):
         with pytest.raises(TypeError, match="bug in our config plumbing"):
@@ -232,3 +192,4 @@ def test_init_does_not_retry_on_non_transient_error():
         f"non-transient error should fire ONCE then propagate, "
         f"got {call_count['n']} attempts"
     )
+    assert hl_http.count("meta") == 1
