@@ -30,16 +30,20 @@ class EventBus:
         self._redis = redis.from_url(self._redis_url, decode_responses=True)
         logger.info("EventBus connected to Redis")
 
-    async def publish(self, event: Event) -> None:
+    async def publish(self, event: Event) -> bool:
+        """Publish `event`. Never raises; returns whether Redis took it,
+        so a caller whose alert is about Redis itself can retry."""
         if self._redis is None:
             logger.warning("EventBus not connected, skipping event: %s", event.type)
-            return
+            return False
         try:
             event.mode = self._mode
             await self._redis.publish(self._channel, event.to_json())
             logger.debug("Published event: %s", event.type)
         except Exception:
             logger.exception("Failed to publish event: %s", event.type)
+            return False
+        return True
 
     async def close(self) -> None:
         if self._redis:
@@ -52,8 +56,10 @@ class NoOpEventBus(EventBus):
     async def connect(self) -> None:
         logger.info("NoOpEventBus: Redis disabled")
 
-    async def publish(self, event: Event) -> None:
+    async def publish(self, event: Event) -> bool:
+        # Nowhere to deliver to, now or later — retrying would not help.
         logger.debug("NoOpEventBus: %s", event.type)
+        return True
 
     async def close(self) -> None:
         pass

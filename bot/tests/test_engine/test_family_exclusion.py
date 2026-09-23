@@ -66,6 +66,8 @@ def _runner(open_positions: list) -> tuple[EngineRunner, MagicMock]:
     # AsyncMock so assert_not_awaited/assert_awaited work in the gate tests;
     # _allow_open_path() re-stubs it with a filled Order when needed.
     exchange.place_order = AsyncMock()
+    # An OPEN whose leverage push fails is aborted; accept the push.
+    exchange.update_leverage = AsyncMock(return_value=True)
 
     runner = EngineRunner(
         exchange=exchange,
