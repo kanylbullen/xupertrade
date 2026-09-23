@@ -144,14 +144,23 @@ async def main() -> None:
     # Per-tenant cap on enabled strategies (alembic 0016). The dashboard
     # only checks it when a tenant switches a strategy ON; without this
     # a fresh bot booted with every allowlisted strategy enabled. Trims
-    # the surplus into the Redis `disabled` set before the first tick.
-    # Unset env = no cap; malformed or no Redis fails CLOSED.
+    # FLAT surplus strategies into the Redis `disabled` set before the
+    # first tick; a strategy holding an open position is never trimmed
+    # (the tick loop skips disabled strategies, so it would be left with
+    # no SL/TP/exit). Unset env = no cap; positions unreadable = no
+    # trimming; malformed value or no Redis fails closed for flat ones.
+    # On mainnet the tenant's opt-in set decides which flat ones stay —
+    # the same condition under which the runner applies it.
     allowed_names = await enforce_strategy_cap(
         allowed_names,
         settings.tenant_max_active_strategies,
         control,
         event_bus,
+        repo,
         settings.exchange_mode,
+        mainnet_tenant_id=(
+            settings.tenant_id if settings.is_mainnet and settings.tenant_id else None
+        ),
     )
     strategies = [get_strategy(name) for name in allowed_names]
     logger.info("Active strategies: %s", [s.name for s in strategies])

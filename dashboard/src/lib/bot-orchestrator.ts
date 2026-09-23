@@ -99,7 +99,8 @@ export type BotStartParams = {
    * ON (`/api/control/strategy/[name]/toggle`). A freshly spawned bot
    * starts with every allowlisted strategy enabled, so without this a
    * tenant capped at 3 ran all of them until they touched a switch.
-   * The bot applies it at boot by disabling the surplus (see
+   * The bot applies it at boot by disabling the flat surplus — never a
+   * strategy holding an open position (see
    * `bot/hypertrade/strategy_cap.py`). Env-injected for the same
    * grant reason as `allowedStrategies`.
    *

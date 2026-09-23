@@ -164,8 +164,9 @@ class Settings(BaseSettings):
     # (`tenants.max_active_strategies`), injected as a decimal string
     # by the dashboard orchestrator. Empty = no cap (NULL in the DB);
     # "0" is a real cap. Applied once at boot by
-    # `hypertrade/strategy_cap.py`, which disables the surplus via the
-    # Redis `disabled` set. Kept as a string rather than `int | None`
+    # `hypertrade/strategy_cap.py`, which disables the FLAT surplus via
+    # the Redis `disabled` set (a strategy holding an open position is
+    # never trimmed). Kept as a string rather than `int | None`
     # so a malformed value fails CLOSED in that module instead of
     # crashing Settings on load.
     tenant_max_active_strategies: str = ""
