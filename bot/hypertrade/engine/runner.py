@@ -143,6 +143,9 @@ _start_time = time.time()
 
 
 class EngineRunner:
+    # How long a refusal note stands when the caller gave no bar time.
+    _REFUSAL_NOTE_TTL_SECONDS = 3600.0
+
     def __init__(
         self,
         exchange: Exchange,
@@ -190,10 +193,9 @@ class EngineRunner:
         # push. One ErrorOccurred per (symbol, target) failure episode;
         # cleared by the next successful push for that symbol.
         self._leverage_push_alerted: dict[str, int] = {}
-        # (strategy, symbol) -> reason of the last refused flip we logged.
-        # A state-based strategy re-emits the same refused flip every
-        # tick; the reason is logged once, not once a minute.
-        self._refused_flips: dict[tuple[str, str], str] = {}
+        # (strategy, symbol) -> (category, bar time, monotonic time) of the
+        # last refusal logged/published. See `_note_refusal`.
+        self._refusal_notes: dict[tuple[str, str], tuple[str, object, float]] = {}
         # True while strategies do not know about the DB's open positions
         # (the startup read failed). No strategy runs until a restore
         # succeeds — see `_halt_for_unrestored_state`.
@@ -596,7 +598,8 @@ class EngineRunner:
                 try:
                     s.reset_state()
                     logger.info(
-                        "Reset in-memory state for %s (DB position was orphan-closed)",
+                        "Reset in-memory state for %s to flat (its DB "
+                        "position was closed outside its own signal)",
                         strategy_name,
                     )
                 except Exception:
@@ -1159,7 +1162,14 @@ class EngineRunner:
                 signal.reason,
             )
 
-            await self._execute_signal(signal, latest_price, leverage=strategy.leverage)
+            bar_time = (
+                closed_candles["timestamp"].iloc[-1]
+                if "timestamp" in closed_candles.columns else None
+            )
+            await self._execute_signal(
+                signal, latest_price, leverage=strategy.leverage,
+                bar_time=bar_time,
+            )
 
         # Publish tick result
         if self.event_bus:
@@ -1174,7 +1184,13 @@ class EngineRunner:
                 )
             )
 
-    async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> bool:
+    async def _execute_signal(
+        self,
+        signal: Signal,
+        current_price: float,
+        leverage: int = 1,
+        bar_time=None,
+    ) -> bool:
         """Execute a signal end-to-end. Returns True on full success
         (order filled + DB written + parity OK), False on any abort
         (risk-blocked, kill-switch, coin/family/opposite-side conflict,
@@ -1185,10 +1201,19 @@ class EngineRunner:
         permanently divergent.
 
         An OPEN is checked in full BEFORE anything is sent. When the
-        strategy holds the opposite side (a flip), every check that can
-        refuse the new open runs before the synthesized close, so a
-        refused open never closes the old position and frees the coin
-        for another strategy mid-tick (`analysis-2026-09-15.md` § 4).
+        strategy holds the opposite side (a flip), every gate that can
+        refuse the new open — coin, family, opposite side, exposure, size
+        ceiling, and the leverage push — runs before the synthesized close,
+        so a refused open never closes the old position and frees the coin
+        for another strategy mid-tick (`analysis-2026-09-15.md` § 4). A
+        risk-limit refusal (kill switch, daily-loss cap) is the exception:
+        it refuses only the open half and still lets the close through,
+        because closing reduces risk and a flip is the only exit some
+        strategies have. Whatever happens, the strategy ends up believing
+        in the position the DB actually holds.
+
+        `bar_time` is the closed bar the signal came from; it keys the
+        refusal dedup (see `_note_refusal`).
         """
         is_open = signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
         wanted_side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
@@ -1216,24 +1241,31 @@ class EngineRunner:
         # Audit H3: kill-switch + daily-loss cap apply ONLY to OPEN signals.
         # Blocking CLOSE on kill-switch flip would freeze a position-open
         # bot (SL/TP exits wouldn't fire); blocking CLOSE on daily-loss cap
-        # would prevent the loss from being realized and capped.
+        # would prevent the loss from being realized and capped. That
+        # includes the close half of a flip: hash_supertrend and
+        # kalman_breakout have no SL, so the flip is their only exit, and
+        # refusing it would trap a losing position past MAX_DAILY_LOSS_USD
+        # until UTC midnight.
         if not await self.portfolio.check_risk_limits(is_open=is_open):
-            logger.warning(
-                "[%s] Risk limit breached — skipping execution of %s %s",
-                signal.strategy_name,
-                signal.action.value,
-                signal.symbol,
-            )
-            if self.event_bus:
-                await self.event_bus.publish(
-                    ErrorOccurred(
-                        strategy=signal.strategy_name,
-                        message=f"Risk limit breached — execution of {signal.action.value} {signal.symbol} blocked",
-                    )
+            if existing is None:
+                await self._note_refusal(
+                    signal, "risk limit", bar_time,
+                    f"Risk limit breached — execution of "
+                    f"{signal.action.value} {signal.symbol} blocked",
+                    publish=True,
                 )
-            if existing is not None:
-                self._keep_position_after_refused_flip(
-                    signal, existing, "risk limit (kill switch or daily-loss cap)",
+                return False
+            if await self._flip_close(
+                signal, existing, current_price, leverage, bar_time,
+                why="(the open half is refused by a risk limit)",
+            ):
+                self._reset_strategy_state(signal.strategy_name)
+                await self._note_refusal(
+                    signal, "risk limit", bar_time,
+                    f"Risk limit breached — closed the {existing.side} "
+                    f"{signal.symbol} half of a flip but blocked "
+                    f"{signal.action.value}; flat, strategy reset to flat",
+                    publish=True,
                 )
             return False
 
@@ -1246,14 +1278,50 @@ class EngineRunner:
             else self._calculate_size(current_price, leverage)
         )
 
+        flipped = False
         if is_open:
-            refusal = await self._open_refusal(
-                signal, wanted_side, size, current_price, leverage,
-            )
+            try:
+                refusal = await self._open_refusal(
+                    signal, wanted_side, size, current_price, leverage,
+                )
+            except Exception:
+                if existing is None:
+                    raise
+                # A flip must not die half-way through its checks: the
+                # strategy already switched to the side it asked for, while
+                # the DB and exchange still hold the old one.
+                logger.warning(
+                    "[%s] open gates for the %s flip on %s could not be "
+                    "read", signal.strategy_name, wanted_side, signal.symbol,
+                    exc_info=True,
+                )
+                refusal = (
+                    logging.WARNING, "gate read failed",
+                    "gate read failed (see the traceback above)",
+                )
+
+            # Audit H1: re-push per-coin leverage to HL before any OPEN if a
+            # runtime override has bumped the strategy's `s.leverage` since
+            # we last pushed. Per-coin leverage on HL is a single value, so
+            # the target is `max(s.leverage)` across strategies trading this
+            # coin — matching the startup logic in main.py. No-op when
+            # already in sync. CLOSE signals don't need this (leverage
+            # affects margin, which only applies to opens). A failed push
+            # refuses the open — and, before a flip's close, the whole flip.
+            if refusal is None and not await self._ensure_leverage_pushed(
+                signal.symbol,
+            ):
+                refusal = (
+                    logging.WARNING, "leverage push failed",
+                    f"leverage push for {signal.symbol} failed",
+                )
+
             if refusal is not None:
-                level, reason = refusal
+                level, category, reason = refusal
                 if existing is not None:
-                    self._keep_position_after_refused_flip(signal, existing, reason)
+                    await self._keep_position_after_refused_flip(
+                        signal, existing, category, reason, bar_time,
+                    )
                 else:
                     logger.log(
                         level, "[%s] Skipping %s %s — %s",
@@ -1263,81 +1331,26 @@ class EngineRunner:
                 return False
 
             if existing is not None:
-                # Opposite side → flip. The open has passed every check,
-                # so close the existing position via a synthesized CLOSE
-                # through the standard close path (DB-driven size, trade
-                # record, etc.).
-                close_action = (
-                    SignalAction.CLOSE_SHORT if existing.side == "short"
-                    else SignalAction.CLOSE_LONG
-                )
-                logger.info(
-                    "[%s] Flip detected — closing %s %s before opening %s "
-                    "(reason: %s)",
-                    signal.strategy_name,
-                    existing.side, signal.symbol, wanted_side,
-                    signal.reason[:80],
-                )
-                flip_close = Signal(
-                    action=close_action,
-                    symbol=signal.symbol,
-                    strategy_name=signal.strategy_name,
-                    reason=f"Auto-close before flip ({signal.reason[:60]})",
-                )
-                flip_ok = await self._execute_signal(
-                    flip_close, current_price, leverage,
-                )
-                if not flip_ok:
-                    # ABORT: opening a new opposite-direction position
-                    # while the close failed leaves DB+exchange divergent
-                    # (audit H1, 2026-05-09). The reconcile loop will
-                    # eventually catch the leftover, but we mustn't
-                    # actively make it worse here.
-                    logger.warning(
-                        "[%s] Flip-close FAILED for %s %s — aborting "
-                        "follow-up %s to prevent double-side divergence",
-                        signal.strategy_name,
-                        existing.side, signal.symbol,
-                        signal.action.value,
-                    )
-                    if self.event_bus:
-                        try:
-                            await self.event_bus.publish(
-                                ErrorOccurred(
-                                    strategy=signal.strategy_name,
-                                    message=(
-                                        f"Flip-close failed on {signal.symbol} "
-                                        f"({existing.side}→{wanted_side}); "
-                                        f"open aborted to keep DB and "
-                                        f"exchange consistent."
-                                    ),
-                                )
-                            )
-                        except Exception:
-                            logger.exception("flip-abort: event publish failed")
+                if not await self._flip_close(
+                    signal, existing, current_price, leverage, bar_time,
+                    why=f"before opening {wanted_side}",
+                ):
                     return False
+                flipped = True
 
-            # Audit H1: re-push per-coin leverage to HL before any OPEN if a
-            # runtime override has bumped the strategy's `s.leverage` since
-            # we last pushed. Per-coin leverage on HL is a single value, so
-            # the target is `max(s.leverage)` across strategies trading this
-            # coin — matching the startup logic in main.py. No-op when
-            # already in sync. CLOSE signals don't need this (leverage
-            # affects margin, which only applies to opens). A failed push
-            # aborts the open. It is an exchange write, so it runs last,
-            # right before the order and after a flip's close (as before):
-            # a flip whose push fails ends flat, like a rejected order.
-            if not await self._ensure_leverage_pushed(signal.symbol):
-                return False
-
-        # This (strategy, coin) is trading again; a later refused flip
-        # is news and gets logged.
-        self._refused_flips.pop((signal.strategy_name, signal.symbol), None)
-
-        if signal.action == SignalAction.OPEN_LONG:
-            order = await self.exchange.place_order(
-                signal.symbol, "buy", size, OrderType.MARKET
-            )
+        if is_open:
+            side = "buy" if signal.action == SignalAction.OPEN_LONG else "sell"
+            try:
+                order = await self.exchange.place_order(
+                    signal.symbol, side, size, OrderType.MARKET
+                )
+            except Exception as e:
+                if flipped:
+                    await self._flat_after_flip_open_failed(
+                        signal, f"the open order raised {type(e).__name__}",
+                        bar_time, publish=False,
+                    )
+                raise
         elif signal.action == SignalAction.CLOSE_LONG:
             close_size = await self._resolve_close_size(
                 signal.strategy_name, signal.symbol, "long"
@@ -1348,10 +1361,6 @@ class EngineRunner:
                 signal.symbol, "sell", close_size, OrderType.MARKET
             )
             size = close_size
-        elif signal.action == SignalAction.OPEN_SHORT:
-            order = await self.exchange.place_order(
-                signal.symbol, "sell", size, OrderType.MARKET
-            )
         elif signal.action == SignalAction.CLOSE_SHORT:
             close_size = await self._resolve_close_size(
                 signal.strategy_name, signal.symbol, "short"
@@ -1377,7 +1386,15 @@ class EngineRunner:
 
         if order.status.value != "filled":
             logger.warning("Order not filled: %s", order.status)
+            if flipped:
+                await self._flat_after_flip_open_failed(
+                    signal, f"order {order.status.value}", bar_time,
+                    publish=True,
+                )
             return False
+
+        # This (strategy, coin) traded again; its next refusal is news.
+        self._refusal_notes.pop((signal.strategy_name, signal.symbol), None)
 
         # From here on `size` is what the exchange FILLED, not what we
         # asked for: HyperLiquid rounds to the coin's szDecimals (and an
@@ -1620,9 +1637,10 @@ class EngineRunner:
         size: float,
         current_price: float,
         leverage: int,
-    ) -> tuple[int, str] | None:
-        """Why this OPEN must not be sent, as `(log level, reason)`, or
-        None when it may go ahead.
+    ) -> tuple[int, str, str] | None:
+        """Why this OPEN must not be sent, as `(log level, category,
+        message)`, or None when it may go ahead. The category is a stable
+        name for the dedup latch; the message carries the live numbers.
 
         Reads only — nothing here writes or orders, which is what makes
         it safe to run before a flip's synthesized close. The signalling
@@ -1650,7 +1668,7 @@ class EngineRunner:
                     holders = ", ".join(sorted(
                         f"{p.strategy_name} ({p.side})" for p in same_coin
                     ))
-                    return logging.INFO, (
+                    return logging.INFO, "coin held", (
                         f"{holders} already holds {signal.symbol} "
                         f"(allow_multi_coin=False)"
                     )
@@ -1670,7 +1688,7 @@ class EngineRunner:
                     for held in others:
                         if get_strategy_family(held.strategy_name) != family:
                             continue
-                        return logging.INFO, (
+                        return logging.INFO, "family exposed", (
                             f"family '{family}' already exposed via "
                             f"{held.strategy_name} on {held.symbol} "
                             f"(allow_multi_coin=False)"
@@ -1688,7 +1706,7 @@ class EngineRunner:
             holders = ", ".join(sorted(
                 f"{p.strategy_name} ({p.side})" for p in opposite
             ))
-            return logging.WARNING, (
+            return logging.WARNING, "opposite side", (
                 f"{holders} holds the opposite side of {signal.symbol}; "
                 f"HL would net the two into one position"
             )
@@ -1713,7 +1731,7 @@ class EngineRunner:
             new_notional = float(size) * float(current_price)
             projected = current_notional + new_notional
             if projected > cap:
-                return logging.WARNING, (
+                return logging.WARNING, "exposure cap", (
                     f"total exposure cap would be exceeded: "
                     f"${current_notional:,.0f} open notional + "
                     f"${new_notional:,.0f} new = ${projected:,.0f} > "
@@ -1753,7 +1771,7 @@ class EngineRunner:
             requested_notional = float(size) * float(current_price)
             requested_margin = requested_notional / lev
             if requested_margin > max_margin:
-                return logging.WARNING, (
+                return logging.WARNING, "size ceiling", (
                     f"Signal(size={signal.size}) margin "
                     f"${requested_margin:.0f} (notional "
                     f"${requested_notional:.0f} / {lev}x) exceeds the "
@@ -1764,46 +1782,196 @@ class EngineRunner:
 
         return None
 
-    def _keep_position_after_refused_flip(
-        self, signal: Signal, existing, reason: str,
+    async def _note_refusal(
+        self,
+        signal: Signal,
+        category: str,
+        bar_time,
+        message: str,
+        *,
+        publish: bool = False,
     ) -> None:
-        """A flip whose open was refused: nothing was closed.
+        """Log (and optionally publish) a refusal once per (category, bar).
 
-        Logs the refusal once per reason (a state-based strategy re-emits
-        the same flip every tick), and points the strategy back at the
-        position it still holds. It switched its in-memory state to the
-        side it asked for when it emitted the signal; left like that it
-        would run SL/TP for a position that does not exist while the real
-        one went unmanaged.
+        An edge-triggered strategy re-syncs or resets after a refusal and
+        re-emits the same signal on every tick until its bar closes, so
+        the same refusal repeats once a minute. It is news when its
+        category differs from the last one noted for this (strategy,
+        coin), or when it happens on a different bar. The category, not
+        the message, is the key, because messages carry live numbers (the
+        exposure cap's dollar amounts) that never repeat exactly. Without
+        a bar time (a caller outside the tick loop) a note expires after
+        `_REFUSAL_NOTE_TTL_SECONDS`. Repeats log at DEBUG and are never
+        published.
         """
         key = (signal.strategy_name, signal.symbol)
-        wanted = "long" if signal.action == SignalAction.OPEN_LONG else "short"
-        if self._refused_flips.get(key) != reason:
-            self._refused_flips[key] = reason
-            logger.warning(
-                "[%s] Flip %s→%s on %s refused — %s. Nothing closed: "
-                "keeping the open %s (size %s @ %s) and re-syncing the "
-                "strategy to it",
-                signal.strategy_name, existing.side, wanted, signal.symbol,
-                reason, existing.side, existing.size, existing.entry_price,
-            )
-        else:
-            logger.debug(
-                "[%s] Flip on %s refused again for the same reason: %s",
-                signal.strategy_name, signal.symbol, reason,
-            )
+        now = time.monotonic()
+        prev = self._refusal_notes.get(key)
+        if prev is not None:
+            p_category, p_bar, p_at = prev
+            if (
+                p_category == category
+                and p_bar == bar_time
+                and (
+                    bar_time is not None
+                    or now - p_at < self._REFUSAL_NOTE_TTL_SECONDS
+                )
+            ):
+                logger.debug(
+                    "[%s] %s on %s refused again (%s): %s",
+                    signal.strategy_name, signal.action.value,
+                    signal.symbol, category, message,
+                )
+                return
+        self._refusal_notes[key] = (category, bar_time, now)
+        logger.warning("[%s] %s", signal.strategy_name, message)
+        if publish:
+            await self._publish_error(signal.strategy_name, message)
+
+    def _resync_strategy_to_row(self, row) -> None:
+        """Point a strategy back at an open DB row it still owns (same
+        restore logic as startup). Never raises."""
         strat = next(
-            (s for s in self.strategies if s.name == signal.strategy_name), None,
+            (s for s in self.strategies if s.name == row.strategy_name), None,
         )
         if strat is None:
             return
         try:
-            self._restore_strategy_from_row(strat, existing)
+            self._restore_strategy_from_row(strat, row)
         except Exception:
             logger.exception(
                 "[%s] re-sync to the kept %s position failed",
-                signal.strategy_name, existing.side,
+                row.strategy_name, row.side,
             )
+
+    async def _keep_position_after_refused_flip(
+        self, signal: Signal, existing, category: str, reason: str, bar_time,
+    ) -> None:
+        """A flip whose open was refused before anything was sent: nothing
+        was closed.
+
+        Notes the refusal once per (category, bar) and points the strategy
+        back at the position it still holds. It switched its in-memory
+        state to the side it asked for when it emitted the signal; left
+        like that it would run SL/TP for a position that does not exist
+        while the real one went unmanaged.
+        """
+        wanted = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+        await self._note_refusal(
+            signal, category, bar_time,
+            f"Flip {existing.side}→{wanted} on {signal.symbol} refused — "
+            f"{reason}. Nothing closed: keeping the open {existing.side} "
+            f"(size {existing.size} @ {existing.entry_price}) and re-syncing "
+            f"the strategy to it",
+        )
+        self._resync_strategy_to_row(existing)
+
+    async def _flip_close(
+        self,
+        signal: Signal,
+        existing,
+        current_price: float,
+        leverage: int,
+        bar_time,
+        why: str,
+    ) -> bool:
+        """Close `existing` through the standard close path (DB-driven
+        size, trade record, parity) as the first half of a flip. Returns
+        whether the close fully succeeded.
+
+        On failure the strategy is brought back in line with what the DB
+        now says: still holding the old position (the close did not fill)
+        → re-synced to it; row closed (the close filled but parity did not
+        verify) → reset to flat. Either way it no longer believes in the
+        side it asked for. An exception from the close is re-raised after
+        that, so the tick handler still classifies it (transient outage vs
+        bug); `TradeDbDivergence` passes straight through (the bot is
+        already paused and the incident published).
+        """
+        wanted = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+        close_action = (
+            SignalAction.CLOSE_SHORT if existing.side == "short"
+            else SignalAction.CLOSE_LONG
+        )
+        logger.info(
+            "[%s] Flip detected — closing %s %s %s (reason: %s)",
+            signal.strategy_name, existing.side, signal.symbol, why,
+            signal.reason[:80],
+        )
+        flip_close = Signal(
+            action=close_action,
+            symbol=signal.symbol,
+            strategy_name=signal.strategy_name,
+            reason=f"Auto-close before flip ({signal.reason[:60]})",
+        )
+        try:
+            if await self._execute_signal(flip_close, current_price, leverage):
+                return True
+        except TradeDbDivergence:
+            raise
+        except Exception:
+            await self._align_strategy_after_failed_flip_close(signal, existing)
+            raise
+
+        # ABORT: opening a new opposite-direction position while the close
+        # failed leaves DB+exchange divergent (audit H1, 2026-05-09). The
+        # reconcile loop will eventually catch the leftover, but we mustn't
+        # actively make it worse here.
+        outcome = await self._align_strategy_after_failed_flip_close(
+            signal, existing,
+        )
+        await self._note_refusal(
+            signal, "flip close failed", bar_time,
+            f"Flip-close failed on {signal.symbol} "
+            f"({existing.side}→{wanted}); open aborted to keep DB and "
+            f"exchange consistent — {outcome}.",
+            publish=True,
+        )
+        return False
+
+    async def _align_strategy_after_failed_flip_close(
+        self, signal: Signal, existing,
+    ) -> str:
+        """Re-read the strategy's row after a flip-close that did not
+        succeed and align the strategy with it. Returns what was done."""
+        try:
+            row = await self.repo.get_open_position(
+                signal.strategy_name, signal.symbol,
+            )
+        except Exception:
+            logger.warning(
+                "[%s] flip-close failed and the position re-read failed "
+                "too — assuming the %s is still open",
+                signal.strategy_name, existing.side, exc_info=True,
+            )
+            row = existing
+        if row is not None and row.side == existing.side:
+            self._resync_strategy_to_row(row)
+            return f"the {existing.side} is still open; strategy re-synced to it"
+        self._reset_strategy_state(signal.strategy_name)
+        return (
+            f"the {existing.side} row is closed but the close did not verify "
+            f"cleanly; strategy reset to flat"
+        )
+
+    async def _flat_after_flip_open_failed(
+        self, signal: Signal, detail: str, bar_time, *, publish: bool,
+    ) -> None:
+        """A flip's close went through but its open did not: the book is
+        flat for this strategy, so the strategy is reset to flat instead of
+        believing in the side it asked for."""
+        self._reset_strategy_state(signal.strategy_name)
+        message = (
+            f"Flip on {signal.symbol}: the old position was closed but the "
+            f"new {signal.action.value} failed ({detail}). Flat; strategy "
+            f"reset to flat."
+        )
+        if publish:
+            await self._note_refusal(
+                signal, "flip open failed", bar_time, message, publish=True,
+            )
+        else:
+            logger.warning("[%s] %s", signal.strategy_name, message)
 
     async def _check_parity_after_trade(self, symbol: str) -> bool:
         """Verify exchange position for `symbol` matches DB sum across
