@@ -367,10 +367,27 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "docker image inspect hypertrade-dashboard -f 'built: {{.Created}}' && \
    docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}'"
 
-# 3. Only THEN recreate the containers
+# 3. Only THEN recreate the containers. `--no-deps` is not optional:
+#    without it compose also recreates any dependency whose config
+#    changed (redis, postgres), and a recreated redis can come up empty.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "cd /opt/hypertrade && phase run -- docker compose up -d --force-recreate dashboard"
+  "cd /opt/hypertrade && phase run -- docker compose up -d --no-deps --force-recreate dashboard"
 ```
+
+> ⚠️ **Never let compose recreate `redis` by accident.** The dashboard
+> `depends_on` redis, so `up -d --force-recreate dashboard` *without*
+> `--no-deps` also recreates redis whenever redis's compose config
+> changed. PR #168 changed it (named `redisdata:/data` volume), and the
+> first recreate after that starts on an **empty** volume. Redis holds
+> the paused flags, the per-mode `disabled` strategy sets, leverage
+> overrides, the per-bot API keys, the session secret, the auth config,
+> the OIDC client secret and the CF token. An empty Redis reads as
+> "not paused, nothing disabled", so every bot — mainnet included —
+> resumes with every strategy enabled (auth itself fails closed to
+> `locked`). Before any deploy that recreates redis: pause the bots,
+> `docker exec hypertrade-redis-1 redis-cli SAVE`, `docker cp` the
+> `dump.rdb` out, copy it into the target volume, and only then
+> recreate redis on its own and check `DBSIZE` and the key list match.
 
 > ⚠️ **`up -d --force-recreate dashboard` only refreshes the dashboard
 > container.** Tenant-bots are orchestrator-spawned (separate Docker
