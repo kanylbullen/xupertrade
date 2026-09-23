@@ -7,6 +7,26 @@ import pandas as pd
 from hypertrade.engine.signals import Signal
 
 
+def bars_elapsed(earlier, later, candle_before_later) -> int:
+    """Closed bars from bar timestamp `earlier` to `later`.
+
+    0 when they are the same bar, otherwise at least 1. One bar's duration
+    is `later - candle_before_later` (the last two candle timestamps).
+    Counting elapsed bars rather than "the timestamp changed" is what keeps
+    a restored bar counter honest: the counter in a snapshot is as old as
+    the snapshot, and the bars since then are derived here on the first
+    candle after the restart. When the timestamps can't be subtracted, a
+    changed timestamp counts as one bar.
+    """
+    if later == earlier:
+        return 0
+    try:
+        bar = later - candle_before_later
+        return max(1, int(round((later - earlier) / bar)))
+    except Exception:
+        return 1
+
+
 class Strategy(ABC):
     name: str = "unnamed"
     symbol: str = "BTC"

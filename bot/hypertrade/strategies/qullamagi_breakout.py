@@ -64,7 +64,7 @@ import pandas as pd
 import pandas_ta as pta
 
 from hypertrade.engine.signals import Signal, SignalAction
-from hypertrade.strategies.base import Strategy
+from hypertrade.strategies.base import Strategy, bars_elapsed
 from hypertrade.strategies.registry import register
 
 
@@ -72,8 +72,9 @@ from hypertrade.strategies.registry import register
 class QullamagiBreakoutStrategy(Strategy):
     name = "qullamagi_breakout"
     family = "qullamagi_breakout"
-    # Not position state: bars flat since the last exit (re-entry cooldown).
-    cooldown_attrs = ("_bars_since_flat",)
+    # Not position state: bars flat since the last exit (re-entry cooldown)
+    # and the closed-bar baseline the bar counters advance from.
+    cooldown_attrs = ("_bars_since_flat", "_last_bar_ts")
     symbol = "ETH"
     timeframe = "1h"
     leverage = 1
@@ -157,6 +158,11 @@ class QullamagiBreakoutStrategy(Strategy):
         self._be_activated: bool = False
         self._bars_in_trade: int = 0
         self._bars_since_flat: int = 10_000  # large = not in cooldown
+        # Timestamp of the last closed bar seen. Both bar counters advance
+        # by the bars elapsed since it, not once per call: the runner calls
+        # on_candle every 60 s, so a per-call count made the 3-bar cooldown
+        # on 1h candles last three minutes (Pine counts bar_index).
+        self._last_bar_ts: object | None = None
 
     # ----- state -----
     def restore_state(self, side: str, entry_price: float) -> None:
@@ -190,6 +196,9 @@ class QullamagiBreakoutStrategy(Strategy):
         )
         if self._position_side is None and not cooldown_active:
             return None
+        last_ts = self._last_bar_ts
+        if last_ts is not None and hasattr(last_ts, "isoformat"):
+            last_ts = last_ts.isoformat()
         return {
             "position_side": self._position_side,
             "entry_price": self._entry_price,
@@ -198,6 +207,10 @@ class QullamagiBreakoutStrategy(Strategy):
             "be_activated": self._be_activated,
             "bars_in_trade": self._bars_in_trade,
             "bars_since_flat": self._bars_since_flat,
+            # The bar both counters were last advanced on: the first candle
+            # after a restart adds the bars elapsed since, so a restored
+            # counter is never as stale as the snapshot.
+            "last_bar_ts": last_ts,
         }
 
     def restore_from_json(
@@ -206,6 +219,12 @@ class QullamagiBreakoutStrategy(Strategy):
         self._bars_since_flat = int(
             state.get("bars_since_flat", self._bars_since_flat)
         )
+        if "last_bar_ts" in state:  # older snapshots lack it: keep ours
+            raw = state["last_bar_ts"]
+            try:
+                self._last_bar_ts = pd.Timestamp(raw) if raw is not None else None
+            except (ValueError, TypeError):
+                self._last_bar_ts = None
         position_side = state.get("position_side", side)
         if position_side not in ("long", "short"):
             # A flat (cooldown-only) snapshot. The init_stop fallback below
@@ -240,6 +259,26 @@ class QullamagiBreakoutStrategy(Strategy):
         df = candles.copy()
         latest = df.iloc[-1]
         prev = df.iloc[-2]
+
+        # ----- Bar counters: advance per closed BAR, not per call -----
+        # Pine's barsInTrade and `bar_index - lastFlatBar` count bars; the
+        # runner calls this every 60 s on the same closed bar. Done before
+        # any early return so no elapsed bar is lost. A frame without
+        # timestamps counts every call as a bar (the old behaviour).
+        if "timestamp" in df.columns:
+            latest_ts = latest["timestamp"]
+            advanced = (
+                0 if self._last_bar_ts is None  # first sight: baseline only
+                else bars_elapsed(self._last_bar_ts, latest_ts, prev["timestamp"])
+            )
+            self._last_bar_ts = latest_ts
+        else:
+            advanced = 1
+        if self._position_side is not None:
+            self._bars_in_trade += advanced
+        else:
+            self._bars_since_flat += advanced
+
         close = float(latest["close"])
         prev_close = float(prev["close"])
         high = float(latest["high"])
@@ -290,7 +329,6 @@ class QullamagiBreakoutStrategy(Strategy):
 
         # ----- Manage existing position -----
         if self._position_side is not None and self._entry_price is not None:
-            self._bars_in_trade += 1
             entry = self._entry_price
             init_stop = self._init_stop if self._init_stop is not None else (
                 entry * (1 - self.hard_stop_pct / 100.0) if self._position_side == "long"
@@ -374,8 +412,7 @@ class QullamagiBreakoutStrategy(Strategy):
                     )
             return None
 
-        # ----- Flat: cooldown bookkeeping -----
-        self._bars_since_flat += 1
+        # ----- Flat: cooldown (Pine: bar_index - lastFlatBar > cooldownBars) -----
         if self.cooldown_bars > 0 and self._bars_since_flat <= self.cooldown_bars:
             return None
 
