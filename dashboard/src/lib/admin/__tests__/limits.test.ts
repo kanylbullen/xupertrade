@@ -21,7 +21,7 @@ vi.mock("@/lib/db", () => {
 import {
   LimitExceededError,
   assertCanEnableStrategy,
-  assertCanStartBot,
+  reserveBotStart,
   assertStrategyAllowed,
   computeLimitsWarnings,
 } from "../limits";
@@ -41,88 +41,136 @@ function mockBotCount(n: number) {
   });
 }
 
-// For assertCanStartBot — mocks db.transaction(cb) and the tx.execute
-// + tx.select(...).from().where() chain that runs inside it. Each
-// call queues one bot-count to return.
-function mockTxBotCount(n: number) {
-  transactionMock.mockImplementationOnce(async (cb: (tx: unknown) => unknown) => {
-    const tx = {
-      execute: vi.fn().mockResolvedValue(undefined),
-      select: vi.fn().mockReturnValue({
-        from: () => ({
-          where: () => Promise.resolve([{ n }]),
-        }),
-      }),
-    };
-    return cb(tx);
-  });
-}
+/**
+ * A tiny model of the database for `reserveBotStart`: one tenant-row
+ * lock, held from the FOR UPDATE until the transaction ends (commit or
+ * rollback), and a running-bot count that the transaction's SELECT
+ * reads and the caller's `reserve` callback bumps. Writes become
+ * visible to other transactions only on commit, as under READ
+ * COMMITTED.
+ */
+function installDbModel(initialRunning: number) {
+  let committedRunning = initialRunning;
+  let lockHeld: Promise<void> = Promise.resolve();
+  const order: string[] = [];
 
-describe("assertCanStartBot", () => {
-  it("is a no-op when maxActiveBots is null", async () => {
-    await expect(
-      assertCanStartBot({ id: "x", maxActiveBots: null }),
-    ).resolves.toBeUndefined();
-    expect(transactionMock).not.toHaveBeenCalled();
-  });
-
-  it("passes when running bots are below cap", async () => {
-    mockTxBotCount(2);
-    await expect(
-      assertCanStartBot({ id: "x", maxActiveBots: 3 }),
-    ).resolves.toBeUndefined();
-  });
-
-  it("throws LimitExceededError at cap", async () => {
-    mockTxBotCount(3);
-    await expect(
-      assertCanStartBot({ id: "x", maxActiveBots: 3 }),
-    ).rejects.toBeInstanceOf(LimitExceededError);
-  });
-
-  it("serializes concurrent calls for the same tenant at-cap-minus-one", async () => {
-    // Simulate the FOR UPDATE lock: the second transaction's callback
-    // doesn't start running until the first one has completed (which
-    // is how `SELECT ... FOR UPDATE` behaves at the DB level). After
-    // the first call passes, the bot count seen by the second call is
-    // one higher, so the cap check trips.
-    let firstDone = false;
-    let observedCount = 2;
-    transactionMock.mockImplementation(async (cb: (tx: unknown) => unknown) => {
-      // Lock: wait until the previous in-flight tx (if any) finished.
-      while (transactionMock.mock.calls.length > 1 && !firstDone) {
-        await new Promise((r) => setTimeout(r, 1));
-      }
+  transactionMock.mockImplementation(
+    async (cb: (tx: unknown) => Promise<unknown>) => {
+      let pendingDelta = 0;
+      let release: () => void = () => undefined;
+      let locked = false;
       const tx = {
-        execute: vi.fn().mockResolvedValue(undefined),
-        select: vi.fn().mockReturnValue({
-          from: () => ({
-            where: () => Promise.resolve([{ n: observedCount }]),
-          }),
+        execute: vi.fn(async () => {
+          // FOR UPDATE: wait for the current holder, then hold it
+          // ourselves until this transaction ends.
+          const prev = lockHeld;
+          lockHeld = new Promise<void>((r) => (release = r));
+          locked = true;
+          await prev;
+          order.push("lock");
         }),
+        select: vi.fn(() => ({
+          from: () => ({
+            where: async () => {
+              order.push("count");
+              return [{ n: committedRunning + pendingDelta }];
+            },
+          }),
+        })),
+        // What a real `reserve` does: make this start countable.
+        claim: () => {
+          order.push("claim");
+          pendingDelta += 1;
+        },
       };
       try {
-        const r = await cb(tx);
-        // First call passed — bump the simulated running count so a
-        // racing second call sees the new state.
-        observedCount += 1;
-        return r;
+        const out = await cb(tx);
+        committedRunning += pendingDelta; // commit
+        order.push("commit");
+        return out;
       } finally {
-        firstDone = true;
+        if (locked) release();
       }
+    },
+  );
+  return { order, running: () => committedRunning };
+}
+
+type ModelTx = { claim: () => void };
+
+describe("reserveBotStart", () => {
+  it("runs reserve in a transaction without lock or count when there is no cap", async () => {
+    installDbModel(5);
+    const reserve = vi.fn(async (tx: unknown) => {
+      (tx as ModelTx).claim();
+      return "reserved";
     });
+    await expect(
+      reserveBotStart({ id: "x", maxActiveBots: null }, reserve),
+    ).resolves.toBe("reserved");
+    expect(transactionMock).toHaveBeenCalledOnce();
+    expect(reserve).toHaveBeenCalledOnce();
+  });
+
+  it("locks, counts, then reserves inside the same transaction when below cap", async () => {
+    const db = installDbModel(2);
+    await reserveBotStart({ id: "x", maxActiveBots: 3 }, async (tx) => {
+      (tx as unknown as ModelTx).claim();
+    });
+    // The claim lands before commit — i.e. while the lock is held.
+    expect(db.order).toEqual(["lock", "count", "claim", "commit"]);
+    expect(db.running()).toBe(3);
+  });
+
+  it("throws LimitExceededError at cap and never reserves", async () => {
+    const db = installDbModel(3);
+    const reserve = vi.fn();
+    await expect(
+      reserveBotStart({ id: "x", maxActiveBots: 3 }, reserve),
+    ).rejects.toBeInstanceOf(LimitExceededError);
+    expect(reserve).not.toHaveBeenCalled();
+    expect(db.running()).toBe(3);
+  });
+
+  it("lets exactly one of two concurrent starts through a cap of 1", async () => {
+    // The finding: the lock used to be released at commit BEFORE
+    // anything countable was written (create-and-start set is_running
+    // only after Argon2id + the container spawn), so both concurrent
+    // callers counted 0 and both passed. Now the second one's count
+    // waits for the first one's lock and sees its claim.
+    const db = installDbModel(0);
+    const reserve = async (tx: unknown) => {
+      // Yield inside the transaction, as a real UPDATE/INSERT would,
+      // so the two calls genuinely interleave.
+      await new Promise((r) => setTimeout(r, 5));
+      (tx as ModelTx).claim();
+    };
 
     const results = await Promise.allSettled([
-      assertCanStartBot({ id: "tid", maxActiveBots: 3 }),
-      assertCanStartBot({ id: "tid", maxActiveBots: 3 }),
+      reserveBotStart({ id: "tid", maxActiveBots: 1 }, reserve),
+      reserveBotStart({ id: "tid", maxActiveBots: 1 }, reserve),
     ]);
+
     const fulfilled = results.filter((r) => r.status === "fulfilled");
     const rejected = results.filter((r) => r.status === "rejected");
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
-    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
-      LimitExceededError,
-    );
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+      kind: "bots_over_cap",
+      current: 1,
+      limit: 1,
+    });
+    expect(db.running()).toBe(1);
+  });
+
+  it("propagates an error from reserve (e.g. a unique violation)", async () => {
+    installDbModel(0);
+    const boom = Object.assign(new Error("duplicate"), { code: "23505" });
+    await expect(
+      reserveBotStart({ id: "x", maxActiveBots: 2 }, async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
   });
 });
 
