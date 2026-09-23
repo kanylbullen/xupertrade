@@ -90,9 +90,12 @@ export async function POST(req: Request) {
   // Allow basic auth as a fallback even when mode=oidc, as long as a
   // basic user is configured. This is the path the /login fallback
   // link uses when OIDC misbehaves.
-  // "locked" never carries a basic user (the resolver picks `basic`
-  // whenever one survives), so the second clause already covers it —
-  // named explicitly so the fail-closed intent survives a refactor.
+  // "locked" is refused by name, not left to the basic_user_set
+  // clause: it CAN carry a basic user. The resolver only prefers
+  // `basic` when the mode key is absent — a garbage AUTH_MODE in env
+  // or a garbage stored mode locks regardless of what survives. A
+  // session minted here would be useless anyway (proxy.ts withholds
+  // every page while locked), but it must not be minted.
   if (cfg.mode === "disabled" || cfg.mode === "locked" || !cfg.basic_user_set) {
     return NextResponse.json(
       { ok: false, error: "basic-auth-not-enabled" },
