@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +27,7 @@ type Config = {
 };
 
 export function AuthConfig() {
+  const router = useRouter();
   const [cfg, setCfg] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -292,7 +294,11 @@ export function AuthConfig() {
               onClick={() =>
                 startTransition(async () => {
                   await fetch("/api/auth/logout", { method: "POST" }).catch(() => null);
-                  window.location.href = "/login";
+                  router.push("/login");
+                  // Load-bearing: without refresh(), browser Back restores the
+                  // signed-in pages from the client router cache with no server
+                  // request (verified on 16.3.5, PR #169). Same as user-menu.tsx.
+                  router.refresh();
                 })
               }
               disabled={isPending}

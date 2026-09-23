@@ -124,6 +124,9 @@ export function UserMenu() {
                     () => null
                   );
                   router.push("/login");
+                  // Load-bearing: without refresh(), browser Back restores the
+                  // signed-in pages from the client router cache with no server
+                  // request (verified on 16.3.5, PR #169). Don't drop it.
                   router.refresh();
                 })
               }
