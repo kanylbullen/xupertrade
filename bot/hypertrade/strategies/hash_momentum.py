@@ -25,7 +25,7 @@ import pandas as pd
 import pandas_ta as pta
 
 from hypertrade.engine.signals import Signal, SignalAction
-from hypertrade.strategies.base import Strategy
+from hypertrade.strategies.base import Strategy, bars_elapsed
 from hypertrade.strategies.registry import register
 
 
@@ -33,10 +33,12 @@ from hypertrade.strategies.registry import register
 class HashMomentumStrategy(Strategy):
     name = "hash_momentum"
     family = "hash_momentum"
-    # Not position state: the post-close re-entry cooldown and the
-    # closed-bar baseline it advances from. reset_state() clears both;
-    # reset_position() keeps them.
-    cooldown_attrs = ("_bars_since_close", "_last_closed_bar_ts")
+    # Not position state: the post-close re-entry cooldown, the closed-bar
+    # baseline it advances from, and the "catch up after a restore" flag.
+    # reset_state() clears them; reset_position() keeps them.
+    cooldown_attrs = (
+        "_bars_since_close", "_last_closed_bar_ts", "_catch_up_bars",
+    )
     symbol = "SOL"
     timeframe = "4h"
     leverage = 1
@@ -63,6 +65,12 @@ class HashMomentumStrategy(Strategy):
         # causing rapid-fire re-entry loops on stale bar data. See
         # 2026-05-09 incident: hash_momentum spammed 30 SOL trades in 4h.
         self._last_closed_bar_ts: object | None = None
+        # Set by restore_from_json: the next new bar adds every bar elapsed
+        # since the restored baseline instead of 1. The snapshot is written
+        # when a position closes and not again when the cooldown expires,
+        # so a restored counter is as old as the close; without this every
+        # restart re-imposed nearly the whole cooldown (~20 h on 4h bars).
+        self._catch_up_bars: bool = False
 
     def restore_state(self, side: str, entry_price: float) -> None:
         risk = entry_price * (self.stop_loss_pct / 100)
@@ -123,6 +131,7 @@ class HashMomentumStrategy(Strategy):
                 self._last_closed_bar_ts = None
         else:
             self._last_closed_bar_ts = last_ts_raw
+        self._catch_up_bars = self._last_closed_bar_ts is not None
 
     def reset_state(self) -> None:
         self._in_long = False
@@ -132,6 +141,7 @@ class HashMomentumStrategy(Strategy):
         self._tp = None
         self._bars_since_close = 999
         self._last_closed_bar_ts = None
+        self._catch_up_bars = False
 
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         warmup = self.mom_length * 3 + 20
@@ -230,8 +240,18 @@ class HashMomentumStrategy(Strategy):
                 # (the None → first-ts transition counts as "changed").
                 self._last_closed_bar_ts = latest_bar_ts
             elif latest_bar_ts != self._last_closed_bar_ts:
-                self._bars_since_close += 1
+                # One step per new bar in the live loop. The first new bar
+                # after a restore instead adds every bar elapsed since the
+                # restored baseline (see _catch_up_bars).
+                self._bars_since_close += (
+                    bars_elapsed(
+                        self._last_closed_bar_ts, latest_bar_ts,
+                        closed.iloc[-2]["timestamp"],
+                    )
+                    if self._catch_up_bars else 1
+                )
                 self._last_closed_bar_ts = latest_bar_ts
+            self._catch_up_bars = False
         in_cooldown = self._bars_since_close < self.cooldown_bars
         flat = not self._in_long and not self._in_short
 
