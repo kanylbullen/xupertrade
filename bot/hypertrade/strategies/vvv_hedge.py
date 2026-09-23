@@ -47,8 +47,10 @@ Notes for live use:
   MAX_POSITION_SIZE_USD × leverage formula. Leverage class attr (2)
   is still pushed to HL so the actual margin requirement matches.
 - Max-total-exposure cap in runner may block this if other positions
-  already fill the budget — set MAX_TOTAL_EXPOSURE_USD high enough
-  to fit the hedge notional (400 VVV × current price × 2× leverage).
+  already fill the budget — the cap is in notional, so set
+  MAX_TOTAL_EXPOSURE_USD high enough to fit the other positions'
+  notional plus the hedge notional (400 VVV × current price; leverage
+  does not change it).
 """
 
 from __future__ import annotations

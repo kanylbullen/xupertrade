@@ -6,9 +6,10 @@ the bot's notional calc used the new value but HL still had the
 startup leverage → margin used = 10× expected on a 10× bump →
 liquidation path.
 
-Post-fix: `_ensure_leverage_pushed` is called at the start of every
-OPEN signal. It compares per-coin max(s.leverage) against the last
-pushed value and re-pushes if changed.
+Post-fix: `_ensure_leverage_pushed` is called before every OPEN. It
+compares per-coin max(s.leverage) against the last pushed value and
+re-pushes if changed. Since 2026-09 a push that fails aborts the open
+(it used to proceed at whatever leverage HL had).
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from hypertrade.config import settings
 from hypertrade.engine.runner import EngineRunner
+from hypertrade.engine.signals import Signal, SignalAction
 
 
 def _make_runner(strategies):
@@ -98,8 +101,8 @@ async def test_unknown_symbol_defaults_to_1x():
 
 @pytest.mark.asyncio
 async def test_exchange_failure_does_not_raise():
-    """update_leverage exception must not propagate — the open continues
-    with whatever leverage HL currently has, and we log."""
+    """update_leverage exception must not propagate — the push reports
+    failure (the caller aborts the open, see below) and we log."""
     runner, exchange = _make_runner([_strat("a", "BTC", 5)])
     exchange.update_leverage = AsyncMock(side_effect=RuntimeError("HL down"))
     # Must not raise
@@ -116,3 +119,91 @@ async def test_exchange_rejection_does_not_cache():
     exchange.update_leverage = AsyncMock(return_value=False)
     await runner._ensure_leverage_pushed("BTC")
     assert "BTC" not in runner._pushed_leverage
+
+
+# ----------------------------------------------------------------------
+# A failed push aborts the open (analysis-2026-09-15.md § 4)
+# ----------------------------------------------------------------------
+
+
+def _open_runner(update_leverage, *, pushed=None):
+    s = _strat("kalman_breakout", "ETH", 5)
+    repo = MagicMock()
+    repo.get_open_position = AsyncMock(return_value=None)
+    repo.get_open_positions = AsyncMock(return_value=[])
+    control = MagicMock()
+    control.get_allow_multi_coin = AsyncMock(return_value=False)
+    exchange = MagicMock()
+    exchange.update_leverage = update_leverage
+    exchange.place_order = AsyncMock()
+    bus = MagicMock()
+    bus.publish = AsyncMock()
+    runner = EngineRunner(
+        exchange=exchange, strategies=[s], repo=repo,
+        event_bus=bus, control=control, pushed_leverage=pushed,
+    )
+    runner.portfolio = MagicMock()
+    runner.portfolio.check_risk_limits = AsyncMock(return_value=True)
+    return runner, exchange, bus
+
+
+def _eth_long():
+    return Signal(
+        action=SignalAction.OPEN_LONG, symbol="ETH", strategy_name="kalman_breakout",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["rejected", "raised"])
+async def test_failed_push_aborts_the_open(monkeypatch, failure):
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 0)
+    push = (
+        AsyncMock(return_value=False) if failure == "rejected"
+        else AsyncMock(side_effect=RuntimeError("HL down"))
+    )
+    runner, exchange, bus = _open_runner(push)
+
+    ok = await runner._execute_signal(_eth_long(), current_price=2000.0, leverage=5)
+
+    assert ok is False
+    exchange.place_order.assert_not_awaited()
+    events = [c.args[0] for c in bus.publish.await_args_list]
+    assert [e.strategy for e in events] == ["leverage/ETH"]
+
+
+@pytest.mark.asyncio
+async def test_failed_push_publishes_once_per_target(monkeypatch):
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 0)
+    runner, exchange, bus = _open_runner(AsyncMock(return_value=False))
+
+    for _ in range(3):
+        await runner._execute_signal(_eth_long(), current_price=2000.0, leverage=5)
+
+    assert bus.publish.await_count == 1
+    assert exchange.update_leverage.await_count == 3, "every OPEN retries the push"
+    exchange.place_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_success_after_failure_rearms_the_alert():
+    push = AsyncMock(side_effect=[False, True, False])
+    runner, exchange, bus = _open_runner(push)
+
+    assert await runner._ensure_leverage_pushed("ETH") is False
+    assert await runner._ensure_leverage_pushed("ETH") is True
+    runner._pushed_leverage.clear()  # force a new push to the same target
+    assert await runner._ensure_leverage_pushed("ETH") is False
+
+    assert bus.publish.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_boot_push_seeds_last_accepted():
+    """main.py hands the runner what the boot-time push got accepted: an
+    OPEN at that leverage needs no push, so an HL blip cannot abort it."""
+    runner, exchange, bus = _open_runner(
+        AsyncMock(return_value=False), pushed={"ETH": 5},
+    )
+
+    assert await runner._ensure_leverage_pushed("ETH") is True
+    exchange.update_leverage.assert_not_awaited()

@@ -120,7 +120,9 @@ class Settings(BaseSettings):
     # Risk management
     max_position_size_usd: float = 1_000.0  # margin per single position
     max_daily_loss_usd: float = 500.0
-    # Total open margin (sum across all open positions) cap. New opens are
+    # Total open NOTIONAL cap: the sum of `size × entry_price` over every
+    # open position plus the new order's `size × price`. Leverage does not
+    # divide it — a $1k-margin position at 5x counts as $5k. New opens are
     # blocked if going through would cross this. 0 disables the cap.
     max_total_exposure_usd: float = 5_000.0
     kill_switch: bool = False

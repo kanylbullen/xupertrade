@@ -144,6 +144,7 @@ class EngineRunner:
         repo: Repository | None = None,
         event_bus: EventBus | None = None,
         control: BotControl | None = None,
+        pushed_leverage: dict[str, int] | None = None,
     ) -> None:
         self.exchange = exchange
         self.strategies = strategies
@@ -174,7 +175,17 @@ class EngineRunner:
         # used = `notional / startup_leverage` instead of
         # `notional / new_leverage`. On a 10× bump that's 10× the
         # expected margin → liquidation path.
-        self._pushed_leverage: dict[str, int] = {}
+        # Seeded with what `main.py`'s boot-time push actually got
+        # accepted, so "last successfully pushed" includes it.
+        self._pushed_leverage: dict[str, int] = dict(pushed_leverage or {})
+        # symbol -> target leverage we already told Telegram we could not
+        # push. One ErrorOccurred per (symbol, target) failure episode;
+        # cleared by the next successful push for that symbol.
+        self._leverage_push_alerted: dict[str, int] = {}
+        # (strategy, symbol) -> reason of the last refused flip we logged.
+        # A state-based strategy re-emits the same refused flip every
+        # tick; the reason is logged once, not once a minute.
+        self._refused_flips: dict[tuple[str, str], str] = {}
         # True while strategies do not know about the DB's open positions
         # (the startup read failed). No strategy runs until a restore
         # succeeds — see `_halt_for_unrestored_state`.
@@ -1140,17 +1151,46 @@ class EngineRunner:
     async def _execute_signal(self, signal: Signal, current_price: float, leverage: int = 1) -> bool:
         """Execute a signal end-to-end. Returns True on full success
         (order filled + DB written + parity OK), False on any abort
-        (risk-blocked, kill-switch, coin/family conflict under
-        allow_multi_coin=False, order rejected, close-size unresolved,
-        cap-breached). Callers performing flip-close-then-open MUST check
-        the close return value — opening a new opposite position when the
-        close failed leaves the DB and exchange permanently divergent.
+        (risk-blocked, kill-switch, coin/family/opposite-side conflict,
+        exposure cap, size ceiling, leverage push failed, order rejected,
+        close-size unresolved). Callers performing flip-close-then-open
+        MUST check the close return value — opening a new opposite
+        position when the close failed leaves the DB and exchange
+        permanently divergent.
+
+        An OPEN is checked in full BEFORE anything is sent. When the
+        strategy holds the opposite side (a flip), every check that can
+        refuse the new open runs before the synthesized close, so a
+        refused open never closes the old position and frees the coin
+        for another strategy mid-tick (`analysis-2026-09-15.md` § 4).
         """
+        is_open = signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
+        wanted_side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+
+        # Idempotency / flip detection: don't open a same-side duplicate;
+        # if we already hold the opposite side, this open is a flip and a
+        # synthesized CLOSE runs first (below, after every check), so the
+        # exchange position fully reverses instead of HL netting the new
+        # open against the existing one and leaving a partial.
+        existing = None
+        if is_open and self.repo:
+            existing = await self.repo.get_open_position(
+                signal.strategy_name, signal.symbol
+            )
+            if existing and existing.side == wanted_side:
+                logger.info(
+                    "[%s] Skipping %s %s — already have open %s position",
+                    signal.strategy_name,
+                    signal.action.value,
+                    signal.symbol,
+                    existing.side,
+                )
+                return False
+
         # Audit H3: kill-switch + daily-loss cap apply ONLY to OPEN signals.
         # Blocking CLOSE on kill-switch flip would freeze a position-open
         # bot (SL/TP exits wouldn't fire); blocking CLOSE on daily-loss cap
         # would prevent the loss from being realized and capped.
-        is_open = signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
         if not await self.portfolio.check_risk_limits(is_open=is_open):
             logger.warning(
                 "[%s] Risk limit breached — skipping execution of %s %s",
@@ -1165,181 +1205,11 @@ class EngineRunner:
                         message=f"Risk limit breached — execution of {signal.action.value} {signal.symbol} blocked",
                     )
                 )
+            if existing is not None:
+                self._keep_position_after_refused_flip(
+                    signal, existing, "risk limit (kill switch or daily-loss cap)",
+                )
             return False
-
-        # Idempotency / flip detection: don't open a same-side duplicate;
-        # if we already hold the opposite side, synthesize a CLOSE first
-        # so the exchange position fully reverses (instead of HL netting
-        # the new open against the existing position and leaving a partial).
-        if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
-            if self.repo:
-                existing = await self.repo.get_open_position(
-                    signal.strategy_name, signal.symbol
-                )
-                if existing:
-                    wanted_side = "long" if signal.action == SignalAction.OPEN_LONG else "short"
-                    if existing.side == wanted_side:
-                        logger.info(
-                            "[%s] Skipping %s %s — already have open %s position",
-                            signal.strategy_name,
-                            signal.action.value,
-                            signal.symbol,
-                            existing.side,
-                        )
-                        return False
-                    # Opposite side → flip. Close the existing position first
-                    # via a synthesized CLOSE signal that goes through the
-                    # standard close path (DB-driven size, trade record, etc.).
-                    close_action = (
-                        SignalAction.CLOSE_SHORT if existing.side == "short"
-                        else SignalAction.CLOSE_LONG
-                    )
-                    logger.info(
-                        "[%s] Flip detected — closing %s %s before opening %s "
-                        "(reason: %s)",
-                        signal.strategy_name,
-                        existing.side, signal.symbol, wanted_side,
-                        signal.reason[:80],
-                    )
-                    flip_close = Signal(
-                        action=close_action,
-                        symbol=signal.symbol,
-                        strategy_name=signal.strategy_name,
-                        reason=f"Auto-close before flip ({signal.reason[:60]})",
-                    )
-                    flip_ok = await self._execute_signal(
-                        flip_close, current_price, leverage,
-                    )
-                    if not flip_ok:
-                        # ABORT: opening a new opposite-direction position
-                        # while the close failed leaves DB+exchange divergent
-                        # (audit H1, 2026-05-09). The reconcile loop will
-                        # eventually catch the leftover, but we mustn't
-                        # actively make it worse here.
-                        logger.warning(
-                            "[%s] Flip-close FAILED for %s %s — aborting "
-                            "follow-up %s to prevent double-side divergence",
-                            signal.strategy_name,
-                            existing.side, signal.symbol,
-                            signal.action.value,
-                        )
-                        if self.event_bus:
-                            try:
-                                await self.event_bus.publish(
-                                    ErrorOccurred(
-                                        strategy=signal.strategy_name,
-                                        message=(
-                                            f"Flip-close failed on {signal.symbol} "
-                                            f"({existing.side}→{wanted_side}); "
-                                            f"open aborted to keep DB and "
-                                            f"exchange consistent."
-                                        ),
-                                    )
-                                )
-                            except Exception:
-                                logger.exception("flip-abort: event publish failed")
-                        return False
-
-            # Cross-strategy check: block if another strategy already holds
-            # this coin and allow_multi_coin is disabled. The same flag also
-            # enforces the family-level rule below (correlation grouping).
-            if self.control and self.repo:
-                allow_multi = await self.control.get_allow_multi_coin()
-                if not allow_multi:
-                    blocking = await self.repo.get_open_position_any(signal.symbol)
-                    if blocking and blocking.strategy_name != signal.strategy_name:
-                        logger.info(
-                            "[%s] Skipping %s %s — %s already holds %s on %s (allow_multi_coin=False)",
-                            signal.strategy_name,
-                            signal.action.value,
-                            signal.symbol,
-                            blocking.strategy_name,
-                            blocking.side,
-                            signal.symbol,
-                        )
-                        return False
-
-                    # Family-level correlation guard: strategies tagged with
-                    # the same `family` are near-identical ports of the same
-                    # signal math (cdc_macd and macd_zero are both the
-                    # EMA12/26 cross ≡ MACD-zero-cross on 1d). With
-                    # allow_multi_coin disabled, at most ONE strategy per
-                    # family may hold a position — across ALL coins — because
-                    # on different coins the two entries would still be
-                    # effectively the same trade in duplicate. Strategies
-                    # whose name is unknown to the registry (family=None)
-                    # keep the legacy per-coin behaviour only.
-                    family = get_strategy_family(signal.strategy_name)
-                    if family:
-                        for held in await self.repo.get_open_positions():
-                            if held.strategy_name == signal.strategy_name:
-                                continue
-                            if get_strategy_family(held.strategy_name) != family:
-                                continue
-                            logger.info(
-                                "[%s] Skipping %s %s — family '%s' already "
-                                "exposed via %s on %s (allow_multi_coin=False)",
-                                signal.strategy_name,
-                                signal.action.value,
-                                signal.symbol,
-                                family,
-                                held.strategy_name,
-                                held.symbol,
-                            )
-                            return False
-
-            # Total exposure cap: block if opening this would exceed the
-            # configured margin sum across all open strategy positions.
-            # Audit C1 (2026-05-10): the previous implementation discarded
-            # the correctly-computed `current_margin` and approximated each
-            # open row as contributing `MAX_POSITION_SIZE_USD` of margin,
-            # which made the cap a position-COUNT cap, not a dollar cap.
-            # Strategies that emit `Signal(size=…)` (e.g. vvv_hedge) and
-            # leveraged strategies were both undercounted.
-            if (
-                self.repo
-                and settings.max_total_exposure_usd > 0
-            ):
-                open_pos = await self.repo.get_open_positions()
-                current_margin = sum(
-                    float(p.size) * float(p.entry_price) / max(getattr(p, "leverage", 1) or 1, 1)
-                    for p in open_pos
-                )
-                # Margin for the *new* position being opened. Strategies
-                # that override `signal.size` (vvv_hedge sends 400 VVV) get
-                # their actual notional counted; others fall back to the
-                # standard sized position. Both are divided by leverage.
-                lev = max(int(leverage or 1), 1)
-                if signal.size:
-                    new_notional = float(signal.size) * float(current_price)
-                else:
-                    new_notional = float(settings.max_position_size_usd) * lev
-                new_position_margin = new_notional / lev
-                projected_margin = current_margin + new_position_margin
-                if projected_margin > settings.max_total_exposure_usd:
-                    logger.warning(
-                        "[%s] Skipping %s %s — total exposure cap "
-                        "would be exceeded: $%.0f current + $%.0f new "
-                        "= $%.0f > $%.0f cap",
-                        signal.strategy_name,
-                        signal.action.value,
-                        signal.symbol,
-                        current_margin,
-                        new_position_margin,
-                        projected_margin,
-                        settings.max_total_exposure_usd,
-                    )
-                    return False
-
-        # Audit H1: re-push per-coin leverage to HL before any OPEN if a
-        # runtime override has bumped the strategy's `s.leverage` since
-        # we last pushed. Per-coin leverage on HL is a single value, so
-        # the target is `max(s.leverage)` across strategies trading this
-        # coin — matching the startup logic in main.py. No-op when
-        # already in sync. CLOSE signals don't need this (leverage
-        # affects margin, which only applies to opens).
-        if signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT):
-            await self._ensure_leverage_pushed(signal.symbol)
 
         # `is not None` rather than truthy: a strategy emitting size=0 is
         # a bug we should surface, not silently fall back to the default
@@ -1350,60 +1220,93 @@ class EngineRunner:
             else self._calculate_size(current_price, leverage)
         )
 
-        # Audit H8 (2026-05-10): hard ceiling on `signal.size` overrides.
-        # Strategies that emit `Signal(size=400)` (vvv_hedge) bypass
-        # `_calculate_size` entirely → MAX_POSITION_SIZE_USD doesn't bind.
-        # An accidental param bump (holding_vvv 400 → 4000) silently
-        # produces a 10× position with the same hard SL.
-        #
-        # We cap in MARGIN terms (PR #32 review fix). MAX_POSITION_SIZE_USD
-        # is the margin cap on regular signals; `_calculate_size` scales
-        # notional by leverage but margin stays at MAX_POSITION_SIZE_USD.
-        # To keep units consistent, the H8 ceiling on a sized signal is
-        # `multiplier × MAX_POSITION_SIZE_USD` of MARGIN — i.e. a sized
-        # open at 10× leverage gets 10× the notional, same as regular
-        # signals do. Use `is not None` (not truthy) so a `Signal(size=0)`
-        # — which would be a strategy bug, not a legitimate "use default"
-        # — flows through here for the cap check rather than silently
-        # falling back to `_calculate_size`.
-        if (
-            signal.action in (SignalAction.OPEN_LONG, SignalAction.OPEN_SHORT)
-            and signal.size is not None
-        ):
-            lev = max(int(leverage or 1), 1)
-            max_margin = (
-                settings.signal_size_max_multiplier
-                * settings.max_position_size_usd
+        if is_open:
+            refusal = await self._open_refusal(
+                signal, wanted_side, size, current_price, leverage,
             )
-            requested_notional = float(size) * float(current_price)
-            requested_margin = requested_notional / lev
-            if requested_margin > max_margin:
-                logger.warning(
-                    "[%s] Skipping %s %s — Signal(size=%s) margin "
-                    "$%.0f (notional $%.0f / %dx) exceeds the %.0fx safety "
-                    "ceiling $%.0f (SIGNAL_SIZE_MAX_MULTIPLIER × "
-                    "MAX_POSITION_SIZE_USD)",
-                    signal.strategy_name,
-                    signal.action.value,
-                    signal.symbol,
-                    signal.size,
-                    requested_margin,
-                    requested_notional,
-                    lev,
-                    settings.signal_size_max_multiplier,
-                    max_margin,
-                )
-                # Safety-cap rejection is warning-only and NOT Telegram-routed:
-                # the cap firing means the safety system worked, not that the
-                # bot is broken. Emitting ErrorOccurred here spammed Telegram
-                # on every legitimate cap-block. Example: vvv_hedge emits
-                # Signal(size=400). At VVV $7 the notional is 400 × 7 = $2,800.
-                # Margin = notional / leverage: at the strategy's default
-                # leverage=2 that's $1,400 (under the $2,000 cap → passes),
-                # but at leverage=1 it's $2,800 (over cap → rejected here,
-                # warning logged, no Telegram). The warning log above is
-                # sufficient for diagnostics.
+            if refusal is not None:
+                level, reason = refusal
+                if existing is not None:
+                    self._keep_position_after_refused_flip(signal, existing, reason)
+                else:
+                    logger.log(
+                        level, "[%s] Skipping %s %s — %s",
+                        signal.strategy_name, signal.action.value,
+                        signal.symbol, reason,
+                    )
                 return False
+
+            if existing is not None:
+                # Opposite side → flip. The open has passed every check,
+                # so close the existing position via a synthesized CLOSE
+                # through the standard close path (DB-driven size, trade
+                # record, etc.).
+                close_action = (
+                    SignalAction.CLOSE_SHORT if existing.side == "short"
+                    else SignalAction.CLOSE_LONG
+                )
+                logger.info(
+                    "[%s] Flip detected — closing %s %s before opening %s "
+                    "(reason: %s)",
+                    signal.strategy_name,
+                    existing.side, signal.symbol, wanted_side,
+                    signal.reason[:80],
+                )
+                flip_close = Signal(
+                    action=close_action,
+                    symbol=signal.symbol,
+                    strategy_name=signal.strategy_name,
+                    reason=f"Auto-close before flip ({signal.reason[:60]})",
+                )
+                flip_ok = await self._execute_signal(
+                    flip_close, current_price, leverage,
+                )
+                if not flip_ok:
+                    # ABORT: opening a new opposite-direction position
+                    # while the close failed leaves DB+exchange divergent
+                    # (audit H1, 2026-05-09). The reconcile loop will
+                    # eventually catch the leftover, but we mustn't
+                    # actively make it worse here.
+                    logger.warning(
+                        "[%s] Flip-close FAILED for %s %s — aborting "
+                        "follow-up %s to prevent double-side divergence",
+                        signal.strategy_name,
+                        existing.side, signal.symbol,
+                        signal.action.value,
+                    )
+                    if self.event_bus:
+                        try:
+                            await self.event_bus.publish(
+                                ErrorOccurred(
+                                    strategy=signal.strategy_name,
+                                    message=(
+                                        f"Flip-close failed on {signal.symbol} "
+                                        f"({existing.side}→{wanted_side}); "
+                                        f"open aborted to keep DB and "
+                                        f"exchange consistent."
+                                    ),
+                                )
+                            )
+                        except Exception:
+                            logger.exception("flip-abort: event publish failed")
+                    return False
+
+            # Audit H1: re-push per-coin leverage to HL before any OPEN if a
+            # runtime override has bumped the strategy's `s.leverage` since
+            # we last pushed. Per-coin leverage on HL is a single value, so
+            # the target is `max(s.leverage)` across strategies trading this
+            # coin — matching the startup logic in main.py. No-op when
+            # already in sync. CLOSE signals don't need this (leverage
+            # affects margin, which only applies to opens). A failed push
+            # aborts the open. It is an exchange write, so it runs last,
+            # right before the order and after a flip's close (as before):
+            # a flip whose push fails ends flat, like a rejected order.
+            if not await self._ensure_leverage_pushed(signal.symbol):
+                return False
+
+        # This (strategy, coin) is trading again; a later refused flip
+        # is news and gets logged.
+        self._refused_flips.pop((signal.strategy_name, signal.symbol), None)
 
         if signal.action == SignalAction.OPEN_LONG:
             order = await self.exchange.place_order(
@@ -1667,6 +1570,198 @@ class EngineRunner:
             )
 
         return parity_ok
+
+    async def _open_refusal(
+        self,
+        signal: Signal,
+        wanted_side: str,
+        size: float,
+        current_price: float,
+        leverage: int,
+    ) -> tuple[int, str] | None:
+        """Why this OPEN must not be sent, as `(log level, reason)`, or
+        None when it may go ahead.
+
+        Reads only — nothing here writes or orders, which is what makes
+        it safe to run before a flip's synthesized close. The signalling
+        strategy's own row on this coin is ignored throughout: it is
+        either absent (plain open) or the position the flip is about to
+        close.
+        """
+        open_rows: list = []
+        if self.repo:
+            open_rows = await self.repo.get_open_positions()
+        others = [p for p in open_rows if p.strategy_name != signal.strategy_name]
+        same_coin = [p for p in others if p.symbol == signal.symbol]
+
+        # Cross-strategy coin gate + family gate (allow_multi_coin=False).
+        # Every open row is read, not `get_open_position_any`'s single
+        # arbitrary row: with two holders that row could be the strategy's
+        # own and hide the other one. Without BotControl the flag reads as
+        # its default, False — what BotControl itself answers without Redis.
+        if self.repo:
+            allow_multi = (
+                await self.control.get_allow_multi_coin() if self.control else False
+            )
+            if not allow_multi:
+                if same_coin:
+                    holders = ", ".join(sorted(
+                        f"{p.strategy_name} ({p.side})" for p in same_coin
+                    ))
+                    return logging.INFO, (
+                        f"{holders} already holds {signal.symbol} "
+                        f"(allow_multi_coin=False)"
+                    )
+
+                # Family-level correlation guard: strategies tagged with
+                # the same `family` are near-identical ports of the same
+                # signal math (cdc_macd and macd_zero are both the
+                # EMA12/26 cross ≡ MACD-zero-cross on 1d). With
+                # allow_multi_coin disabled, at most ONE strategy per
+                # family may hold a position — across ALL coins — because
+                # on different coins the two entries would still be
+                # effectively the same trade in duplicate. Strategies
+                # whose name is unknown to the registry (family=None)
+                # keep the legacy per-coin behaviour only.
+                family = get_strategy_family(signal.strategy_name)
+                if family:
+                    for held in others:
+                        if get_strategy_family(held.strategy_name) != family:
+                            continue
+                        return logging.INFO, (
+                            f"family '{family}' already exposed via "
+                            f"{held.strategy_name} on {held.symbol} "
+                            f"(allow_multi_coin=False)"
+                        )
+
+        # Opposite side on the same coin — refused whatever
+        # allow_multi_coin says (the flag only allows same-side
+        # stacking). HL nets a long and a short on one coin into one
+        # position, and the post-trade parity check compares SIGNED nets,
+        # so a long 1.0 + short 1.0 in the DB against a flat exchange
+        # "passes" while each strategy manages a position that does not
+        # exist on its own.
+        opposite = [p for p in same_coin if p.side != wanted_side]
+        if opposite:
+            holders = ", ".join(sorted(
+                f"{p.strategy_name} ({p.side})" for p in opposite
+            ))
+            return logging.WARNING, (
+                f"{holders} holds the opposite side of {signal.symbol}; "
+                f"HL would net the two into one position"
+            )
+
+        # Total exposure cap, in NOTIONAL on both sides: every open row's
+        # `size × entry_price` plus this order's `size × price`.
+        # `PositionRecord` has no leverage column, so the old
+        # `getattr(p, "leverage", 1)` always read 1 — open rows counted
+        # at full notional while the new order counted notional/leverage,
+        # two units in one sum (analysis-2026-09-15.md § 4). Notional is
+        # the unit both sides actually have.
+        cap = settings.max_total_exposure_usd
+        if self.repo and cap > 0:
+            current_notional = sum(
+                float(p.size) * float(p.entry_price)
+                for p in open_rows
+                if not (
+                    p.strategy_name == signal.strategy_name
+                    and p.symbol == signal.symbol
+                )
+            )
+            new_notional = float(size) * float(current_price)
+            projected = current_notional + new_notional
+            if projected > cap:
+                return logging.WARNING, (
+                    f"total exposure cap would be exceeded: "
+                    f"${current_notional:,.0f} open notional + "
+                    f"${new_notional:,.0f} new = ${projected:,.0f} > "
+                    f"${cap:,.0f} MAX_TOTAL_EXPOSURE_USD"
+                )
+
+        # Audit H8 (2026-05-10): hard ceiling on `signal.size` overrides.
+        # Strategies that emit `Signal(size=400)` (vvv_hedge) bypass
+        # `_calculate_size` entirely → MAX_POSITION_SIZE_USD doesn't bind.
+        # An accidental param bump (holding_vvv 400 → 4000) silently
+        # produces a 10× position with the same hard SL.
+        #
+        # We cap in MARGIN terms (PR #32 review fix). MAX_POSITION_SIZE_USD
+        # is the margin cap on regular signals; `_calculate_size` scales
+        # notional by leverage but margin stays at MAX_POSITION_SIZE_USD.
+        # To keep units consistent, the H8 ceiling on a sized signal is
+        # `multiplier × MAX_POSITION_SIZE_USD` of MARGIN — i.e. a sized
+        # open at 10× leverage gets 10× the notional, same as regular
+        # signals do. `signal.size is not None` (not truthy) so a
+        # `Signal(size=0)` — a strategy bug, not a legitimate "use
+        # default" — goes through the cap check too.
+        #
+        # Safety-cap rejection is warning-only and NOT Telegram-routed:
+        # the cap firing means the safety system worked, not that the bot
+        # is broken. Emitting ErrorOccurred here spammed Telegram on every
+        # legitimate cap-block. Example: vvv_hedge emits Signal(size=400).
+        # At VVV $7 the notional is 400 × 7 = $2,800. Margin = notional /
+        # leverage: at the strategy's default leverage=2 that's $1,400
+        # (under the $2,000 cap → passes), but at leverage=1 it's $2,800
+        # (over cap → rejected, warning logged, no Telegram).
+        if signal.size is not None:
+            lev = max(int(leverage or 1), 1)
+            max_margin = (
+                settings.signal_size_max_multiplier
+                * settings.max_position_size_usd
+            )
+            requested_notional = float(size) * float(current_price)
+            requested_margin = requested_notional / lev
+            if requested_margin > max_margin:
+                return logging.WARNING, (
+                    f"Signal(size={signal.size}) margin "
+                    f"${requested_margin:.0f} (notional "
+                    f"${requested_notional:.0f} / {lev}x) exceeds the "
+                    f"{settings.signal_size_max_multiplier:.0f}x safety "
+                    f"ceiling ${max_margin:.0f} (SIGNAL_SIZE_MAX_MULTIPLIER "
+                    f"× MAX_POSITION_SIZE_USD)"
+                )
+
+        return None
+
+    def _keep_position_after_refused_flip(
+        self, signal: Signal, existing, reason: str,
+    ) -> None:
+        """A flip whose open was refused: nothing was closed.
+
+        Logs the refusal once per reason (a state-based strategy re-emits
+        the same flip every tick), and points the strategy back at the
+        position it still holds. It switched its in-memory state to the
+        side it asked for when it emitted the signal; left like that it
+        would run SL/TP for a position that does not exist while the real
+        one went unmanaged.
+        """
+        key = (signal.strategy_name, signal.symbol)
+        wanted = "long" if signal.action == SignalAction.OPEN_LONG else "short"
+        if self._refused_flips.get(key) != reason:
+            self._refused_flips[key] = reason
+            logger.warning(
+                "[%s] Flip %s→%s on %s refused — %s. Nothing closed: "
+                "keeping the open %s (size %s @ %s) and re-syncing the "
+                "strategy to it",
+                signal.strategy_name, existing.side, wanted, signal.symbol,
+                reason, existing.side, existing.size, existing.entry_price,
+            )
+        else:
+            logger.debug(
+                "[%s] Flip on %s refused again for the same reason: %s",
+                signal.strategy_name, signal.symbol, reason,
+            )
+        strat = next(
+            (s for s in self.strategies if s.name == signal.strategy_name), None,
+        )
+        if strat is None:
+            return
+        try:
+            self._restore_strategy_from_row(strat, existing)
+        except Exception:
+            logger.exception(
+                "[%s] re-sync to the kept %s position failed",
+                signal.strategy_name, existing.side,
+            )
 
     async def _check_parity_after_trade(self, symbol: str) -> bool:
         """Verify exchange position for `symbol` matches DB sum across
@@ -2080,22 +2175,25 @@ class EngineRunner:
             return None
         return ex_pos.size
 
-    async def _ensure_leverage_pushed(self, symbol: str) -> None:
+    async def _ensure_leverage_pushed(self, symbol: str) -> bool:
         """Push per-coin leverage to the exchange if it's drifted from
-        what we last pushed (audit H1).
+        what we last pushed (audit H1). Returns whether the exchange is
+        known to hold the target leverage.
 
         The target is the max `s.leverage` across all strategies trading
-        ``symbol`` — matching the startup-time push in `main.py`. Only
-        actually calls the exchange when the target differs from
-        `_pushed_leverage[symbol]`, so the cost is one dict lookup per
-        OPEN tick in the steady state.
+        ``symbol`` — matching the startup-time push in `main.py`, whose
+        accepted values seed `_pushed_leverage`. Only actually calls the
+        exchange when the target differs from `_pushed_leverage[symbol]`,
+        so the cost is one dict lookup per OPEN tick in the steady state.
 
-        Failures (network blip, exchange rejection) are logged but NOT
-        raised — the open continues with whatever leverage the exchange
-        currently has. The size calc downstream still divides by
-        `signal.leverage`, so the worst case is a margin/notional mismatch
-        for one trade until the next push succeeds, instead of the
-        liquidation path the audit calls out.
+        A push that raises or is rejected returns False and the caller
+        aborts the open. It used to be logged and the open went ahead at
+        whatever leverage HL had: `_calculate_size` sizes the notional
+        for the NEW leverage, so on a bump HL margins it at the old one —
+        the liquidation path audit H1 exists to close, one trade late
+        (`analysis-2026-09-15.md` § 4). The failure is published once per
+        (coin, target) until a push for that coin succeeds; the target is
+        not cached, so the next OPEN retries.
         """
         target = max(
             (s.leverage for s in self.strategies if s.symbol == symbol),
@@ -2104,31 +2202,39 @@ class EngineRunner:
         target = max(int(target), 1)
         previous = self._pushed_leverage.get(symbol)
         if previous == target:
-            return
+            return True
         try:
             ok = await self.exchange.update_leverage(
                 symbol, target, is_cross=True,
             )
-        except Exception:
-            logger.exception(
-                "Leverage push failed for %s (target %dx) — "
-                "open will proceed with exchange's current leverage",
-                symbol, target,
+            failure = None if ok else "rejected by the exchange"
+        except Exception as e:
+            logger.warning(
+                "Leverage push for %s (target %dx) raised",
+                symbol, target, exc_info=True,
             )
-            return
-        if ok:
+            failure = f"{type(e).__name__}: {e}"
+        if failure is None:
             self._pushed_leverage[symbol] = target
+            self._leverage_push_alerted.pop(symbol, None)
             logger.info(
                 "Re-pushed %s leverage=%dx (was %s)",
                 symbol, target,
                 f"{previous}x" if previous is not None else "unset",
             )
-        else:
-            logger.warning(
-                "Leverage push for %s rejected by exchange (target %dx) — "
-                "open will proceed with exchange's current leverage",
-                symbol, target,
-            )
+            return True
+
+        message = (
+            f"Leverage push for {symbol} to {target}x failed ({failure}); "
+            f"last accepted: "
+            f"{f'{previous}x' if previous is not None else 'none this run'}. "
+            f"Opens on {symbol} are refused until a push succeeds."
+        )
+        logger.warning("%s", message)
+        if self._leverage_push_alerted.get(symbol) != target:
+            self._leverage_push_alerted[symbol] = target
+            await self._publish_error(f"leverage/{symbol}", message)
+        return False
 
     def _calculate_size(self, price: float, leverage: int = 1) -> float:
         """Calculate position size in base units.

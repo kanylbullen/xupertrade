@@ -256,8 +256,14 @@ async def main() -> None:
     per_coin_leverage: dict[str, int] = {}
     for s in strategies:
         per_coin_leverage[s.symbol] = max(per_coin_leverage.get(s.symbol, 1), s.leverage)
+    # What the exchange accepted, handed to the runner: an OPEN whose
+    # leverage push fails is aborted unless the exchange is known to hold
+    # the target already, and a boot-time push counts.
+    pushed_leverage: dict[str, int] = {}
     for coin, lev in per_coin_leverage.items():
         ok = await exchange.update_leverage(coin, lev, is_cross=True)
+        if ok:
+            pushed_leverage[coin] = lev
         logger.info(
             "Configured %s leverage=%dx (%s)",
             coin,
@@ -282,6 +288,7 @@ async def main() -> None:
         repo=repo,
         event_bus=event_bus,
         control=control,
+        pushed_leverage=pushed_leverage,
     )
 
     # Restore strategy state from DB (positions open before restart)
