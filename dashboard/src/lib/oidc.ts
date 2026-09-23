@@ -60,28 +60,48 @@ export function decodeStateBundle(s: string): OidcStateBundle | null {
   return null;
 }
 
+/** Why `getOidcConfig` refused. Each value is also the `/login?error=`
+ *  code the routes redirect with, so they pass it through unchanged. */
+export type OidcConfigError = "auth-locked" | "oidc-misconfigured";
+
+export type OidcConfigResult =
+  | { ok: true; config: client.Configuration; cfg: AuthConfig }
+  | { ok: false; error: OidcConfigError };
+
+const MISCONFIGURED: OidcConfigResult = { ok: false, error: "oidc-misconfigured" };
+
 /** Build the openid-client Configuration from the auth config in Redis.
- *  Returns null when OIDC isn't configured (issuer/client_id missing). */
-export async function getOidcConfig(): Promise<{
-  config: client.Configuration;
-  cfg: AuthConfig;
-} | null> {
+ *
+ *  Refuses with `auth-locked` when the resolved mode is `"locked"`, and
+ *  with `oidc-misconfigured` when OIDC isn't usable (Redis unreachable,
+ *  issuer/client_id/secret missing, unparsable issuer). */
+export async function getOidcConfig(): Promise<OidcConfigResult> {
   const cfg = await fetchAuthConfig(true);
-  if (!cfg) return null;
-  if (!cfg.oidc_issuer || !cfg.oidc_client_id) return null;
+  if (!cfg) return MISCONFIGURED;
+  // SECURITY: `resolveMode` answers "locked" when the stored auth mode
+  // is gone on an install with tenants, and nothing may mint a session
+  // then — `api/auth/login` refuses basic sign-in by name for the same
+  // reason. A session minted while locked is useless until the lock
+  // lifts, and then it is valid. The check sits here, on the same
+  // forced read the rest of this function uses, and before discovery,
+  // so a locked dashboard never contacts the IdP. It precedes the
+  // issuer check so the answer is `auth-locked` whatever OIDC fields
+  // happen to survive.
+  if (cfg.mode === "locked") return { ok: false, error: "auth-locked" };
+  if (!cfg.oidc_issuer || !cfg.oidc_client_id) return MISCONFIGURED;
 
   // The public /api/auth/config endpoint deliberately strips
   // client_secret (and session_secret too). Here we read it from
   // Redis directly via lib/auth-config — server-side only, never
   // leaves the dashboard process.
   const secret = await fetchOidcSecret();
-  if (!secret) return null;
+  if (!secret) return MISCONFIGURED;
 
   let issuer: URL;
   try {
     issuer = new URL(cfg.oidc_issuer);
   } catch {
-    return null;
+    return MISCONFIGURED;
   }
 
   const config = await client.discovery(
@@ -90,7 +110,7 @@ export async function getOidcConfig(): Promise<{
     secret,
   );
 
-  return { config, cfg };
+  return { ok: true, config, cfg };
 }
 
 /** Internal — fetch the OIDC client secret. PR 4b: now reads
