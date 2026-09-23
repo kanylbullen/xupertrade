@@ -75,6 +75,10 @@ class _Strat:
     def reset_state(self):
         self.resets += 1
 
+    def reset_position(self):
+        # The runner resets through reset_position (keeps cooldown).
+        self.resets += 1
+
     def export_state(self):
         return None
 

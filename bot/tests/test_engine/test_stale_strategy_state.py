@@ -21,17 +21,21 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import pandas as pd
 import pytest
 
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.runner import EngineRunner
 from hypertrade.engine.signals import Signal, SignalAction
-from hypertrade.exchange.base import Order, OrderStatus, OrderType, Position
+from hypertrade.exchange.base import (
+    ExchangeReadError, Order, OrderStatus, OrderType, Position,
+)
 from hypertrade.strategies.btc_mean_reversion import BTCMeanReversionStrategy
 from hypertrade.strategies.hash_momentum import HashMomentumStrategy
+from hypertrade.strategies.registry import get_strategy, list_strategies, load_all
 
 BAR_TS = datetime(2026, 9, 22, 8, tzinfo=timezone.utc)
 
@@ -291,3 +295,241 @@ async def test_close_with_a_db_position_does_not_reset_before_closing():
 
     exchange.place_order.assert_awaited_once()
     runner._reset_strategy_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ignored_close_keeps_the_cooldown_its_own_close_started():
+    """Runtime resets go through reset_position: hash_momentum's own exit
+    starts a 6-bar cooldown before the CLOSE reaches the runner, and
+    reset_state() would have wiped it back to 999."""
+    strat = HashMomentumStrategy()
+    strat.restore_state("long", 180.0)
+    strat._last_closed_bar_ts = pd.Timestamp(BAR_TS)
+    strat._in_long = False          # what its SL/TP exit does ...
+    strat._bars_since_close = 0     # ... before returning CLOSE_LONG
+    runner, ctl, _ = _runner([strat], open_row=None)
+
+    await runner._execute_signal(Signal(
+        action=SignalAction.CLOSE_LONG, symbol="SOL",
+        strategy_name=strat.name, reason="SL hit",
+    ), 176.0)
+
+    assert not strat.holds_position()
+    assert strat._bars_since_close == 0
+    assert strat._last_closed_bar_ts == BAR_TS
+    assert _saved(ctl)["hash_momentum"]["bars_since_close"] == 0
+
+
+# ----------------------------------------------------------------------
+# Round trip: a normal close → snapshot → restart keeps the cooldown
+# ----------------------------------------------------------------------
+
+
+class _DictRedis:
+    """The three Redis calls BotControl's snapshot methods make."""
+
+    def __init__(self):
+        self.data: dict[str, str] = {}
+
+    async def get(self, key):
+        return self.data.get(key)
+
+    async def set(self, key, value):
+        self.data[key] = value
+
+    async def delete(self, key):
+        self.data.pop(key, None)
+
+
+def _real_control(redis):
+    ctl = BotControl(redis_url="redis://unused/0", mode="testnet")
+    ctl._redis = redis
+    return ctl
+
+
+def _hm_setup(s):
+    s.restore_state("long", 100.0)
+    s._bars_since_close = 50
+    s._last_closed_bar_ts = pd.Timestamp(BAR_TS)
+
+
+def _hm_close(s):
+    s._in_long = False           # hash_momentum's own SL/TP exit
+    s._bars_since_close = 0
+
+
+def _st_setup(s):
+    s.restore_state("long", 100.0)
+    s._last_entry_time = BAR_TS
+
+
+def _vb_setup(s):
+    s.restore_state("long", 100.0)
+    s._last_trade_time = BAR_TS
+
+
+def _qb_setup(s):
+    s.restore_state("long", 100.0)
+
+
+# name → (put in a position, the strategy's own exit transition,
+#         "is the re-entry cooldown still running" one bar after the close)
+ROUND_TRIP = {
+    "hash_momentum": (
+        _hm_setup, _hm_close,
+        lambda s: s._bars_since_close < s.cooldown_bars,
+    ),
+    "supertrend": (
+        _st_setup, lambda s: s._reset_position_state(),
+        lambda s: s._last_entry_time is not None and (
+            (BAR_TS + timedelta(days=1) - s._last_entry_time)
+            / timedelta(days=1) <= s.cooldown_bars
+        ),
+    ),
+    "volatility_breakout": (
+        _vb_setup, lambda s: s._reset_position_state(),
+        lambda s: s._last_trade_time is not None and (
+            BAR_TS + timedelta(hours=1) - s._last_trade_time
+            < timedelta(hours=s.cooldown_hours)
+        ),
+    ),
+    "qullamagi_breakout": (
+        _qb_setup, lambda s: s._reset(),
+        lambda s: s._bars_since_flat <= s.cooldown_bars,
+    ),
+}
+
+
+def test_every_cooldown_strategy_has_a_round_trip_case():
+    load_all()
+    declared = {
+        n for n in list_strategies() if get_strategy(n).cooldown_attrs
+    }
+    assert declared == set(ROUND_TRIP)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(ROUND_TRIP))
+async def test_cooldown_survives_close_snapshot_and_restart(name, caplog):
+    load_all()
+    setup, own_close, cooling = ROUND_TRIP[name]
+    redis = _DictRedis()
+
+    # A normal close through the runner, with a DB row to close.
+    strat = get_strategy(name)
+    setup(strat)
+    own_close(strat)
+    assert cooling(strat)
+    runner, _, exchange = _runner(
+        [strat], open_row=_row(name, symbol=strat.symbol, side="long",
+                               entry=100.0),
+    )
+    runner.control = _real_control(redis)
+    runner.repo.record_trade_and_close_position = AsyncMock()
+    runner._check_parity_after_trade = AsyncMock(return_value=True)
+    exchange.place_order = AsyncMock(return_value=Order(
+        id="o1", symbol=strat.symbol, side="sell", size=0.01,
+        order_type=OrderType.MARKET, filled_price=101.0,
+        status=OrderStatus.FILLED,
+    ))
+    assert await runner._execute_signal(Signal(
+        action=SignalAction.CLOSE_LONG, symbol=strat.symbol,
+        strategy_name=name, reason="exit",
+    ), 101.0)
+    runner.repo.record_trade_and_close_position.assert_awaited_once()
+    assert redis.data, f"{name}: the close left no snapshot"
+
+    # Restart: a fresh instance, no open DB row, the same Redis.
+    fresh = get_strategy(name)
+    restarted, _, _ = _runner([fresh])
+    restarted.control = _real_control(redis)
+    with caplog.at_level(logging.INFO, logger="hypertrade.engine.runner"):
+        await restarted._restore_strategies([])
+
+    assert not fresh.holds_position()
+    assert cooling(fresh), f"{name}: the cooldown did not survive a restart"
+    assert "snapshot said in position" not in caplog.text
+
+
+# ----------------------------------------------------------------------
+# Flat-all pauses the bot
+# ----------------------------------------------------------------------
+
+
+def _tick_runner(*, flat_ok: bool, pause_fails: bool = False):
+    state = {"paused": False}
+    ctl = MagicMock()
+    ctl.beat_heartbeat = AsyncMock()
+    ctl.get_pending_flat_request = AsyncMock(return_value="tok-1")
+    ctl.acknowledge_flat_request = AsyncMock()
+    ctl.get_disabled_strategies = AsyncMock(return_value=set())
+    ctl.get_all_leverage_overrides = AsyncMock(return_value={})
+    ctl.save_strategy_state = AsyncMock()
+
+    async def _set_paused(value):
+        if pause_fails:
+            raise ConnectionError("redis down")
+        state["paused"] = value
+
+    async def _is_paused():
+        return state["paused"]
+
+    ctl.set_paused = AsyncMock(side_effect=_set_paused)
+    ctl.is_paused = AsyncMock(side_effect=_is_paused)
+
+    exchange = MagicMock()
+    if flat_ok:
+        exchange.get_positions = AsyncMock(return_value=[])
+    else:
+        exchange.get_positions = AsyncMock(side_effect=ExchangeReadError("502"))
+    exchange.get_balance = AsyncMock(side_effect=ExchangeReadError("skip"))
+    bus = MagicMock()
+    bus.publish = AsyncMock()
+    strat = HashMomentumStrategy()
+    runner = EngineRunner(
+        exchange=exchange, strategies=[strat], repo=None,
+        event_bus=bus, control=ctl,
+    )
+    runner._run_strategy = AsyncMock()
+    return runner, ctl, bus, state
+
+
+def _messages(bus):
+    return [c.args[0].message for c in bus.publish.await_args_list
+            if hasattr(c.args[0], "message")]
+
+
+@pytest.mark.asyncio
+async def test_completed_flat_all_pauses_the_bot_before_any_strategy_runs(caplog):
+    runner, ctl, bus, state = _tick_runner(flat_ok=True)
+
+    with caplog.at_level(logging.WARNING, logger="hypertrade.engine.runner"):
+        await runner.tick()
+
+    ctl.set_paused.assert_awaited_once_with(True)
+    assert state["paused"] is True
+    ctl.acknowledge_flat_request.assert_awaited_once_with("tok-1")
+    runner._run_strategy.assert_not_awaited()  # no OPEN in the same tick
+    assert any("bot is now PAUSED" in m for m in _messages(bus))
+    assert "bot is now PAUSED" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_flat_all_holds_the_tick_even_if_the_pause_write_fails():
+    runner, ctl, bus, _ = _tick_runner(flat_ok=True, pause_fails=True)
+
+    await runner.tick()
+
+    runner._run_strategy.assert_not_awaited()
+    assert any("PAUSING THE BOT FAILED" in m for m in _messages(bus))
+
+
+@pytest.mark.asyncio
+async def test_failed_flat_all_does_not_pause():
+    runner, ctl, _, _ = _tick_runner(flat_ok=False)
+
+    await runner.tick()
+
+    ctl.set_paused.assert_not_awaited()
+    ctl.acknowledge_flat_request.assert_not_awaited()
+    runner._run_strategy.assert_awaited()  # trading continues; retried next tick

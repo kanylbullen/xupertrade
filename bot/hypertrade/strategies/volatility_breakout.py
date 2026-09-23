@@ -93,7 +93,11 @@ class VolatilityBreakoutStrategy(Strategy):
         self._trail_extreme = None
 
     def export_state(self) -> dict | None:
-        if self._position_side is None:
+        # Exported while flat too, for `last_trade_time` (the cooldown_hours
+        # re-entry block), so a restart inside the cooldown keeps it (audit
+        # M6). position_side stays an explicit None: restore_from_json
+        # reads a missing key as "use `side`".
+        if self._position_side is None and self._last_trade_time is None:
             return None
         return {
             "position_side": self._position_side,
@@ -101,6 +105,10 @@ class VolatilityBreakoutStrategy(Strategy):
             "stop_loss": self._stop_loss,
             "trail_active": self._trail_active,
             "trail_extreme": self._trail_extreme,
+            "last_trade_time": (
+                self._last_trade_time.isoformat()
+                if self._last_trade_time is not None else None
+            ),
         }
 
     def restore_from_json(
@@ -111,6 +119,14 @@ class VolatilityBreakoutStrategy(Strategy):
         self._stop_loss = state.get("stop_loss")
         self._trail_active = bool(state.get("trail_active", False))
         self._trail_extreme = state.get("trail_extreme")
+        if "last_trade_time" in state:  # older snapshots lack it: keep ours
+            raw = state["last_trade_time"]
+            try:
+                self._last_trade_time = (
+                    datetime.fromisoformat(raw) if raw is not None else None
+                )
+            except (ValueError, TypeError):
+                self._last_trade_time = None
 
     def _reset_position_state(self) -> None:
         self._position_side = None

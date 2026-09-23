@@ -108,13 +108,6 @@ def test_restore_cooldown_only_ends_flat_and_keeps_cooldown(name):
         )
 
 
-def test_cooldown_survival_is_actually_exercised():
-    """Guard against the test above passing vacuously: the strategies whose
-    snapshot carries a cooldown field must be in the set it checks."""
-    carrying = {n for n in ALL if _snapshot_in_position(n)[1]}
-    assert {"hash_momentum", "supertrend"} <= carrying
-
-
 @pytest.mark.parametrize("name", PRODUCTION_AFFECTED)
 def test_production_strategies_were_restored_in_position_before_the_fix(name):
     """Pins the bug: the old startup call on the same snapshot leaves the

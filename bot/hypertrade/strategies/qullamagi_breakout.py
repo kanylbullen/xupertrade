@@ -180,7 +180,15 @@ class QullamagiBreakoutStrategy(Strategy):
         self._bars_in_trade = 0
 
     def export_state(self) -> dict | None:
-        if self._position_side is None:
+        # Exported while flat too when the re-entry cooldown is running,
+        # so a restart inside it keeps it (audit M6); a None export
+        # deletes the runner's snapshot. position_side stays an explicit
+        # None: restore_from_json reads a missing key as "use `side`".
+        cooldown_active = (
+            self.cooldown_bars > 0
+            and self._bars_since_flat <= self.cooldown_bars
+        )
+        if self._position_side is None and not cooldown_active:
             return None
         return {
             "position_side": self._position_side,
@@ -189,12 +197,23 @@ class QullamagiBreakoutStrategy(Strategy):
             "scaled": self._scaled,
             "be_activated": self._be_activated,
             "bars_in_trade": self._bars_in_trade,
+            "bars_since_flat": self._bars_since_flat,
         }
 
     def restore_from_json(
         self, side: str, entry_price: float, state: dict
     ) -> None:
-        self._position_side = state.get("position_side", side)
+        self._bars_since_flat = int(
+            state.get("bars_since_flat", self._bars_since_flat)
+        )
+        position_side = state.get("position_side", side)
+        if position_side not in ("long", "short"):
+            # A flat (cooldown-only) snapshot. The init_stop fallback below
+            # would run restore_state("flat", ...) and set
+            # _position_side = "flat".
+            self.reset_state()
+            return
+        self._position_side = position_side
         self._entry_price = state.get("entry_price", entry_price)
         self._init_stop = state.get("init_stop")
         self._scaled = bool(state.get("scaled", False))

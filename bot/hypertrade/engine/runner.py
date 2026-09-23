@@ -617,13 +617,18 @@ class EngineRunner:
         executed signal — an OPEN — and the next restart restores it as in
         position (2026-09-23; startup now discards position flags anyway,
         this keeps the snapshot honest in between).
+
+        `reset_position()`, not `reset_state()`: the position goes, the
+        strategy's cooldown fields stay. hash_momentum's `reset_state()`
+        also wipes its post-close cooldown — the cooldown its own CLOSE
+        had just started when that CLOSE was then ignored.
         """
         for s in self.strategies:
             if s.name == strategy_name:
                 try:
-                    s.reset_state()
+                    s.reset_position()
                 except Exception:
-                    logger.exception("reset_state failed for %s", strategy_name)
+                    logger.exception("reset_position failed for %s", strategy_name)
                     return
                 logger.info(
                     "Reset %s to flat in memory and in its Redis snapshot "
@@ -739,11 +744,14 @@ class EngineRunner:
         # acknowledged ONLY on full success: acknowledging a flat-all
         # that never read the exchange (or left closes failing) tells
         # the operator the book is flat when it is not.
+        paused_by_flat_all = False
         if self.control:
             pending = await self.control.get_pending_flat_request()
             if pending:
                 status = await self._flat_all_positions()
                 if status.ok:
+                    await self._pause_after_flat_all(status)
+                    paused_by_flat_all = True
                     await self.control.acknowledge_flat_request(pending)
                 else:
                     logger.error(
@@ -795,6 +803,12 @@ class EngineRunner:
             for s in self.strategies:
                 if s.name in leverage_overrides:
                     s.leverage = leverage_overrides[s.name]
+
+        # A flat-all that just completed paused the bot; hold this tick
+        # even if that pause write failed, so no strategy re-opens seconds
+        # after the book was flattened.
+        if paused_by_flat_all:
+            paused = True
 
         # A startup state restore that never succeeded paused the bot
         # (`_halt_for_unrestored_state`). The first un-paused tick retries
@@ -1000,6 +1014,35 @@ class EngineRunner:
                     )
                 except Exception:
                     logger.exception("fetch-outage: event publish failed")
+
+    async def _pause_after_flat_all(self, status: "FlatAllStatus") -> None:
+        """A completed flat-all pauses the bot.
+
+        Flat-all runs before the strategy loop of the same tick, and it
+        resets every strategy whose row it closed. A strategy whose entry
+        is a standing condition (sma_rsi, penguin_volatility) would send
+        its OPEN again seconds after the operator flattened the book.
+        Resuming is a deliberate operator action (/resume, the dashboard).
+        The caller also holds the current tick, so a failed pause write
+        still stops this tick's opens; it is reported loudly.
+        """
+        message = (
+            f"Flat-all complete ({status.closed} position(s) closed). The "
+            f"bot is now PAUSED so no strategy re-opens; resume it "
+            f"deliberately (/resume or the dashboard) when you want it "
+            f"trading again."
+        )
+        try:
+            await self.control.set_paused(True)
+        except Exception:
+            logger.exception("Flat-all: pausing the bot failed")
+            message = (
+                f"Flat-all complete ({status.closed} position(s) closed), "
+                f"but PAUSING THE BOT FAILED — strategies will trade again "
+                f"from the next tick. Pause it manually."
+            )
+        logger.warning("%s", message)
+        await self._publish_error("flat-all", message)
 
     async def _flat_all_positions(self) -> "FlatAllStatus":
         """Close every open position with a market order.

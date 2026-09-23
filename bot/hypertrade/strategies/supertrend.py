@@ -110,7 +110,12 @@ class SuperTrendStrategy(Strategy):
         self._stop_loss = None  # SuperTrend trailing SL recomputed on first tick
 
     def export_state(self) -> dict | None:
-        if self._position_side is None:
+        # Exported while flat too, for `last_entry_time` (the cooldown_bars
+        # re-entry block). Returning None when flat made the runner delete
+        # the snapshot on every close, and a restart inside the cooldown
+        # re-entered at once (audit M6). position_side stays an explicit
+        # None: restore_from_json reads a missing key as "use `side`".
+        if self._position_side is None and self._last_entry_time is None:
             return None
         return {
             "position_side": self._position_side,
