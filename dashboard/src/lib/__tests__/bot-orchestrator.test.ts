@@ -190,6 +190,60 @@ describe("buildSpec", () => {
       );
     });
 
+    it("injects the strategy cap when the tenant has one", () => {
+      // The toggle route only gates enabling, and a fresh bot boots
+      // with every allowlisted strategy on — so without this a tenant
+      // capped at 3 ran all of them. The bot trims to the cap at boot.
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "testnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        maxActiveStrategies: 3,
+      });
+      expect(spec.env).toContain("TENANT_MAX_ACTIVE_STRATEGIES=3");
+    });
+
+    it("passes a cap of 0 through rather than dropping it as falsy", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "testnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        maxActiveStrategies: 0,
+      });
+      expect(spec.env).toContain("TENANT_MAX_ACTIVE_STRATEGIES=0");
+    });
+
+    it("omits the cap when null (NULL = no cap)", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "testnet",
+        decryptedSecrets: {},
+        apiKey: TEST_API_KEY,
+        maxActiveStrategies: null,
+      });
+      expect(
+        spec.env.some((e) => e.startsWith("TENANT_MAX_ACTIVE_STRATEGIES=")),
+      ).toBe(false);
+    });
+
+    it("a tenant cannot raise their own cap via a smuggled secret", () => {
+      const spec = buildSpec({
+        tenantId: TENANT_ID,
+        botId: BOT_ID,
+        mode: "testnet",
+        decryptedSecrets: { TENANT_MAX_ACTIVE_STRATEGIES: "999" },
+        apiKey: TEST_API_KEY,
+        maxActiveStrategies: 2,
+      });
+      expect(spec.env).toContain("TENANT_MAX_ACTIVE_STRATEGIES=2");
+      expect(spec.env).not.toContain("TENANT_MAX_ACTIVE_STRATEGIES=999");
+    });
+
     it("injects key expiries as a JSON object", () => {
       const spec = buildSpec({
         tenantId: TENANT_ID,

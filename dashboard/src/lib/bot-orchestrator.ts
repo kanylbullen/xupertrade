@@ -92,6 +92,22 @@ export type BotStartParams = {
    */
   allowedStrategies?: string[] | null;
   /**
+   * The tenant's operator-set cap on concurrently enabled strategies
+   * (`tenants.max_active_strategies`), or `null` for no cap.
+   *
+   * The dashboard only checks the cap when a tenant flips a strategy
+   * ON (`/api/control/strategy/[name]/toggle`). A freshly spawned bot
+   * starts with every allowlisted strategy enabled, so without this a
+   * tenant capped at 3 ran all of them until they touched a switch.
+   * The bot applies it at boot by disabling the flat surplus — never a
+   * strategy holding an open position (see
+   * `bot/hypertrade/strategy_cap.py`). Env-injected for the same
+   * grant reason as `allowedStrategies`.
+   *
+   * `null` → env var omitted → bot applies no cap.
+   */
+  maxActiveStrategies?: number | null;
+  /**
    * Expiry dates for the tenant's HL private-key secrets, as
    * `{ SECRET_KEY: ISO-8601 }`. Drives the bot's daily
    * rotation-reminder Telegram message.
@@ -382,6 +398,13 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     // former).
     ...(params.allowedStrategies != null
       ? { TENANT_ALLOWED_STRATEGIES: JSON.stringify(params.allowedStrategies) }
+      : {}),
+    // Per-tenant cap on enabled strategies. Same placement rule as the
+    // allowlist: after the spreads, so a tenant can't raise their own
+    // cap through the secret CRUD API; omitted when null so the bot
+    // can tell "no cap" from "cap 0".
+    ...(params.maxActiveStrategies != null
+      ? { TENANT_MAX_ACTIVE_STRATEGIES: String(params.maxActiveStrategies) }
       : {}),
     ...(params.keyExpiries && Object.keys(params.keyExpiries).length > 0
       ? { TENANT_KEY_EXPIRIES: JSON.stringify(params.keyExpiries) }

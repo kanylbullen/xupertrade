@@ -167,6 +167,38 @@ describe("decryptAndStart", () => {
     expect(clearBotApiKey).toHaveBeenCalledWith(BOT_ID);
   });
 
+  it("forwards the tenant's strategy cap and allowlist to the container", async () => {
+    // A fresh bot boots with every allowlisted strategy enabled; the
+    // cap only reaches it through this call.
+    mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32));
+    mockedStartBot.mockResolvedValueOnce({
+      id: CONTAINER_ID,
+      name: CONTAINER_NAME,
+      image: "xupertrade-bot:latest",
+      state: "running",
+      status: "Up 1 second",
+      labels: {},
+    });
+    updateChain.returning.mockResolvedValueOnce([
+      { id: BOT_ID, tenantId: TENANT_ID, mode: "paper", isRunning: true },
+    ]);
+    const args = makeArgs();
+    args.tenant = {
+      ...args.tenant,
+      maxActiveStrategies: 3,
+      allowedStrategies: ["bb_short"],
+    };
+
+    await decryptAndStart(args);
+
+    expect(mockedStartBot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxActiveStrategies: 3,
+        allowedStrategies: ["bb_short"],
+      }),
+    );
+  });
+
   it("compensates by stopping the container if the persist UPDATE returns 0 rows", async () => {
     mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32));
     mockedStartBot.mockResolvedValueOnce({

@@ -419,6 +419,13 @@ class Repository:
                 await session.commit()
 
     async def get_open_position_any(self, symbol: str) -> PositionRecord | None:
+        """The OLDEST open row on `symbol`, any strategy.
+
+        `ORDER BY opened_at, id` makes "which row" deterministic when
+        several strategies hold the coin (`allow_multi_coin=True`); a bare
+        `LIMIT 1` let Postgres return any of them. Callers that must see
+        every holder (the engine's open gates) read all rows instead.
+        """
         async with self._session_factory() as session:
             result = await session.execute(
                 select(PositionRecord)
@@ -427,6 +434,7 @@ class Repository:
                     PositionRecord.mode == self._mode,
                     PositionRecord.is_open == True,
                 )
+                .order_by(PositionRecord.opened_at, PositionRecord.id)
                 .limit(1)
             )
             return result.scalar_one_or_none()

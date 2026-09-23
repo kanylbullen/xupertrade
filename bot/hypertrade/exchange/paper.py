@@ -246,7 +246,7 @@ class PaperExchange(Exchange):
                 symbol=symbol, side="short", size=size, entry_price=price
             )
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
         return False
 
     async def get_positions(self) -> list[Position]:

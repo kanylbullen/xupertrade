@@ -68,7 +68,8 @@ async def test_redis_override_false_allows_when_env_true(monkeypatch):
 @pytest.mark.asyncio
 async def test_redis_read_failure_falls_back_to_env(monkeypatch):
     """Redis blip during the kill-switch read must NOT crash the engine
-    tick. Fall back to the env default and log."""
+    tick. An unreadable flag counts as ACTIVE for opens (fail closed —
+    see test_portfolio_fail_closed.py for env=false)."""
     monkeypatch.setattr(settings, "kill_switch", True)
     monkeypatch.setattr(settings, "max_daily_loss_usd", 100)
     pm = PortfolioManager(

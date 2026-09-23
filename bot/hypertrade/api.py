@@ -1,5 +1,6 @@
 """HTTP API for dashboard queries (indicator status + runtime control)."""
 
+import asyncio
 import hmac
 import html
 import json
@@ -117,7 +118,10 @@ async def hyperliquid_diagnostic(request: web.Request) -> web.Response:
     try:
         from hypertrade.exchange.hyperliquid import HyperLiquidExchange
 
-        ex = HyperLiquidExchange()
+        # Construction is blocking (metadata HTTP + `time.sleep` backoff
+        # between retries) — off the event loop, or one call during an HL
+        # outage freezes every other request and the tick for 30-105 s.
+        ex = await asyncio.to_thread(HyperLiquidExchange)
         balance = await ex.get_balance()
         positions = await ex.get_positions()
         btc_price = await ex.get_current_price("BTC")

@@ -324,7 +324,7 @@ Currently commands operate on the bot instance that runs Telegram (the mainnet b
 ```python
 class Exchange(ABC):
     async def place_order(symbol, side, size, order_type, price) -> Order
-    async def cancel_order(order_id) -> bool
+    async def cancel_order(order_id, symbol) -> bool
     async def get_positions() -> list[Position]
     async def get_balance() -> Balance
     async def get_current_price(symbol) -> float

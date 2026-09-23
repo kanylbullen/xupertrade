@@ -14,6 +14,7 @@
 
 import { and, eq, sql } from "drizzle-orm";
 
+import { CLAIM_PLACEHOLDER } from "@/lib/bot-claim";
 import { db, tenantBots, tenantSecrets } from "@/lib/db";
 import {
   type BotMode,
@@ -21,9 +22,9 @@ import {
   requiredSecretsForMode,
 } from "@/lib/bot-orchestrator";
 import {
-  assertCanStartBot,
   LimitExceededError,
   limitExceededResponse,
+  reserveBotStart,
 } from "@/lib/admin/limits";
 import { requireTenant } from "@/lib/tenant";
 
@@ -68,15 +69,6 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
   }
   const mode = bot.mode as BotMode;
 
-  // Operator-set per-tenant cap on concurrent running bots
-  // (alembic 0016). NULL = no cap (legacy behavior).
-  try {
-    await assertCanStartBot(tenant);
-  } catch (e) {
-    if (e instanceof LimitExceededError) return limitExceededResponse(e);
-    throw e;
-  }
-
   // Re-validate required secrets for this mode. The user could
   // have deleted a secret since bot creation; without this, /start
   // would silently start a bot that crashes on first tick. 422
@@ -102,29 +94,43 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
 
   // Atomic claim: flip isRunning false→true (with a placeholder
   // containerId='claiming') in a single SQL statement. Two
-  // concurrent /start requests would both pass the read above, but
-  // only one can win this UPDATE — the other gets 0 rows back and
-  // returns 409 instead of starting a duplicate container.
+  // concurrent /start requests for THIS bot would both pass the read
+  // above, but only one can win this UPDATE — the other gets 0 rows
+  // back and returns 409 instead of starting a duplicate container.
+  //
+  // It runs inside `reserveBotStart`, in the same transaction as the
+  // operator's max_active_bots count (alembic 0016; NULL = no cap) and
+  // under the tenant-row lock. That is what makes the cap hold across
+  // two DIFFERENT bots of the same tenant starting at once: the second
+  // count waits for the lock and then sees this claim.
   //
   // The claim placeholder is overwritten by decryptAndStart's
   // final UPDATE with the real container_id; if that fails (or
   // start fails inside the helper), we revert here so the row
   // returns to startable.
-  const claimed = await db
-    .update(tenantBots)
-    .set({
-      isRunning: true,
-      containerId: "claiming",
-      lastStartedAt: sql`now()`,
-    })
-    .where(
-      and(
-        eq(tenantBots.id, botId),
-        eq(tenantBots.tenantId, tenant.id),
-        eq(tenantBots.isRunning, false),
-      ),
-    )
-    .returning({ id: tenantBots.id });
+  let claimed: { id: string }[];
+  try {
+    claimed = await reserveBotStart(tenant, (tx) =>
+      tx
+        .update(tenantBots)
+        .set({
+          isRunning: true,
+          containerId: CLAIM_PLACEHOLDER,
+          lastStartedAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(tenantBots.id, botId),
+            eq(tenantBots.tenantId, tenant.id),
+            eq(tenantBots.isRunning, false),
+          ),
+        )
+        .returning({ id: tenantBots.id }),
+    );
+  } catch (e) {
+    if (e instanceof LimitExceededError) return limitExceededResponse(e);
+    throw e;
+  }
   if (claimed.length === 0) {
     return Response.json(
       { error: "bot is being started by another request" },
@@ -132,22 +138,31 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     );
   }
 
-  const result = await decryptAndStart({
-    req,
-    tenant,
-    botId,
-    mode,
-  });
-  if (result.kind === "response") {
-    // Revert the claim so the row is startable again.
-    await db
-      .update(tenantBots)
-      .set({ isRunning: false, containerId: null })
-      .where(
-        and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
-      )
-      .catch(() => undefined);
-    return result.response;
+  // On ANY failure — returned or thrown — revert the claim so the row
+  // is startable again and the cap slot is released. A throw (Redis
+  // down in the unlock check, a DB error on the secrets read) used to
+  // skip the revert and leave the row "running" with no container.
+  // decryptAndStart only throws before it spawns anything.
+  let started = false;
+  try {
+    const result = await decryptAndStart({
+      req,
+      tenant,
+      botId,
+      mode,
+    });
+    if (result.kind === "response") return result.response;
+    started = true;
+    return Response.json({ bot: result.bot });
+  } finally {
+    if (!started) {
+      await db
+        .update(tenantBots)
+        .set({ isRunning: false, containerId: null })
+        .where(
+          and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+        )
+        .catch(() => undefined);
+    }
   }
-  return Response.json({ bot: result.bot });
 }

@@ -151,6 +151,9 @@ async def test_get_daily_pnl_failure_does_not_raise(monkeypatch):
     control = MagicMock()
     control.get_daily_pnl = AsyncMock(side_effect=RuntimeError("redis down"))
     control.set_daily_pnl = AsyncMock()
+    # Kill-switch flag readable and unset: an unreadable one now blocks
+    # opens (fail closed), which is not what this test is about.
+    control.is_kill_switch_active = AsyncMock(return_value=None)
     pm = PortfolioManager(exchange=MagicMock(), control=control)
 
     # Must not raise

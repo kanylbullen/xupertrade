@@ -2,11 +2,16 @@
  * Tests for POST /api/tenant/me/bots (create-and-start).
  *
  * analysis-2026-09-15 § 5, Medium: this route spawns a container via
- * `decryptAndStart`, so it is a *start* — but it never called
- * `assertCanStartBot`, unlike POST /[id]/start. The operator's
- * `max_active_bots` cap therefore depended on which button the tenant
- * pressed. The row-count gates already in the route count bot ROWS,
- * not running ones, so they never covered it.
+ * `decryptAndStart`, so it is a *start* — but it never consulted the
+ * operator's `max_active_bots` cap, unlike POST /[id]/start. The
+ * row-count gates already in the route count bot ROWS, not running
+ * ones, so they never covered it.
+ *
+ * Post-merge review of #168, Low: checking the cap was not enough. The
+ * row only became countable (`is_running`) after Argon2id and the
+ * container spawn, long after the cap's lock was released, so two
+ * concurrent creates both passed a cap of 1. The row is now inserted
+ * already-running inside `reserveBotStart`'s locked transaction.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +24,7 @@ vi.mock("@/lib/admin/limits", async () => {
   const actual = await vi.importActual<
     typeof import("@/lib/admin/limits")
   >("@/lib/admin/limits");
-  return { ...actual, assertCanStartBot: vi.fn() };
+  return { ...actual, reserveBotStart: vi.fn() };
 });
 
 // db.select() chain: the route's existing-bot count ends on
@@ -51,8 +56,9 @@ vi.mock("../_decrypt-and-start", () => ({
 }));
 
 import {
-  assertCanStartBot,
   LimitExceededError,
+  reserveBotStart,
+  type DbTx,
 } from "@/lib/admin/limits";
 import { db } from "@/lib/db";
 import { requireTenant } from "@/lib/tenant";
@@ -61,7 +67,7 @@ import { decryptAndStart } from "../_decrypt-and-start";
 import { POST } from "../route";
 
 const mockedRequireTenant = vi.mocked(requireTenant);
-const mockedAssertCanStartBot = vi.mocked(assertCanStartBot);
+const mockedReserve = vi.mocked(reserveBotStart);
 const mockedDecryptAndStart = vi.mocked(decryptAndStart);
 const mockedInsert = vi.mocked(db.insert);
 
@@ -83,6 +89,14 @@ function makeTenant(maxActiveBots: number | null = null) {
   } as Awaited<ReturnType<typeof requireTenant>>;
 }
 
+/** Run the route's reserve callback against a tx that inserts through
+ *  the mocked `db.insert`, as the real transaction would. */
+function reserveRunsCallback() {
+  mockedReserve.mockImplementationOnce(async (_tenant, reserve) =>
+    reserve({ insert: db.insert } as unknown as DbTx),
+  );
+}
+
 afterEach(() => {
   vi.clearAllMocks();
 });
@@ -91,7 +105,7 @@ describe("POST /api/tenant/me/bots", () => {
   it("returns 409 and starts nothing when max_active_bots is reached", async () => {
     mockedRequireTenant.mockResolvedValueOnce(makeTenant(1));
     selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
-    mockedAssertCanStartBot.mockRejectedValueOnce(
+    mockedReserve.mockRejectedValueOnce(
       new LimitExceededError("bots_over_cap", 1, 1),
     );
 
@@ -103,27 +117,98 @@ describe("POST /api/tenant/me/bots", () => {
       current: 1,
       limit: 1,
     });
-    // The cap is checked BEFORE the row reservation, so no row is
-    // created and then rolled back.
+    // The insert only happens inside the reservation, which refused.
     expect(mockedInsert).not.toHaveBeenCalled();
     expect(mockedDecryptAndStart).not.toHaveBeenCalled();
   });
 
-  it("proceeds to start when the cap allows it", async () => {
+  it("inserts the row already counted as running, inside the reservation", async () => {
     mockedRequireTenant.mockResolvedValueOnce(makeTenant(3));
     selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
-    mockedAssertCanStartBot.mockResolvedValueOnce(undefined);
+    reserveRunsCallback();
     mockedDecryptAndStart.mockResolvedValueOnce({
-      kind: "bot",
+      kind: "ok",
       bot: { id: "bot-1" },
     } as never);
 
     const res = await POST(makeReq());
     expect(res.status).toBe(200);
-    expect(mockedAssertCanStartBot).toHaveBeenCalledWith(
+    expect(mockedReserve).toHaveBeenCalledWith(
       expect.objectContaining({ id: TENANT_ID, maxActiveBots: 3 }),
+      expect.any(Function),
+    );
+    // Countable from the moment the cap passes — not from when
+    // decryptAndStart finally writes is_running.
+    expect(insertChain.values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: TENANT_ID,
+        mode: "paper",
+        isRunning: true,
+        containerId: "claiming",
+      }),
     );
     expect(mockedDecryptAndStart).toHaveBeenCalledOnce();
+  });
+
+  it("deletes the reserved row when the start fails", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(3));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    reserveRunsCallback();
+    mockedDecryptAndStart.mockResolvedValueOnce({
+      kind: "response",
+      response: Response.json({ error: "locked" }, { status: 401 }),
+    });
+
+    const res = await POST(makeReq());
+    expect(res.status).toBe(401);
+    expect(db.delete).toHaveBeenCalledOnce();
+  });
+
+  it("deletes the reserved row when decryptAndStart THROWS, and rethrows", async () => {
+    // Review of #171, item 4: the row is inserted already counted as
+    // running, and only a returned error response used to clean it up.
+    // A throw (Redis down in the unlock check, a DB error on the
+    // secrets read) left a row holding a cap slot with no container —
+    // a cap-1 tenant stayed blocked until someone deleted it by hand.
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(1));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    reserveRunsCallback();
+    const boom = new Error("ECONNREFUSED redis");
+    mockedDecryptAndStart.mockRejectedValueOnce(boom);
+
+    await expect(POST(makeReq())).rejects.toBe(boom);
+    expect(db.delete).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the row when the start succeeds", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(1));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    reserveRunsCallback();
+    mockedDecryptAndStart.mockResolvedValueOnce({
+      kind: "ok",
+      bot: { id: "bot-1" },
+    } as never);
+
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    expect(db.delete).not.toHaveBeenCalled();
+  });
+
+  it("maps a unique violation wrapped by drizzle to 409", async () => {
+    // drizzle-orm >= 0.44 wraps driver errors in DrizzleQueryError and
+    // keeps the postgres error (with its SQLSTATE) on `.cause`.
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(null));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    mockedReserve.mockRejectedValueOnce(
+      Object.assign(new Error("Failed query: insert into tenant_bots"), {
+        cause: Object.assign(new Error("duplicate key"), { code: "23505" }),
+      }),
+    );
+
+    const res = await POST(makeReq());
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("already exists");
+    expect(mockedDecryptAndStart).not.toHaveBeenCalled();
   });
 
   it("rejects an invalid mode before touching the cap", async () => {
@@ -131,6 +216,6 @@ describe("POST /api/tenant/me/bots", () => {
 
     const res = await POST(makeReq("garbage"));
     expect(res.status).toBe(400);
-    expect(mockedAssertCanStartBot).not.toHaveBeenCalled();
+    expect(mockedReserve).not.toHaveBeenCalled();
   });
 });

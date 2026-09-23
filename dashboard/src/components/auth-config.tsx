@@ -51,8 +51,11 @@ export function AuthConfig() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as Config;
       setCfg(data);
-      // "locked" isn't settable; pre-select "basic" so the operator's
-      // next click is the one that gets them back in.
+      // "locked" isn't settable, and this form can't fix it anyway:
+      // proxy.ts withholds /options and /api/auth/configure while
+      // locked. Recovery happens on the host (login page's notice,
+      // CLAUDE.md § 3). Map it to "basic" only so the picker has a
+      // value if the mode flips while the page is open.
       setMode(data.mode === "locked" ? "basic" : data.mode);
       setOidcIssuer(data.oidc_issuer || "");
       setOidcClientId(data.oidc_client_id || "");
@@ -143,17 +146,6 @@ export function AuthConfig() {
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
-        {cfg.mode === "locked" && (
-          <div
-            role="alert"
-            data-testid="auth-locked-banner"
-            className="rounded-md border border-red-500/50 bg-red-500/10 px-3 py-2 text-sm text-red-200"
-          >
-            The stored auth mode is missing, so the dashboard is refusing
-            to serve pages rather than falling back to open access.
-            Restore Redis from its snapshot, or save a mode below.
-          </div>
-        )}
         {cfg.phase_managed && (
           <div
             role="alert"

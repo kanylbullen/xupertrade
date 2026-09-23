@@ -27,18 +27,34 @@ export type RateLimitResult =
  *
  * analysis-2026-09-15 § 5, Low. Failing open is the right default for
  * a rate limit: it is a nuisance control, and a Redis hiccup should
- * not lock out legitimate users. `tenant-unlock` is not that. It is
- * the only thing standing in front of an Argon2id derivation that
- * decrypts the tenant's HyperLiquid key, so its failure mode is
- * "unlimited offline-speed passphrase guessing", and an attacker who
- * can make the pipeline fail — memory pressure, an eviction race, a
- * cluster slot bounce — gets exactly that by making it fail. A locked
- * -out tenant retries in a minute; a guessed passphrase is permanent.
+ * not lock out legitimate users. These scopes are not that:
+ *
+ *  - `tenant-unlock` is the only thing standing in front of an
+ *    Argon2id derivation that decrypts the tenant's HyperLiquid key,
+ *    so its failure mode is "unlimited passphrase guessing", and an
+ *    attacker who can make the pipeline fail — memory pressure, an
+ *    eviction race, a cluster slot bounce — gets exactly that by
+ *    making it fail.
+ *  - `auth-login-ip` / `auth-login-user` guard password guessing
+ *    against the dashboard's basic-auth user. Failing closed costs
+ *    nothing real here: a sign-in needs Redis anyway (auth config,
+ *    session secret), so when the counter is unreadable a legitimate
+ *    login would most likely fail a step later regardless.
+ *
+ * The cost of a fail-closed deny is honest but blunt: the 429 carries
+ * `Retry-After` = the full window (15 minutes for these scopes), not
+ * the moment Redis recovers — though a retry succeeds as soon as the
+ * counter can be read again. A denied sign-in or unlock is recoverable;
+ * a guessed passphrase or password is not.
  *
  * Add to this set only where the thing being limited is expensive or
  * irreversible, not merely annoying.
  */
-const FAIL_CLOSED_SCOPES = new Set(["tenant-unlock"]);
+const FAIL_CLOSED_SCOPES = new Set([
+  "tenant-unlock",
+  "auth-login-ip",
+  "auth-login-user",
+]);
 
 function unreadable(
   scope: string,

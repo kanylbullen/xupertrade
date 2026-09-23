@@ -217,13 +217,87 @@ only for the `mainnet` bot and `false` for `paper`/`testnet`
   reach the container over the compose network, not the published port.
 - **Caddy reverse proxy:** `:80` (HTTP→HTTPS redirect), `:443` (HTTPS), `:443/udp` (HTTP/3). Admin API on `:2019` (internal Docker network only).
 - **HTTPS:** `https://$DEPLOY_HOST/` — Let's Encrypt cert auto-renewed by Caddy via Cloudflare DNS-01.
-- **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis.
+- **Auth:** username + password (basic) or OIDC. Configured under Options → Authentication. Bcrypt hashes + HMAC-signed session cookies stored in Redis. If `/login` says **Authentication is locked**, see "Dashboard auth recovery" below.
+
+### Dashboard auth recovery (`locked`)
+
+`lib/auth-config.ts:resolveMode` answers `locked` when it can't tell how
+the installation authenticates: the stored `dashboard:auth:mode` is gone
+(Redis flushed, or the `redisdata` volume removed) and no basic user or
+OIDC config survived, or a stored/env mode is not a real mode. Every
+page redirects to `/login`, which explains this instead of rendering
+data. **Options → Authentication cannot fix it** — `/options` and
+`/api/auth/configure` sit behind the same lock — and there is **no env
+var for a basic user**: `getAuthConfig` reads only `AUTH_MODE` and
+`OIDC_*` from env. If `AUTH_MODE` in Phase is itself a typo, fix it
+there first — env wins over everything below. Otherwise any one of
+these gets you back in:
+
+1. **Restore Redis** from its `dump.rdb` (in the `redisdata` volume).
+   Brings back everything else Redis held too — session secret, per-bot
+   API keys, disabled-strategy sets — so prefer it when a snapshot
+   exists.
+2. **OIDC from Phase:** set `AUTH_MODE=oidc`, `OIDC_ISSUER`,
+   `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` in Phase, then recreate the
+   dashboard (`phase run -- docker compose up -d --force-recreate
+   dashboard`). `lib/phase-sync.ts` copies them into Redis on boot.
+3. **Basic user from the host:**
+   ```bash
+   ssh -t -i ~/.ssh/hypertrade root@$DEPLOY_HOST /opt/hypertrade/scripts/set-basic-auth.sh
+   ```
+   Prompts for a username (defaulting to the operator tenant's
+   `authentik_sub` — a basic username *is* the tenant lookup key, so any
+   other name signs in as a new, empty, non-operator tenant) and a
+   password, hashes it with the dashboard's own bcrypt inside the
+   dashboard container, and writes `dashboard:auth:basic:{user,hash}`
+   (plus `dashboard:auth:mode=basic` if the stored mode is missing or
+   unreadable). Asks before replacing a different existing basic user,
+   and warns — offering to switch to `basic` — if the stored mode is
+   `disabled`. Never prints the password or hash; no restart needed.
+   Also the way to reset a forgotten basic password.
+
+**A fresh install boots `locked` too.** The resolver only answers
+`disabled` for a database with no tenants, and that never happens:
+alembic 0011 refuses to run without the operator tenant row, and before
+migrations the tenant probe fails, which counts as "tenants exist". So
+configure sign-in for the first boot the same way — `AUTH_MODE=oidc`
+plus the three `OIDC_*` values in Phase before the first `up` (sign in
+with the identity whose `sub` equals the operator row's
+`authentik_sub`), or path 3 once the stack is running. `.env.example`
+lists the variables.
+
+**Don't use `AUTH_MODE=disabled` as the way out.** It opens every page,
+the operator tenant's trades and positions included, to anyone who can
+reach the dashboard for as long as it is set. Since #171 it is
+env-only — `phase-sync.ts` never copies `disabled` into Redis — so it
+stops applying once removed, but it is not a recovery path, and not a
+bootstrap one either: Options → Authentication needs a signed-in
+operator, and `disabled` signs nobody in.
+
+**Check for a leftover stored `disabled`.** Builds before #171 copied
+*any* `AUTH_MODE` into Redis on every boot, so an install that ever
+booted with `AUTH_MODE=disabled` still has `dashboard:auth:mode=disabled`
+stored — and stays open after the env var is gone:
+
+```bash
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "docker exec hypertrade-redis-1 redis-cli GET dashboard:auth:mode"
+```
+
+`basic` or `oidc` is fine. If it says `disabled` and that is not a
+deliberate choice, the dashboard is open to anyone right now: make sure
+a way to sign in exists first (a basic user — `scripts/set-basic-auth.sh`
+offers the switch itself — or the `OIDC_*` config), then
+`docker exec hypertrade-redis-1 redis-cli SET dashboard:auth:mode basic`
+(or `oidc`). Takes effect within 30 seconds. Setting it without a
+working sign-in path locks everyone out, operator included.
 
 ### Secrets management — Phase
 
 **Source of truth: a self-hosted [Phase](https://phase.dev) instance.**
 All runtime secrets (HL keys, Telegram token+chat, API_KEY, public URL,
-Caddy host, vault tracking address, mainnet allowlist) live there in the
+Caddy host, vault tracking address, mainnet allowlist, dashboard sign-in
+`AUTH_MODE` + `OIDC_*`) live there in the
 `hypertrade` app's `Development` env. The host has the `phase` CLI
 installed + authenticated via service token. **No `.env` file on the
 host** — anything that previously lived there is now in Phase.
@@ -721,6 +795,15 @@ stay in **Done** with the commit hash so the agent has institutional memory.
 
 #### Full-stack analysis (2026-09-15)
 - [x] Full-stack analysis 2026-09-15 — live production state (operator tenant, all three modes), strategy performance since the 2026-05-29 evaluation, a money-path review of the bot engine, a tenant-isolation review of the dashboard, local quality gates, and documentation drift. Read-only; nothing on the server, in Redis, or in the DB was changed. Surfaced the reconcile read-failure bug (now Open — Critical above), the engine/dashboard hardening items (now Open — Medium above), and this file's drift (fixed by this PR). Report: `bot/reports/analysis-2026-09-15.md` (PR #163).
+
+#### HyperLiquid exchange-wrapper hardening (2026-09-23, analysis-2026-09-15 § 4)
+- [x] Wrapper reports the filled size: `Order.size` from the HL wrapper is the fill's `totalSz` (a readable 0 is REJECTED), else the szDecimals-rounded size that was submitted, on both the immediate-fill and the timeout-poll path — never the unrounded request. Runner consumption (`size = order.size` in `_execute_signal`) is tracked in the engine-safety PR; until it lands the 247× "BTC size mismatch" drift continues, so the Open — Medium `Order.size` sub-bullet stays open. — (PR #<n>)
+- [x] HL-exchange construction fetches `meta` and `spotMeta` itself inside the init retry loop, validates both, and passes them into the SDK `Info` and `Exchange` constructors; an empty, failed or non-JSON answer is retried and then raises, instead of booting with an empty szDecimals map that rounded every coin to 4 dp. `place_order` refuses a coin with no szDecimals rather than guessing. The `/api/hyperliquid/diagnostic` endpoint builds the exchange in a worker thread so that blocking construction can't freeze the event loop. — (PR #<n>)
+- [x] HL read retry uses the `_is_retryable_server_error` predicate (transient network errors including `requests`' own ConnectionError/Timeout, malformed 200s, and HTTP 408/429/500/502/503/504 read from `status_code`, with a code-less 4xx body kept as its status on reads) instead of an exception-type tuple; other 4xx/5xx fail on the first attempt. Writes still never retry. — (PR #<n>)
+- [x] A non-JSON 200 on an HL read (the SDK returns `{"error": …}` as the answer) is `_MalformedResponseError`, retried like a 502 and then `ExchangeReadError` — `get_positions`/`get_balance` no longer read an error page as a flat book and $0. — (PR #<n>)
+- [x] An order POST whose outcome is unknown — our deadline, the SDK's own `requests` timeout, a dropped connection, a 504 — gets the audit-H2 delayed-fill poll instead of being reported REJECTED while HL may have filled it. — (PR #<n>)
+- [x] `cancel_order` calls the SDK as `cancel(coin, oid)` — it passed only the id, so every call was a TypeError swallowed as False — and returns True only when HL's per-order status is `"success"`. `Exchange.cancel_order` now takes the symbol. — (PR #<n>)
+- [x] An order HL leaves resting is cancelled with a log line and reported CANCELLED, or PENDING with an error log when the cancel is not confirmed. Unreachable while every order is IOC market; it is the guard for the first GTC limit order. Follow-up for whoever adds limit orders: a GTC order that fills partly before resting has that part booked nowhere (see `_cancel_resting`). — (PR #<n>)
 
 ---
 

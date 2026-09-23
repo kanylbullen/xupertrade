@@ -3,13 +3,14 @@
 import asyncio
 import logging
 import signal
+import sys
 
 from hypertrade.api import start_api_server
 from hypertrade.config import settings
 from hypertrade.data.feed import HyperLiquidWebSocket
 from hypertrade.db.repo import Repository
 from hypertrade.engine.control import BotControl
-from hypertrade.engine.runner import EngineRunner
+from hypertrade.engine.runner import EngineRunner, StartupRefused
 from hypertrade.notify.telegram import TelegramNotifier
 from hypertrade.events.bus import EventBus, NoOpEventBus
 from hypertrade.exchange.paper import PaperExchange
@@ -19,6 +20,7 @@ from hypertrade.engine.strategy_allowlist import (
     parse_tenant_allowlist,
 )
 from hypertrade.strategies.registry import get_strategy, list_strategies, load_all
+from hypertrade.strategy_cap import enforce_strategy_cap
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +35,36 @@ _shutdown = asyncio.Event()
 def _handle_signal(*_: object) -> None:
     logger.info("Shutdown signal received")
     _shutdown.set()
+
+
+async def _connect_repo() -> Repository | None:
+    """Connect the database, or decide the bot must not trade.
+
+    Paper may still run without persistence. Testnet and mainnet may
+    not: without a repo every engine guard that reads the DB — flip
+    detection, same-side dedup, the coin/family gate, the
+    `MAX_TOTAL_EXPOSURE_USD` cap and the post-trade parity check —
+    silently turns into "allow" (`bot/reports/analysis-2026-09-15.md`
+    § 4). Refusing the boot exits non-zero, so the container's restart
+    policy retries until the database is back.
+    """
+    try:
+        repo = Repository()
+        await repo.init_db()
+    except Exception as e:
+        if settings.is_paper:
+            logger.warning("Database unavailable — running without persistence")
+            return None
+        logger.critical(
+            "Database unavailable in %s mode — refusing to trade without "
+            "persistence (%s). Exiting so the container restarts.",
+            settings.exchange_mode.upper(), type(e).__name__,
+            exc_info=True,
+        )
+        raise StartupRefused(
+            f"database unavailable in {settings.exchange_mode} mode"
+        ) from e
+    return repo
 
 
 async def main() -> None:
@@ -62,14 +94,8 @@ async def main() -> None:
             "Must be one of: paper, testnet, mainnet"
         )
 
-    # Set up DB
-    repo: Repository | None = None
-    try:
-        repo = Repository()
-        await repo.init_db()
-    except Exception:
-        logger.warning("Database unavailable — running without persistence")
-        repo = None
+    # Set up DB (testnet/mainnet refuse to boot without one)
+    repo = await _connect_repo()
 
     # The startup reconcile used to run HERE, before the event bus,
     # BotControl and the portfolio existed — so it had no pause gate
@@ -139,6 +165,28 @@ async def main() -> None:
             "Tenant allowlist applied: %d/%d strategies remain: %s",
             len(allowed_names), before, allowed_names,
         )
+
+    # Per-tenant cap on enabled strategies (alembic 0016). The dashboard
+    # only checks it when a tenant switches a strategy ON; without this
+    # a fresh bot booted with every allowlisted strategy enabled. Trims
+    # FLAT surplus strategies into the Redis `disabled` set before the
+    # first tick; a strategy holding an open position is never trimmed
+    # (the tick loop skips disabled strategies, so it would be left with
+    # no SL/TP/exit). Unset env = no cap; positions unreadable = no
+    # trimming; malformed value or no Redis fails closed for flat ones.
+    # On mainnet the tenant's opt-in set decides which flat ones stay —
+    # the same condition under which the runner applies it.
+    allowed_names = await enforce_strategy_cap(
+        allowed_names,
+        settings.tenant_max_active_strategies,
+        control,
+        event_bus,
+        repo,
+        settings.exchange_mode,
+        mainnet_tenant_id=(
+            settings.tenant_id if settings.is_mainnet and settings.tenant_id else None
+        ),
+    )
     strategies = [get_strategy(name) for name in allowed_names]
     logger.info("Active strategies: %s", [s.name for s in strategies])
 
@@ -231,8 +279,14 @@ async def main() -> None:
     per_coin_leverage: dict[str, int] = {}
     for s in strategies:
         per_coin_leverage[s.symbol] = max(per_coin_leverage.get(s.symbol, 1), s.leverage)
+    # What the exchange accepted, handed to the runner: an OPEN whose
+    # leverage push fails is aborted unless the exchange is known to hold
+    # the target already, and a boot-time push counts.
+    pushed_leverage: dict[str, int] = {}
     for coin, lev in per_coin_leverage.items():
         ok = await exchange.update_leverage(coin, lev, is_cross=True)
+        if ok:
+            pushed_leverage[coin] = lev
         logger.info(
             "Configured %s leverage=%dx (%s)",
             coin,
@@ -257,6 +311,7 @@ async def main() -> None:
         repo=repo,
         event_bus=event_bus,
         control=control,
+        pushed_leverage=pushed_leverage,
     )
 
     # Restore strategy state from DB (positions open before restart)
@@ -299,7 +354,11 @@ async def main() -> None:
 def run() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except StartupRefused as e:
+        logger.critical("Startup refused: %s — exiting with status 1", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

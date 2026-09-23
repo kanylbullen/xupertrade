@@ -120,7 +120,9 @@ class Settings(BaseSettings):
     # Risk management
     max_position_size_usd: float = 1_000.0  # margin per single position
     max_daily_loss_usd: float = 500.0
-    # Total open margin (sum across all open positions) cap. New opens are
+    # Total open NOTIONAL cap: the sum of `size × entry_price` over every
+    # open position plus the new order's `size × price`. Leverage does not
+    # divide it — a $1k-margin position at 5x counts as $5k. New opens are
     # blocked if going through would cross this. 0 disables the cap.
     max_total_exposure_usd: float = 5_000.0
     kill_switch: bool = False
@@ -159,6 +161,17 @@ class Settings(BaseSettings):
     # InsufficientPrivilegeError and fell through a fail-open `except`,
     # so the allowlist was never actually enforced.
     tenant_allowed_strategies: str = ""
+
+    # Per-tenant operator-set cap on concurrently enabled strategies
+    # (`tenants.max_active_strategies`), injected as a decimal string
+    # by the dashboard orchestrator. Empty = no cap (NULL in the DB);
+    # "0" is a real cap. Applied once at boot by
+    # `hypertrade/strategy_cap.py`, which disables the FLAT surplus via
+    # the Redis `disabled` set (a strategy holding an open position is
+    # never trimmed). Kept as a string rather than `int | None`
+    # so a malformed value fails CLOSED in that module instead of
+    # crashing Settings on load.
+    tenant_max_active_strategies: str = ""
 
     # Expiry dates for this tenant's HL private-key secrets, injected
     # by the dashboard orchestrator as a JSON object
