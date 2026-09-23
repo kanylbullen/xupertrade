@@ -72,6 +72,8 @@ from hypertrade.strategies.registry import register
 class QullamagiBreakoutStrategy(Strategy):
     name = "qullamagi_breakout"
     family = "qullamagi_breakout"
+    # Not position state: bars flat since the last exit (re-entry cooldown).
+    cooldown_attrs = ("_bars_since_flat",)
     symbol = "ETH"
     timeframe = "1h"
     leverage = 1

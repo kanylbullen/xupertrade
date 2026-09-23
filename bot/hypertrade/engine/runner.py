@@ -457,9 +457,18 @@ class EngineRunner:
         # this, a restart inside the cooldown window would reset the
         # counter and let the strategy immediately re-enter on the same
         # stale bar.
+        #
+        # A strategy with no open DB row is flat — the DB is the source of
+        # truth — so only the snapshot's cooldown fields are restored,
+        # never its position flags. The snapshot is written after OPENs
+        # too, and a position closed outside the strategy's own signal
+        # left it saying "in position": on 2026-09-23 seven of fifteen
+        # testnet strategies restored as holding positions that had been
+        # closed days earlier, and never traded again.
         if self.control:
+            open_names = {p.strategy_name for p in positions}
             for strat in self.strategies:
-                if strat.name in {p.strategy_name for p in positions}:
+                if strat.name in open_names:
                     continue  # already restored from DB above
                 try:
                     redis_state = await self.control.load_strategy_state(strat.name)
@@ -470,22 +479,29 @@ class EngineRunner:
                     continue
                 if not redis_state:
                     continue
-                # Strategy is flat but had persisted cooldown state.
-                # restore_from_json supports the "side defensively reset
-                # if not long" path — pass the sentinel "flat" so any
-                # strategy that doesn't expect non-{long,short} side
-                # falls back cleanly.
                 try:
-                    strat.restore_from_json("flat", 0.0, redis_state)
+                    forced_flat = strat.restore_cooldown_only(redis_state)
+                except Exception:
+                    logger.exception(
+                        "restore_cooldown_only failed for %s redis state %s "
+                        "(position state cleared, cooldown may be lost)",
+                        strat.name, redis_state,
+                    )
+                    continue
+                if not forced_flat:
                     logger.info(
                         "Restored %s cooldown state from Redis: %s",
                         strat.name, redis_state,
                     )
-                except Exception:
-                    logger.exception(
-                        "restore_from_json failed for %s redis state %s",
-                        strat.name, redis_state,
-                    )
+                    continue
+                logger.info(
+                    "%s: snapshot said in position but no open DB row — "
+                    "starting flat (discarded snapshot: %s)",
+                    strat.name, redis_state,
+                )
+                # Rewrite the snapshot so the next restart does not have
+                # to discard it again.
+                await self._save_strategy_snapshot(strat)
 
         if positions:
             logger.info(
@@ -577,7 +593,9 @@ class EngineRunner:
         to `portfolio.record_pnl`, so the `MAX_DAILY_LOSS_USD` kill
         switch never saw the losses it exists to stop.
         """
-        self._reset_strategy_state(strategy_name)
+        await self._reset_strategy_state(
+            strategy_name, why="reconcile closed its DB position",
+        )
         if pnl is None:
             return
         try:
@@ -587,24 +605,46 @@ class EngineRunner:
                 "Reconcile: failed to record PnL %.4f for %s", pnl, strategy_name,
             )
 
-    def _reset_strategy_state(self, strategy_name: str) -> None:
-        """Called by reconcile when it closes a DB position outside the
-        normal signal path. Without this, the strategy keeps _in_position=True
-        in RAM while DB shows closed → no re-entry possible, and on next
-        restart the strategy reads no open position → re-enters duplicately.
+    async def _reset_strategy_state(self, strategy_name: str, why: str) -> None:
+        """Reset a strategy to flat, in memory AND in its Redis snapshot.
+
+        Called whenever the DB says the strategy holds nothing while the
+        strategy may believe otherwise: reconcile closed its row, flat-all,
+        a flip that ended flat, a CLOSE ignored for want of an open row.
+        Without the in-memory reset the strategy keeps _in_position=True
+        while the DB shows closed → no re-entry possible. Without the
+        snapshot write, the Redis snapshot keeps the state of its last
+        executed signal — an OPEN — and the next restart restores it as in
+        position (2026-09-23; startup now discards position flags anyway,
+        this keeps the snapshot honest in between).
         """
         for s in self.strategies:
             if s.name == strategy_name:
                 try:
                     s.reset_state()
-                    logger.info(
-                        "Reset in-memory state for %s to flat (its DB "
-                        "position was closed outside its own signal)",
-                        strategy_name,
-                    )
                 except Exception:
                     logger.exception("reset_state failed for %s", strategy_name)
+                    return
+                logger.info(
+                    "Reset %s to flat in memory and in its Redis snapshot "
+                    "(%s)", strategy_name, why,
+                )
+                await self._save_strategy_snapshot(s)
                 return
+
+    async def _save_strategy_snapshot(self, strat: Strategy) -> None:
+        """Write the strategy's `export_state()` to its Redis snapshot; a
+        None export deletes the snapshot. Never raises."""
+        if not self.control:
+            return
+        try:
+            await self.control.save_strategy_state(
+                strat.name, strat.export_state(),
+            )
+        except Exception:
+            logger.exception(
+                "[%s] save_strategy_state failed (non-fatal)", strat.name,
+            )
 
     async def tick(self) -> None:
         """Run one cycle: fetch data, evaluate strategies, execute signals."""
@@ -1082,6 +1122,12 @@ class EngineRunner:
                         rec.strategy_name, rec.side, pos.symbol,
                         filled_price, rec_entry, rec_size, share * 100, rec_pnl,
                     )
+                    # The strategy did not ask for this close; without the
+                    # reset it keeps believing in the position and never
+                    # re-enters.
+                    await self._reset_strategy_state(
+                        rec.strategy_name, why="flat-all closed its DB position",
+                    )
                 closed += 1
             except Exception:
                 logger.exception("Failed to close position %s", pos.symbol)
@@ -1259,7 +1305,11 @@ class EngineRunner:
                 signal, existing, current_price, leverage, bar_time,
                 why="(the open half is refused by a risk limit)",
             ):
-                self._reset_strategy_state(signal.strategy_name)
+                await self._reset_strategy_state(
+                    signal.strategy_name,
+                    why="a flip closed its position but a risk limit "
+                        "refused the open",
+                )
                 await self._note_refusal(
                     signal, "risk limit", bar_time,
                     f"Risk limit breached — closed the {existing.side} "
@@ -1580,21 +1630,16 @@ class EngineRunner:
         # cooldown-after-close gap (audit M6 / PR #19 review): position
         # table state_json only persists during in-position windows;
         # this Redis snapshot persists post-close cooldown so a restart
-        # inside the cooldown window can't bypass the re-entry block.
-        if self.control:
-            strat = next(
-                (s for s in self.strategies if s.name == signal.strategy_name),
-                None,
-            )
-            if strat is not None:
-                try:
-                    snap = strat.export_state()
-                    await self.control.save_strategy_state(strat.name, snap)
-                except Exception:
-                    logger.exception(
-                        "[%s] save_strategy_state failed (non-fatal)",
-                        signal.strategy_name,
-                    )
+        # inside the cooldown window can't bypass the re-entry block. A
+        # close whose export is None deletes the snapshot: skipping that
+        # write left the OPEN-time snapshot behind to be restored as a
+        # live position on the next boot.
+        strat = next(
+            (s for s in self.strategies if s.name == signal.strategy_name),
+            None,
+        )
+        if strat is not None:
+            await self._save_strategy_snapshot(strat)
 
         # Publish events
         if self.event_bus:
@@ -1948,7 +1993,10 @@ class EngineRunner:
         if row is not None and row.side == existing.side:
             self._resync_strategy_to_row(row)
             return f"the {existing.side} is still open; strategy re-synced to it"
-        self._reset_strategy_state(signal.strategy_name)
+        await self._reset_strategy_state(
+            signal.strategy_name,
+            why="its flip-close did not verify but the row is closed",
+        )
         return (
             f"the {existing.side} row is closed but the close did not verify "
             f"cleanly; strategy reset to flat"
@@ -1960,7 +2008,10 @@ class EngineRunner:
         """A flip's close went through but its open did not: the book is
         flat for this strategy, so the strategy is reset to flat instead of
         believing in the side it asked for."""
-        self._reset_strategy_state(signal.strategy_name)
+        await self._reset_strategy_state(
+            signal.strategy_name,
+            why="a flip closed its position but the open failed",
+        )
         message = (
             f"Flip on {signal.symbol}: the old position was closed but the "
             f"new {signal.action.value} failed ({detail}). Flat; strategy "
@@ -2322,6 +2373,11 @@ class EngineRunner:
         exchange position only if DB is unavailable.
 
         Returns None if no position should be closed (logs a warning).
+        When the answer is "there is no position at all", the strategy is
+        also reset to flat, in memory and in its snapshot: it believed it
+        held something, and the DB (or, without a DB, the exchange) is the
+        source of truth. Left alone it kept that belief — and with it the
+        refusal to re-enter — until the next restart restored it again.
         """
         if self.repo:
             db_pos = await self.repo.get_open_position(strategy_name, symbol)
@@ -2329,6 +2385,11 @@ class EngineRunner:
                 logger.warning(
                     "[%s] CLOSE_%s ignored for %s — no open DB position",
                     strategy_name, expected_side.upper(), symbol,
+                )
+                await self._reset_strategy_state(
+                    strategy_name,
+                    why=f"its CLOSE_{expected_side.upper()} {symbol} found "
+                        f"no open DB position",
                 )
                 return None
             if db_pos.side != expected_side:
@@ -2381,6 +2442,11 @@ class EngineRunner:
             logger.warning(
                 "[%s] CLOSE_%s ignored for %s — no matching exchange position",
                 strategy_name, expected_side.upper(), symbol,
+            )
+            await self._reset_strategy_state(
+                strategy_name,
+                why=f"its CLOSE_{expected_side.upper()} {symbol} found no "
+                    f"matching exchange position (no DB)",
             )
             return None
         return ex_pos.size

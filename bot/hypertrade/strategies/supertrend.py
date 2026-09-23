@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 class SuperTrendStrategy(Strategy):
     name = "supertrend"
     family = "supertrend"  # SuperTrend variants: supertrend, hash_supertrend, pivot_supertrend
+    # Not position state: time of the last entry (min bars between entries).
+    cooldown_attrs = ("_last_entry_time",)
     symbol = "BTC"
     timeframe = "1d"
     leverage = 1

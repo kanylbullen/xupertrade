@@ -306,13 +306,22 @@ class BotControl:
     async def save_strategy_state(
         self, strategy_name: str, state: dict | None,
     ) -> None:
-        if self._redis is None or not state:
+        """Store the strategy's snapshot; an empty state DELETES it.
+
+        `export_state()` returns None for a flat strategy with nothing to
+        carry over. Skipping the write on None used to leave the last
+        OPEN-time snapshot in place, so the next restart restored a flat
+        strategy as if it still held that position (2026-09-23).
+        """
+        if self._redis is None:
             return
         import json
+        key = self._strategy_state_key(strategy_name)
         try:
-            await self._redis.set(
-                self._strategy_state_key(strategy_name), json.dumps(state),
-            )
+            if state:
+                await self._redis.set(key, json.dumps(state))
+            else:
+                await self._redis.delete(key)
         except Exception:
             logger.exception("save_strategy_state failed for %s", strategy_name)
 

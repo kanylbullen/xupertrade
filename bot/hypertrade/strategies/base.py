@@ -27,6 +27,14 @@ class Strategy(ABC):
     # Bot sets HyperLiquid leverage per coin to the max across strategies
     # touching that coin. Can be overridden at runtime via dashboard.
     leverage: int = 1
+    # The split between position state and cooldown state. Attributes named
+    # here are NOT position state: re-entry cooldown counters and the
+    # bar-tracking baselines they advance from (audit M6 — the reason a flat
+    # strategy has a Redis snapshot at all). `reset_position()` clears
+    # everything `reset_state()` clears EXCEPT these. Default: none, i.e.
+    # everything `reset_state()` touches is position state. A tuple, so the
+    # class-level default is immutable.
+    cooldown_attrs: tuple[str, ...] = ()
     # NOTE: do NOT use a class-level mutable default for `params` —
     # `params: dict = {}` would be shared across every instance, so any
     # strategy receiving an unknown kwarg would leak the value into
@@ -81,6 +89,63 @@ class Strategy(ABC):
         flags (_in_position, _stop_loss, etc.) to a clean uninitialized state.
         """
 
+    def reset_position(self) -> None:
+        """Clear position state but keep the `cooldown_attrs`.
+
+        `reset_state()` is free to clear cooldown too (hash_momentum's
+        does); this is the variant for "the DB says you are flat, but
+        whatever cooldown you were in still applies".
+        """
+        kept = {
+            attr: getattr(self, attr)
+            for attr in self.cooldown_attrs
+            if hasattr(self, attr)
+        }
+        self.reset_state()
+        for attr, value in kept.items():
+            setattr(self, attr, value)
+
+    def holds_position(self) -> bool:
+        """Whether in-memory state says this strategy holds a position.
+
+        Generic over the flag conventions the strategies use: a non-None
+        `_position_side`, or a truthy `_in_position` / `_in_long` /
+        `_in_short`. A strategy that tracks its position some other way
+        must override (tests/test_strategies/test_restore_flat.py checks
+        every registered strategy that exports state).
+        """
+        if getattr(self, "_position_side", None) is not None:
+            return True
+        return any(
+            bool(getattr(self, attr, False))
+            for attr in ("_in_position", "_in_long", "_in_short")
+        )
+
+    def restore_cooldown_only(self, state: dict) -> bool:
+        """Restore a flat strategy from its Redis snapshot.
+
+        The startup path for a strategy with NO open DB row. The snapshot
+        exists for the cooldown fields (audit M6), but it is written after
+        every executed signal — including OPENs — and was never cleared when
+        a position closed outside the strategy's own signal. Every
+        `restore_from_json` prefers the dict's position flags over the
+        `side` argument, so restoring it as-is brought a flat strategy back
+        believing it held a position it would never re-enter or close.
+
+        Restores the dict, then clears position state with
+        `reset_position()`, so the strategy always ends FLAT with its
+        cooldown fields kept. Position state is cleared even if
+        `restore_from_json` raises. Returns True when the snapshot had put
+        the strategy in a position that was discarded.
+        """
+        held = False
+        try:
+            self.restore_from_json("flat", 0.0, state)
+            held = self.holds_position()
+        finally:
+            self.reset_position()
+        return held
+
     def export_state(self) -> dict | None:
         """Return a JSON-serializable dict of internal state at signal time.
 
@@ -88,6 +153,11 @@ class Strategy(ABC):
         the exact values used when the position was opened. The runner stores
         the result in PositionRecord.state_json. On restart, restore_from_json()
         receives the same dict back.
+
+        The runner also snapshots it to Redis after every executed signal
+        and every engine-driven reset; None deletes that snapshot. A flat
+        strategy is restored from the snapshot via `restore_cooldown_only`,
+        which keeps only its `cooldown_attrs`.
 
         Default returns None — strategies without state need not override.
         """

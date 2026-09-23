@@ -58,6 +58,10 @@ class BBShortStrategy(Strategy):
         self._entry_price = None
         self._tp_level = None
 
+    def holds_position(self) -> bool:
+        # No position flag: an armed TP level is the position.
+        return self._entry_price is not None and self._tp_level is not None
+
     async def on_candle(self, candles: pd.DataFrame) -> Signal | None:
         if len(candles) < self.bb_period + 5:
             return None

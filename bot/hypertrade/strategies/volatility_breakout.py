@@ -47,6 +47,8 @@ from hypertrade.strategies.registry import register
 class VolatilityBreakoutStrategy(Strategy):
     name = "volatility_breakout"
     family = "keltner_channel"  # KC breakouts: keltner_breakout, volatility_breakout
+    # Not position state: time of the last trade (cooldown_hours re-entry block).
+    cooldown_attrs = ("_last_trade_time",)
     symbol = "ETH"
     timeframe = "1h"
     leverage = 2  # source: input.int(2, ...)

@@ -33,6 +33,10 @@ from hypertrade.strategies.registry import register
 class HashMomentumStrategy(Strategy):
     name = "hash_momentum"
     family = "hash_momentum"
+    # Not position state: the post-close re-entry cooldown and the
+    # closed-bar baseline it advances from. reset_state() clears both;
+    # reset_position() keeps them.
+    cooldown_attrs = ("_bars_since_close", "_last_closed_bar_ts")
     symbol = "SOL"
     timeframe = "4h"
     leverage = 1
