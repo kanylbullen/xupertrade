@@ -13,8 +13,10 @@
 #
 # This file is never autosaved (`persist_config off` below), so until
 # the first push every boot loads it fresh and edits here apply on the
-# next recreate. After a push they don't: the pushed config wins until
-# it is removed (CLAUDE.md § 9) or replaced by another POST.
+# next recreate. After a push they never apply: a re-POST rebuilds the
+# config from dashboard/src/lib/caddy-admin.ts, not from this file, so
+# only deleting the autosave (CLAUDE.md § 9) brings this file back. A
+# proxy fix therefore has to land here AND in caddy-admin.ts.
 
 {
     admin 0.0.0.0:2019
