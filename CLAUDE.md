@@ -132,7 +132,7 @@ git ignores `core.hooksPath` from a checked-in `.git/config`.
 │       │                            # /settings/bots, /settings/credentials, /unlock, /login, /admin/server,
 │       │                            # /admin/[tenantId] (operator-only), /api/... — /status 308-redirects to /settings/bots
 │       ├── proxy.ts                 # Next 16 proxy.ts (was middleware.ts) — auth gate
-│       ├── components/              # PositionCard, IndicatorStatus, BotControls, AuthConfig, TlsConfig, MultiCoinToggle, ...
+│       ├── components/              # AppSidebar, UserMenu, PositionCard, IndicatorStatus, MultiCoinToggle, ...
 │       └── lib/
 │           ├── bot-api.ts           # mode-aware bot API proxy (adds the per-bot X-Api-Key — see bot-api-key.ts)
 │           ├── bot-api-key.ts       # generates + persists each tenant bot's unique API key in Redis (`tenant:bot:<botId>:api_key`)

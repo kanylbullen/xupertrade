@@ -27,8 +27,8 @@ export async function GET() {
     oidc_client_id: cfg.oidc_client_id,
     oidc_scopes: cfg.oidc_scopes,
     // When true, `src/instrumentation.ts` overwrites these Redis keys
-    // from Phase env at every container start — UI edits will not
-    // survive a restart. Drives the banner in `auth-config.tsx`.
+    // from Phase env at every container start — edits made through
+    // POST /api/auth/configure will not survive a restart.
     phase_managed: isPhaseManagingAuth(),
   });
 }

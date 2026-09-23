@@ -13,10 +13,10 @@
  * with OAUTH_RESPONSE_IS_NOT_CONFORM. Forcing Redis to mirror Phase on
  * every boot eliminates that drift class entirely.
  *
- * Design choice A1 (always overwrite): Phase is source of truth. UI
- * Settings → Authentication remains writable, but operator should know
- * edits don't survive restart. Banner in `auth-config.tsx` flags this
- * when any of the env vars is non-empty.
+ * Design choice A1 (always overwrite): Phase is source of truth.
+ * POST /api/auth/configure (operator-only) still writes these keys,
+ * but those edits don't survive restart. GET /api/auth/config reports
+ * `phase_managed: true` when any of the env vars is non-empty.
  *
  * Server-only — uses ioredis. Must not be bundled into a Client
  * Component build (the instrumentation hook guards this via the
