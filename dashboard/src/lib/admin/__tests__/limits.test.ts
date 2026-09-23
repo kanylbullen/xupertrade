@@ -77,6 +77,15 @@ function installDbModel(initialRunning: number) {
             },
           }),
         })),
+        // The stale-claim reap. This model has no stale claims; the
+        // real statement is exercised in limits.integration.test.ts.
+        update: vi.fn(() => ({
+          set: () => ({
+            where: async () => {
+              order.push("reap");
+            },
+          }),
+        })),
         // What a real `reserve` does: make this start countable.
         claim: () => {
           order.push("claim");
@@ -117,8 +126,9 @@ describe("reserveBotStart", () => {
     await reserveBotStart({ id: "x", maxActiveBots: 3 }, async (tx) => {
       (tx as unknown as ModelTx).claim();
     });
-    // The claim lands before commit — i.e. while the lock is held.
-    expect(db.order).toEqual(["lock", "count", "claim", "commit"]);
+    // Stale claims are reaped under the lock, before the count, and
+    // this claim lands before commit — i.e. while the lock is held.
+    expect(db.order).toEqual(["lock", "reap", "count", "claim", "commit"]);
     expect(db.running()).toBe(3);
   });
 

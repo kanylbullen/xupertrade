@@ -9,6 +9,7 @@
 
 import { and, count, eq, sql } from "drizzle-orm";
 
+import { CLAIM_PLACEHOLDER, CLAIM_STALE_AFTER_SECONDS } from "@/lib/bot-claim";
 import { db, tenantBots, tenants, type tenants as tenantsTable } from "@/lib/db";
 
 type TenantRow = typeof tenantsTable.$inferSelect;
@@ -53,8 +54,14 @@ export type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * two concurrent starts both counted the same number and both passed a
  * cap of 1. The lock serialized the checks, not the check-and-claim.
  *
- * NULL cap: no lock and no count, but `reserve` still runs inside a
- * transaction so callers have one shape.
+ * Under the lock, before counting, claims older than
+ * CLAIM_STALE_AFTER_SECONDS are reaped (flipped back to not-running):
+ * their request died mid-start, and without this a capped tenant would
+ * stay blocked by a slot no container occupies until someone stopped
+ * the row by hand. See `lib/bot-claim.ts`.
+ *
+ * NULL cap: no lock, no reap and no count, but `reserve` still runs
+ * inside a transaction so callers have one shape.
  */
 export async function reserveBotStart<T>(
   tenant: Pick<TenantRow, "id" | "maxActiveBots">,
@@ -66,6 +73,18 @@ export async function reserveBotStart<T>(
       await tx.execute(
         sql`SELECT 1 FROM ${tenants} WHERE ${tenants.id} = ${tenant.id} FOR UPDATE`,
       );
+      await tx
+        .update(tenantBots)
+        .set({ isRunning: false, containerId: null })
+        .where(
+          and(
+            eq(tenantBots.tenantId, tenant.id),
+            eq(tenantBots.containerId, CLAIM_PLACEHOLDER),
+            // NULL last_started_at never matches: a claim that can't be
+            // aged is never reaped (see lib/bot-claim.ts).
+            sql`${tenantBots.lastStartedAt} <= now() - make_interval(secs => ${CLAIM_STALE_AFTER_SECONDS})`,
+          ),
+        );
       const rows = await tx
         .select({ n: count() })
         .from(tenantBots)

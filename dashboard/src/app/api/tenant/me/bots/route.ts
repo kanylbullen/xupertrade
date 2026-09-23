@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 
 import { and, eq, sql } from "drizzle-orm";
 
+import { CLAIM_PLACEHOLDER } from "@/lib/bot-claim";
 import { db, tenantBots, tenantSecrets } from "@/lib/db";
 import {
   type BotMode,
@@ -152,7 +153,7 @@ export async function POST(req: Request): Promise<Response> {
         tenantId: tenant.id,
         mode,
         containerName: containerNameStub,
-        containerId: "claiming",
+        containerId: CLAIM_PLACEHOLDER,
         isRunning: true,
         lastStartedAt: sql`now()`,
       }),
@@ -168,24 +169,35 @@ export async function POST(req: Request): Promise<Response> {
     throw err;
   }
 
-  // Slot is ours. Decrypt + start. On any failure inside, roll back
-  // the row reservation so the next POST can retry cleanly.
-  const result = await decryptAndStart({
-    req,
-    tenant,
-    botId,
-    mode: mode as BotMode,
-  });
-  if (result.kind === "response") {
-    await db
-      .delete(tenantBots)
-      .where(
-        and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
-      )
-      .catch(() => undefined);
-    return result.response;
+  // Slot is ours. Decrypt + start. On ANY failure — a returned error
+  // response or a thrown one (Redis down in the unlock check, a DB
+  // error on the secrets read) — delete the reservation so the next
+  // POST can retry cleanly. Before this was a `finally`, only the
+  // returned case cleaned up: a throw left a row holding a cap slot
+  // with no container behind it, which blocked a cap-1 tenant until
+  // someone stopped or deleted it by hand. decryptAndStart only throws
+  // before it spawns anything, so deleting the row orphans nothing.
+  let started = false;
+  try {
+    const result = await decryptAndStart({
+      req,
+      tenant,
+      botId,
+      mode: mode as BotMode,
+    });
+    if (result.kind === "response") return result.response;
+    started = true;
+    return Response.json({ bot: result.bot });
+  } finally {
+    if (!started) {
+      await db
+        .delete(tenantBots)
+        .where(
+          and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+        )
+        .catch(() => undefined);
+    }
   }
-  return Response.json({ bot: result.bot });
 }
 
 /**

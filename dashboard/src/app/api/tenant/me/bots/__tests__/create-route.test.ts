@@ -164,6 +164,36 @@ describe("POST /api/tenant/me/bots", () => {
     expect(db.delete).toHaveBeenCalledOnce();
   });
 
+  it("deletes the reserved row when decryptAndStart THROWS, and rethrows", async () => {
+    // Review of #171, item 4: the row is inserted already counted as
+    // running, and only a returned error response used to clean it up.
+    // A throw (Redis down in the unlock check, a DB error on the
+    // secrets read) left a row holding a cap slot with no container —
+    // a cap-1 tenant stayed blocked until someone deleted it by hand.
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(1));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    reserveRunsCallback();
+    const boom = new Error("ECONNREFUSED redis");
+    mockedDecryptAndStart.mockRejectedValueOnce(boom);
+
+    await expect(POST(makeReq())).rejects.toBe(boom);
+    expect(db.delete).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the row when the start succeeds", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(1));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    reserveRunsCallback();
+    mockedDecryptAndStart.mockResolvedValueOnce({
+      kind: "ok",
+      bot: { id: "bot-1" },
+    } as never);
+
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    expect(db.delete).not.toHaveBeenCalled();
+  });
+
   it("maps a unique violation wrapped by drizzle to 409", async () => {
     // drizzle-orm >= 0.44 wraps driver errors in DrizzleQueryError and
     // keeps the postgres error (with its SQLSTATE) on `.cause`.

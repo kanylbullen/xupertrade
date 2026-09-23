@@ -26,6 +26,8 @@ let dbMod: typeof import("../../db");
 // One tenant per case, so the control's two rows can't affect the fix.
 let tenantFixed: string;
 let tenantControl: string;
+let tenantStale: string;
+let tenantFresh: string;
 
 const SUITE_TIMEOUT = 60_000;
 // Held inside the transaction between the count and the reservation
@@ -54,7 +56,9 @@ beforeAll(async () => {
     );
   `);
   await sql.end();
+  // seedTenants is typed for pairs; two calls give four tenants.
   [tenantFixed, tenantControl] = await seedTenants(fixture, 2);
+  [tenantStale, tenantFresh] = await seedTenants(fixture, 2);
 
   process.env.DATABASE_URL = fixture.connectionString;
   vi.resetModules();
@@ -81,12 +85,14 @@ function insertRunning(
   tenantId: string,
   mode: string,
 ) {
+  // The same claim shape POST /bots writes.
   return exec.insert(dbMod.tenantBots).values({
     id: randomUUID(),
     tenantId,
     mode,
     containerId: "claiming",
     isRunning: true,
+    lastStartedAt: new Date(),
   });
 }
 
@@ -116,6 +122,69 @@ describe("reserveBotStart (real Postgres)", () => {
       expect(rejected).toHaveLength(1);
       expect(rejected[0].reason).toBeInstanceOf(limits.LimitExceededError);
       expect(await runningCount(tenantId)).toBe(1);
+    },
+    SUITE_TIMEOUT,
+  );
+
+  it(
+    "reaps a stale claim (its request died) so it no longer holds the slot",
+    async () => {
+      // A claim written 20 minutes ago with no container behind it.
+      const sqlc = fixture.operatorClient();
+      await sqlc`
+        INSERT INTO tenant_bots (id, tenant_id, mode, container_id, is_running, last_started_at)
+        VALUES (${randomUUID()}::uuid, ${tenantStale}::uuid, 'paper', 'claiming', true,
+                now() - interval '20 minutes')
+      `;
+      await sqlc.end();
+      expect(await runningCount(tenantStale)).toBe(1);
+
+      await limits.reserveBotStart(
+        { id: tenantStale, maxActiveBots: 1 },
+        (tx) => insertRunning(tx, tenantStale, "testnet"),
+      );
+
+      // The stale claim was flipped back; the new start holds the slot.
+      expect(await runningCount(tenantStale)).toBe(1);
+      const check = fixture.operatorClient();
+      const rows = await check<{ mode: string; is_running: boolean; container_id: string | null }[]>`
+        SELECT mode, is_running, container_id FROM tenant_bots
+        WHERE tenant_id = ${tenantStale}::uuid ORDER BY mode
+      `;
+      await check.end();
+      expect(rows).toEqual([
+        { mode: "paper", is_running: false, container_id: null },
+        { mode: "testnet", is_running: true, container_id: "claiming" },
+      ]);
+    },
+    SUITE_TIMEOUT,
+  );
+
+  it.each([
+    ["a fresh claim — a start in flight keeps its slot", "now() - interval '30 seconds'"],
+    // Can't be aged, so it is never reaped: treating NULL as stale let
+    // the second of two concurrent starts reap the first's claim.
+    ["a claim with no timestamp", "NULL"],
+  ])(
+    "does not reap %s",
+    async (_label, startedAt) => {
+      const sqlc = fixture.operatorClient();
+      await sqlc.unsafe(
+        `DELETE FROM tenant_bots WHERE tenant_id = '${tenantFresh}'::uuid`,
+      );
+      await sqlc.unsafe(`
+        INSERT INTO tenant_bots (id, tenant_id, mode, container_id, is_running, last_started_at)
+        VALUES ('${randomUUID()}'::uuid, '${tenantFresh}'::uuid, 'paper', 'claiming', true,
+                ${startedAt})
+      `);
+      await sqlc.end();
+
+      await expect(
+        limits.reserveBotStart({ id: tenantFresh, maxActiveBots: 1 }, (tx) =>
+          insertRunning(tx, tenantFresh, "testnet"),
+        ),
+      ).rejects.toBeInstanceOf(limits.LimitExceededError);
+      expect(await runningCount(tenantFresh)).toBe(1);
     },
     SUITE_TIMEOUT,
   );

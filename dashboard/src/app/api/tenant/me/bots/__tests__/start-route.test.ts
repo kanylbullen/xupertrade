@@ -33,12 +33,17 @@ const updateChain = {
   catch: vi.fn().mockResolvedValue(undefined),
 };
 // The claim runs inside `reserveBotStart`'s transaction. The tx hands
-// out the same update chain; its execute/select serve the cap's
-// FOR UPDATE + running-bot count (`txRunningCount`) when a tenant has
-// a max_active_bots cap.
+// out the same update chain for the claim; its execute/select serve
+// the cap's FOR UPDATE + running-bot count (`txRunningCount`) when a
+// tenant has a max_active_bots cap. With a cap, the first tx.update is
+// the stale-claim reap — tests queue `reapChain` for it.
 let txRunningCount = 0;
+const reapChain = {
+  set: vi.fn().mockReturnThis(),
+  where: vi.fn(async () => undefined),
+};
 const tx = {
-  update: vi.fn(() => updateChain),
+  update: vi.fn(() => updateChain as unknown),
   execute: vi.fn(async () => undefined),
   select: vi.fn(() => ({
     from: () => ({ where: async () => [{ n: txRunningCount }] }),
@@ -231,12 +236,15 @@ describe("POST /api/tenant/me/bots/[id]/start", () => {
       { id: BOT_ID, tenantId: TENANT_ID, mode: "paper", isRunning: false },
     ]);
     txRunningCount = 1;
+    tx.update.mockReturnValueOnce(reapChain);
 
     const res = await POST(makeReq(), makeCtx());
 
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: "bot-cap-exceeded" });
-    expect(tx.update).not.toHaveBeenCalled();
+    // Only the reap ran on the tx; no claim was written.
+    expect(tx.update).toHaveBeenCalledOnce();
+    expect(updateChain.set).not.toHaveBeenCalled();
     expect(mockedDecryptAndStart).not.toHaveBeenCalled();
   });
 
@@ -250,6 +258,7 @@ describe("POST /api/tenant/me/bots/[id]/start", () => {
     selectChain.limit.mockResolvedValueOnce([
       { id: BOT_ID, tenantId: TENANT_ID, mode: "paper", isRunning: false },
     ]);
+    tx.update.mockReturnValueOnce(reapChain);
     updateChain.returning.mockResolvedValueOnce([{ id: BOT_ID }]);
     mockedDecryptAndStart.mockResolvedValueOnce({
       kind: "ok",
@@ -261,9 +270,36 @@ describe("POST /api/tenant/me/bots/[id]/start", () => {
 
     expect(res.status).toBe(200);
     expect(tx.execute).toHaveBeenCalledOnce(); // the FOR UPDATE
-    expect(tx.update).toHaveBeenCalledOnce(); // the claim, on the tx
+    // Reap first (stale claims → not running), then the claim, both on
+    // the tx.
+    expect(tx.update).toHaveBeenCalledTimes(2);
+    expect(reapChain.set).toHaveBeenCalledWith({
+      isRunning: false,
+      containerId: null,
+    });
     expect(updateChain.set).toHaveBeenCalledWith(
       expect.objectContaining({ isRunning: true, containerId: "claiming" }),
+    );
+    // Success: the claim is not reverted.
+    expect(updateChain.set).toHaveBeenCalledTimes(1);
+  });
+
+  it("reverts the claim when decryptAndStart THROWS, and rethrows", async () => {
+    // Review of #171, item 4: only a returned error response reverted
+    // the claim. A throw (Redis down in the unlock check, a DB error on
+    // the secrets read) left the row "running" with no container,
+    // holding a cap slot until someone stopped it by hand.
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    selectChain.limit.mockResolvedValueOnce([
+      { id: BOT_ID, tenantId: TENANT_ID, mode: "paper", isRunning: false },
+    ]);
+    updateChain.returning.mockResolvedValueOnce([{ id: BOT_ID }]); // claim
+    const boom = new Error("ECONNREFUSED redis");
+    mockedDecryptAndStart.mockRejectedValueOnce(boom);
+
+    await expect(POST(makeReq(), makeCtx())).rejects.toBe(boom);
+    expect(updateChain.set).toHaveBeenLastCalledWith(
+      expect.objectContaining({ isRunning: false, containerId: null }),
     );
   });
 

@@ -14,6 +14,7 @@
 
 import { and, eq, sql } from "drizzle-orm";
 
+import { CLAIM_PLACEHOLDER } from "@/lib/bot-claim";
 import { db, tenantBots, tenantSecrets } from "@/lib/db";
 import {
   type BotMode,
@@ -114,7 +115,7 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
         .update(tenantBots)
         .set({
           isRunning: true,
-          containerId: "claiming",
+          containerId: CLAIM_PLACEHOLDER,
           lastStartedAt: sql`now()`,
         })
         .where(
@@ -137,22 +138,31 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
     );
   }
 
-  const result = await decryptAndStart({
-    req,
-    tenant,
-    botId,
-    mode,
-  });
-  if (result.kind === "response") {
-    // Revert the claim so the row is startable again.
-    await db
-      .update(tenantBots)
-      .set({ isRunning: false, containerId: null })
-      .where(
-        and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
-      )
-      .catch(() => undefined);
-    return result.response;
+  // On ANY failure — returned or thrown — revert the claim so the row
+  // is startable again and the cap slot is released. A throw (Redis
+  // down in the unlock check, a DB error on the secrets read) used to
+  // skip the revert and leave the row "running" with no container.
+  // decryptAndStart only throws before it spawns anything.
+  let started = false;
+  try {
+    const result = await decryptAndStart({
+      req,
+      tenant,
+      botId,
+      mode,
+    });
+    if (result.kind === "response") return result.response;
+    started = true;
+    return Response.json({ bot: result.bot });
+  } finally {
+    if (!started) {
+      await db
+        .update(tenantBots)
+        .set({ isRunning: false, containerId: null })
+        .where(
+          and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
+        )
+        .catch(() => undefined);
+    }
   }
-  return Response.json({ bot: result.bot });
 }
