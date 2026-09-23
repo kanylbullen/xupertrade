@@ -21,7 +21,13 @@ Automated crypto trading bot targeting [HyperLiquid](https://hyperliquid.xyz) wi
 
 ## Highlights
 
-- **Three modes side-by-side** — `paper`, `testnet`, and `mainnet` run as independent bot containers with isolated state, so you can A/B test strategies in paper while testnet handles canary trades and mainnet runs production.
+- **Multi-tenant, orchestrator-spawned bots** — the dashboard spawns one
+  Docker container per tenant per mode (`paper`, `testnet`, `mainnet`) via
+  `lib/bot-orchestrator.ts`, each with isolated state, so you can A/B test
+  strategies in paper while testnet handles canary trades and mainnet runs
+  production. Secrets are decrypted server-side from a tenant's passphrase
+  and injected into that tenant's bot containers only — see "Security
+  model" below.
 - **HyperLiquid API-wallet pattern** — bot signs orders with a trade-only key while funds stay on a separate main wallet (cannot be withdrawn even if the bot is compromised).
 - **Real-time data** — HyperLiquid WebSocket feed for live prices and per-strategy candle subscriptions, plus REST candle snapshots for indicator computation.
 - **Per-strategy leverage and on/off** — defaults baked into each strategy, overridable from the dashboard or Telegram.
@@ -36,45 +42,69 @@ Automated crypto trading bot targeting [HyperLiquid](https://hyperliquid.xyz) wi
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │  hypertrade/                                                           │
-│  ├── bot/             Python trading engine                            │
+│  ├── bot/             Python trading engine (one image, spawned per    │
+│  │   │                tenant per mode by the dashboard's orchestrator) │
 │  │   ├── strategies/  Strategy implementations + registry              │
+│  │   ├── hodl/        Advisory accumulation signals (not orders)       │
+│  │   ├── vaults/      HyperLiquid vault scanner (read-only)            │
 │  │   ├── exchange/    PaperExchange + HyperLiquidExchange              │
-│  │   ├── engine/      Runner loop, control state, indicator status     │
+│  │   ├── engine/      Runner loop, control state, portfolio, indicator │
+│  │   │                status                                          │
 │  │   ├── data/        WebSocket feed + REST candles + indicators       │
 │  │   ├── events/      Redis pub/sub + typed event schemas              │
 │  │   ├── notify/      Telegram notifier + command handler              │
 │  │   ├── db/          SQLAlchemy models + repository                   │
 │  │   └── api.py       aiohttp HTTP API for dashboard control           │
-│  ├── dashboard/       Next.js 16 + shadcn/ui                           │
-│  └── docker-compose.yml                                                │
+│  ├── dashboard/       Next.js 16 + shadcn/ui + bot-orchestrator.ts     │
+│  │                    (Docker socket → per-tenant container lifecycle) │
+│  └── docker-compose.yml   postgres + redis + dashboard + caddy +       │
+│                           cloudflared (profile `public`) + bot-image   │
+│                           (profile `build`, builds xupertrade-bot:latest│
+│                           — never runs as a service itself)            │
 └────────────────────────────────────────────────────────────────────────┘
-        │                                  │
-        ▼                                  ▼
-   bot-paper:8000      bot-testnet:8001          bot-mainnet:8002 (opt-in)
-        │                  │                            │
-        └──────────────────┼────────────────────────────┘
+                           │
+              dashboard spawns one container per
+              (tenant, mode) from xupertrade-bot:latest —
+              xupertrade-bot-<tenant-short-id>-<mode>,
+              no published host ports, reached by
+              container name over the compose network
                            │
                   ┌────────┴────────┐
-                  │   PostgreSQL    │  trades, positions, equity_snapshots
-                  │      Redis      │  control state (per-mode), pub/sub events
+                  │   PostgreSQL    │  trades, positions, equity_snapshots,
+                  │      Redis      │  tenant_bots row per running container
+                  │                 │  control state (per-mode), pub/sub events
                   └─────────────────┘
                            │
                            ▼
-              dashboard:3000  (Next.js, ?mode= picks bot)
+              dashboard:3000  (Next.js — /overview/[mode] picks bot)
                            │
                            ▼
-               Telegram bot (subscribes to all 3 modes)
+       Telegram (env-driven per bot instance via TELEGRAM_ENABLED;
+       the orchestrator currently enables it on the mainnet bot only)
 ```
 
-Each bot container is **fully isolated**:
-- Own exchange instance (PaperExchange / HyperLiquid testnet / HyperLiquid mainnet).
+Each tenant's bot container is **fully isolated**:
+- Own exchange instance (PaperExchange / HyperLiquid testnet / HyperLiquid mainnet), with that tenant's decrypted credentials injected at spawn time.
 - Own Redis state under `hypertrade:{mode}:control:*` keys.
 - Own event channel `hypertrade:{mode}:events`.
-- Trades persisted with `mode` column so DB queries can filter per-mode.
+- Own per-bot API key (generated by the orchestrator, stored in Redis) — one tenant's key cannot reach another tenant's bot.
+- Trades persisted with `mode` (and `tenant_id`) columns so DB queries can filter per-mode / per-tenant.
 
 ## Strategies
 
-Six strategies implemented from [Minara AI's backtesting study](https://x.com/minara/status/2044432012002635843) of 236 TradingView strategies tested under HyperLiquid fees:
+The registry currently holds **22 registered strategies** — 6 of them
+seeded from [Minara AI's backtesting study](https://x.com/minara/status/2044432012002635843)
+of 236 TradingView strategies tested under HyperLiquid fees, plus later
+ports and two in-house designs (`vvv_hedge`, `ath_breakout`). The
+`/strategies` dashboard page is the source of truth for the current
+roster: it's data-driven, reading live name/symbol/timeframe from the bot's
+`/strategies` endpoint and merging in prose from
+`bot/hypertrade/strategies/meta/<name>.json` (one file per registered
+strategy — count them with `ls bot/hypertrade/strategies/meta/*.json | wc -l`).
+A hardcoded table here would drift the same way the old one did (see
+CLAUDE.md § 5, "Dashboard: trades-page filters + data-driven /strategies").
+
+The six from the original Minara seed, for context on where this started:
 
 | Strategy | Pair | Timeframe | Backtest APR | Default leverage | Description |
 |----------|------|-----------|--------------|------------------|-------------|
@@ -153,18 +183,30 @@ docker compose up -d
 # the access control -- don't republish it on 0.0.0.0.
 #
 # Tenant bots are spawned by the dashboard orchestrator and publish no
-# host ports at all. To query one:
-#   docker exec <bot-container> wget -qO- localhost:8001/api/positions
+# host ports at all. The bot image has no wget/curl, and most endpoints
+# require the bot's per-tenant X-Api-Key (generated by the orchestrator,
+# stored in Redis — see CLAUDE.md § 3). To query one:
+#   docker exec <bot-container> python -c \
+#     'import urllib.request,sys; req=urllib.request.Request(sys.argv[1], headers={"X-Api-Key": sys.argv[2]}); print(urllib.request.urlopen(req).read().decode())' \
+#     http://localhost:8001/api/positions "$API_KEY"
 ```
 
 ### Configuration (`.env`)
+
+In production, a tenant enters these values through **Settings →
+Credentials** in the dashboard, not a local `.env` file — see "Security
+model" below for how they're encrypted at rest and injected into that
+tenant's bot container at spawn time by `bot-orchestrator.ts`. The
+variable names below are the same ones the orchestrator injects; this
+`.env` shape is mainly useful for running the bot directly against a
+single mode without the dashboard (local development).
 
 ```env
 # Testnet wallet — bot signs orders with API_KEY, executes on ACCOUNT_ADDRESS's behalf
 HYPERLIQUID_PRIVATE_KEY=0x...           # API wallet's private key (trade-only, can't withdraw)
 HYPERLIQUID_ACCOUNT_ADDRESS=0x...       # Main wallet (where the funds live)
 
-# Mainnet (only used when bot-mainnet starts)
+# Mainnet (only used when the bot runs in mainnet mode)
 HYPERLIQUID_MAINNET_PRIVATE_KEY=0x...
 HYPERLIQUID_MAINNET_ACCOUNT_ADDRESS=0x...
 
@@ -174,11 +216,11 @@ TELEGRAM_CHAT_ID=...                    # your numeric chat id
 TELEGRAM_EVENTS=signal.generated,trade.executed,position.closed,error
 ```
 
-Per-bot env (set in `docker-compose.yml`, override via env):
+Per-bot env (injected per-container by the orchestrator at spawn time, or set directly if running the bot standalone):
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `EXCHANGE_MODE` | `paper`/`testnet`/`mainnet` | Which exchange this bot talks to. Set per-service. |
+| `EXCHANGE_MODE` | `paper`/`testnet`/`mainnet` | Which exchange this bot talks to. Set per-container by the orchestrator when it spawns a tenant's bot — not a compose-service setting. |
 | `MAX_POSITION_SIZE_USD` | `200` | Margin per trade. Notional = this × strategy.leverage. |
 | `MAX_DAILY_LOSS_USD` | `100` | Trading halts when daily PnL drops below this. |
 | `POLL_INTERVAL_SECONDS` | `60` | How often the runner ticks. |
@@ -194,22 +236,24 @@ Per-bot env (set in `docker-compose.yml`, override via env):
    HYPERLIQUID_PRIVATE_KEY=<API wallet private key>
    HYPERLIQUID_ACCOUNT_ADDRESS=<main wallet address>
    ```
-4. `docker compose up -d bot-testnet` and verify with:
+4. In the dashboard, paste both keys under **Settings → Credentials**, then start the testnet bot from **Settings → Bots** (or `POST /api/tenant/me/bots` to create it, then `POST /api/tenant/me/bots/<id>/start`). Verify it came up with:
    ```bash
    docker exec $(docker ps --format '{{.Names}}' | grep -E '^xupertrade-bot-.*-testnet$') \
-     wget -qO- localhost:8001/api/hyperliquid/diagnostic
+     python -c 'import urllib.request,sys; req=urllib.request.Request(sys.argv[1], headers={"X-Api-Key": sys.argv[2]}); print(urllib.request.urlopen(req).read().decode())' \
+     http://localhost:8001/api/hyperliquid/diagnostic "$API_KEY"
    # → { "ok": true, "network": "testnet", "api_wallet_mode": true,
    #     "account_value_usd": 999.0, ... }
    ```
-5. Open the dashboard, switch to `?mode=testnet`, and click **Resume** when ready.
+   (`$API_KEY` is the bot's per-tenant key — the dashboard already knows it and attaches it automatically for you when you use the UI; this raw check is only needed for manual debugging.)
+5. Open the dashboard at `/overview/testnet`, and click **Resume** when ready.
 
 ## Going live on mainnet
 
-Same flow but with mainnet wallet keys. Mainnet bot only starts when explicitly requested:
-
-```bash
-docker compose --profile mainnet up -d bot-mainnet
-```
+Same flow but with mainnet wallet keys. The mainnet bot only starts when
+explicitly requested — there is no compose profile for it any more; it's
+just another tenant bot in `mainnet` mode, started from **Settings → Bots**
+in the dashboard (or `POST /api/tenant/me/bots/<id>/start` after creating
+it with `mode: "mainnet"`).
 
 **Strongly recommended before flipping to mainnet:**
 - Run the same strategies on testnet for at least a few weeks and confirm the trades execute as expected.
@@ -230,15 +274,27 @@ The bot pushes notifications **and** accepts interactive commands.
    TELEGRAM_BOT_TOKEN=<paste-from-botfather>
    TELEGRAM_CHAT_ID=<your-numeric-chat-id>
    ```
-4. Restart the testnet bot (which is the one that owns Telegram): `docker compose up -d --force-recreate bot-testnet`. You should receive a startup ping within ~10 seconds: `🔵 TESTNET 🚀 xupertrade started`.
+4. Telegram is env-driven per bot instance (`TELEGRAM_ENABLED`), and the
+   orchestrator currently sets it `true` only for the **mainnet** bot
+   (`false` on paper/testnet) — only one bot instance should ever run the
+   Telegram poller. Restart the mainnet bot to pick up new
+   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` values: **Settings → Bots →
+   restart** in the dashboard, or `POST /api/tenant/me/bots/<id>/stop` then
+   `/start`. You should receive a startup ping within ~10 seconds:
+   `🟢 MAINNET 🚀 xupertrade started`.
 
 ### Notifications
 
-By default the bot forwards these event types from all three modes (paper/testnet/mainnet) to the same chat:
-- `signal.generated` — a strategy generated a signal that's about to execute
+By default the bot forwards these event types to the configured chat (`Settings.telegram_events`, comma-separated, overridable via `TELEGRAM_EVENTS`):
 - `trade.executed` — order filled
 - `position.closed` — position closed with realized PnL
 - `error` — bot-side error in a strategy or the engine
+- `vault.qualified` / `vault.disqualified` — HyperLiquid vault scanner state changes
+- `hodl.verdict_changed` — a HODL accumulation signal flipped
+
+`signal.generated` is excluded by default (it duplicates `trade.executed`,
+which already carries the reason and only fires when an order is actually
+placed).
 
 Each message is prefixed with a mode badge (🟡 PAPER / 🔵 TESTNET / 🟢 MAINNET) so cross-mode events stay distinguishable.
 
@@ -259,7 +315,7 @@ All commands are restricted to the configured `TELEGRAM_CHAT_ID` — nobody else
 | `/flat` | Show how many positions would close (asks for confirmation) |
 | `/flat confirm` | Actually close every open position with market orders |
 
-Currently commands operate on the bot instance that runs Telegram (the testnet bot). Cross-mode commands like `/status mainnet` are a planned future addition.
+Currently commands operate on the bot instance that runs Telegram (the mainnet bot, per the orchestrator's `TELEGRAM_ENABLED` rule above). Cross-mode commands like `/status mainnet` are a planned future addition.
 
 ## Bot architecture
 
@@ -340,16 +396,25 @@ State survives bot restart, so a paused bot stays paused until you explicitly re
 
 ## Dashboard
 
-Dark-themed Next.js 16 (App Router, Turbopack) app on port 3000. The 3-way mode toggle in the top nav routes everything (controls, indicator status, trades view) to the correct bot.
+Dark-themed Next.js 16 (App Router, Turbopack) app on port 3000, route-bound
+per mode rather than a single `?mode=` toggle.
 
 | Page | Contents |
 |------|----------|
-| `/` (Overview) | TradingView ticker, total equity, P&L stat cards, equity curve, indicator status grid (per strategy: signal + distance to trigger), open positions, recent trades, embedded BTC chart |
-| `/trades` | Filtered trade history per mode |
-| `/strategies` | Detailed per-strategy cards (logic, strengths, weaknesses, parameters), per-strategy on/off + leverage input, embedded TradingView charts with strategy-specific indicators preloaded |
-| `/status` | Pause/Resume button, "Close All Positions" with confirmation dialog, per-strategy toggles, live event log via Server-Sent Events from Redis |
+| `/overview/[mode]` | TradingView ticker, total equity, P&L stat cards, equity curve, indicator status grid (per strategy: signal + distance to trigger), open positions, recent trades |
+| `/trades` | Filterable trade history (strategy, date range, pagination — URL-driven and shareable) |
+| `/strategies` | Data-driven strategy reference: live name/symbol/timeframe from the bot's registry merged with prose from `bot/hypertrade/strategies/meta/*.json`, embedded TradingView charts |
+| `/backtests` | Filters, APR/Sharpe trend chart, and a pager over the `backtest_runs` table |
+| `/hodl` | Advisory accumulation signals, manual on-chain levels, purchase log |
+| `/vaults` | Qualified HyperLiquid vaults sorted by Sharpe, plus the tenant's own vault positions |
+| `/settings/bots` | Per-bot start/stop/restart, live status, and the live event log (formerly `/status`, which now 308-redirects here) |
+| `/settings/credentials` | Tenant HyperLiquid keys and Telegram token, encrypted at rest (see "Security model" below) |
+| `/unlock` | Passphrase prompt that derives the session's decryption key before secrets can be used |
+| `/admin/server`, `/admin/[tenantId]` | Operator-only: host stats and per-tenant administration |
 
-Each component reads `?mode=` from the URL via `useMode()` and prefixes its API calls accordingly so a single dashboard handles all three environments.
+Each page resolves the tenant from the session (never from the URL) and
+scopes its data and bot-API calls accordingly, so one dashboard instance
+serves every tenant's paper/testnet/mainnet bots in isolation.
 
 ## Tech Stack
 
@@ -371,9 +436,10 @@ Each component reads `?mode=` from the URL via `useMode()` and prefixes its API 
 - TradingView embed widgets
 
 ### Infrastructure
-- PostgreSQL 16 — historical trades, positions, equity snapshots (`mode` column for per-env filtering)
-- Redis 7 — runtime state + event pub/sub
-- Docker Compose — three bot services (`bot-paper`, `bot-testnet`, `bot-mainnet` under profile) + dashboard + Postgres + Redis
+- PostgreSQL 16 — historical trades, positions, equity snapshots (`mode`/`tenant_id` columns for per-env, per-tenant filtering)
+- Redis 7 — runtime state + event pub/sub + per-bot API keys
+- Docker Compose — `postgres` + `redis` + `dashboard` + `caddy` + `cloudflared` (profile `public`) + `bot-image` (profile `build`, produces the `xupertrade-bot:latest` image only — never runs as a service)
+- Dashboard-driven orchestration — the dashboard binds the host's Docker socket (`lib/docker.ts`) and spawns one bot container per tenant per mode from `xupertrade-bot:latest` (`lib/bot-orchestrator.ts`); there's no fixed set of bot containers in the compose file
 
 ## Adding a strategy
 
@@ -408,14 +474,17 @@ class MyStrategy(Strategy):
 ```
 
 2. Register import in `bot/hypertrade/strategies/registry.py::load_all()`.
+   `main.py` auto-instantiates every registered strategy via
+   `list_strategies()` — there's no separate list to add the name to.
 
-3. Add to `strategies = [...]` in `bot/hypertrade/main.py`.
+3. (Optional) Add an entry to `bot/hypertrade/engine/indicators_status.py` so the dashboard shows distance-to-trigger.
 
-4. (Optional) Add an entry to `bot/hypertrade/engine/indicators_status.py` so the dashboard shows distance-to-trigger.
+4. (Optional) Add `bot/hypertrade/strategies/meta/<name>.json` for
+   documentation — the `/strategies` dashboard page is data-driven and
+   reads from these files (see "Strategies" above); there's no page
+   component to edit by hand.
 
-5. (Optional) Add a card on `dashboard/src/app/strategies/page.tsx` for documentation.
-
-6. `docker compose build && docker compose up -d`.
+5. Rebuild the bot image and restart running bots to pick it up: `docker compose --profile build build --no-cache --pull bot-image`, then restart each running bot from **Settings → Bots** in the dashboard (or `POST /api/tenant/me/bots/<id>/stop` then `/start`) — a bot only picks up new code when it's (re)started.
 
 ## Project origin
 
