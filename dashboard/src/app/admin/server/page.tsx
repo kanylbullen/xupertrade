@@ -17,7 +17,7 @@ export default async function AdminServerPage() {
         </Link>
         <h1 className="mt-1 text-2xl font-bold tracking-tight">Server stats</h1>
         <p className="text-sm text-muted-foreground">
-          Live snapshot of the host's CPU, memory, disk, and Docker.
+          Live snapshot of the host&apos;s CPU, memory, disk, and Docker.
           Polled every 5 seconds.
         </p>
       </header>

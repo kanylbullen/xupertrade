@@ -7,7 +7,7 @@ import {
   fundingPayments,
   backtestRuns,
 } from "./db";
-import { desc, eq, and, gte, lt, sql, sum, count } from "drizzle-orm";
+import { desc, eq, and, gte, lt, sql, count } from "drizzle-orm";
 
 import { type Mode } from "./mode";
 

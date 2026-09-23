@@ -54,24 +54,31 @@ export function TelegramLinkCard() {
     }
   }, []);
 
+  // A minted code is only meaningful while the tenant is still
+  // unlinked — once the pairing lands it would show stale. Derive
+  // that instead of clearing `code` from an effect: the code box and
+  // the polling interval below both key off `activeCode`, so the
+  // poll stops the moment `status.linked` flips to true, exactly as
+  // the old `setCode(null)` effect made it.
+  const activeCode = status?.linked === false ? code : null;
+
+  // `refresh` is async: the setState lands in the resolved promise,
+  // never synchronously in the effect body. Going through a callback
+  // keeps that explicit (react-hooks/set-state-in-effect).
   useEffect(() => {
-    refresh();
+    const load = () => void refresh();
+    load();
   }, [refresh]);
 
   useEffect(() => {
-    if (!code) return;
+    if (!activeCode) return;
     // Re-fetch every 10s while a code is showing so the UI flips
     // to "Linked" without manual refresh once the user sends /link
     // to the bot.
-    const t = setInterval(refresh, 10_000);
+    const poll = () => void refresh();
+    const t = setInterval(poll, 10_000);
     return () => clearInterval(t);
-  }, [code, refresh]);
-
-  // If we just minted a code but the tenant already linked,
-  // dismiss the code box (would otherwise show stale).
-  useEffect(() => {
-    if (code && status?.linked === true) setCode(null);
-  }, [status, code]);
+  }, [activeCode, refresh]);
 
   function generate() {
     setError(null);
@@ -178,7 +185,7 @@ export function TelegramLinkCard() {
         </div>
       )}
 
-      {status?.linked === false && !code && (
+      {status?.linked === false && !activeCode && (
         <div className="mt-3 space-y-2">
           <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
             ⚠️ Linking requires a running bot (paper / testnet / mainnet) —
@@ -200,16 +207,16 @@ export function TelegramLinkCard() {
         </div>
       )}
 
-      {code && status?.linked === false && (
+      {activeCode && (
         <div className="mt-3 rounded border bg-muted/30 p-3">
           <p className="text-xs text-muted-foreground">
             Send this command to your Telegram bot:
           </p>
           <code className="mt-2 block break-all rounded bg-background px-2 py-1.5 text-sm font-mono">
-            /link {code.code}
+            /link {activeCode.code}
           </code>
           <p className="mt-2 text-[11px] text-muted-foreground">
-            Code expires in {Math.floor(code.expiresInSeconds / 60)} min.
+            Code expires in {Math.floor(activeCode.expiresInSeconds / 60)} min.
             The page will update once you send the command.
           </p>
         </div>

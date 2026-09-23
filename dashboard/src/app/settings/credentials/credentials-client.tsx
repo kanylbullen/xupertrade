@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 
 import { TelegramLinkCard } from "@/components/telegram-link-card";
 import { UnlockModal } from "@/components/unlock-modal";
@@ -81,7 +81,7 @@ export function CredentialsClient() {
   const [me, setMe] = useState<Me | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/tenant/me", { cache: "no-store" });
       if (!r.ok) {
@@ -92,11 +92,15 @@ export function CredentialsClient() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  };
-
-  useEffect(() => {
-    refresh();
   }, []);
+
+  // `refresh` is async: the setState lands in the resolved promise,
+  // never synchronously in the effect body. Going through a callback
+  // keeps that explicit (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    const load = () => void refresh();
+    load();
+  }, [refresh]);
 
   if (error) {
     return (
@@ -247,7 +251,7 @@ function CredentialsList({ onLocked }: { onLocked: () => void }) {
   const [secrets, setSecrets] = useState<SecretRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/tenant/me/secrets", { cache: "no-store" });
       if (!r.ok) {
@@ -259,11 +263,15 @@ function CredentialsList({ onLocked }: { onLocked: () => void }) {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  };
-
-  useEffect(() => {
-    refresh();
   }, []);
+
+  // `refresh` is async: the setState lands in the resolved promise,
+  // never synchronously in the effect body. Going through a callback
+  // keeps that explicit (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    const load = () => void refresh();
+    load();
+  }, [refresh]);
 
   if (error) {
     return (

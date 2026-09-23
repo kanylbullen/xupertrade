@@ -7,6 +7,7 @@ import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
+import { requestNow } from "@/lib/now";
 import { and, eq } from "drizzle-orm";
 
 type Check = {
@@ -65,6 +66,10 @@ export default async function HodlPage() {
   // "bot offline" empty state renders when no mainnet bot is running.
   const mode = "mainnet" as const;
 
+  // Read the clock once here, at the top of the request, and pass it
+  // down — see lib/now.ts for why this isn't an inline Date.now().
+  const now = requestNow();
+
   const tenant = await requireTenantServer();
   const botRows = await db
     .select()
@@ -119,7 +124,7 @@ export default async function HodlPage() {
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Long-term accumulation signals for spot positions. Advisory only —
-            these don't trade. They tell you when conditions look favorable to
+            these don&apos;t trade. They tell you when conditions look favorable to
             add to a position you intend to hold.
           </p>
         </div>
@@ -147,17 +152,21 @@ export default async function HodlPage() {
         ))}
       </div>
 
-      <ManualLevelsCard levels={levels} />
+      <ManualLevelsCard levels={levels} now={now} />
       <PurchasesCard purchases={purchases} />
     </div>
   );
 }
 
-function ManualLevelsCard({ levels }: { levels: ManualLevels | null }) {
+function ManualLevelsCard({
+  levels,
+  now,
+}: {
+  levels: ManualLevels | null;
+  now: number;
+}) {
   const ageDays = levels?.recorded_at
-    ? Math.floor(
-        (Date.now() - new Date(levels.recorded_at).getTime()) / 86_400_000,
-      )
+    ? Math.floor((now - new Date(levels.recorded_at).getTime()) / 86_400_000)
     : null;
   const stale = ageDays !== null && ageDays > 14;
 

@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, sql } from "drizzle-orm";
+import { count, gte, sql } from "drizzle-orm";
 
 import {
   db,

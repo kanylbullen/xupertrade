@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 
 import { UnlockModal } from "@/components/unlock-modal";
 import { LiveLog } from "@/components/live-log";
@@ -26,7 +26,7 @@ export function BotsClient() {
   const [error, setError] = useState<string | null>(null);
   const [showUnlock, setShowUnlock] = useState(false);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/tenant/me/bots", { cache: "no-store" });
       if (!r.ok) {
@@ -38,11 +38,15 @@ export function BotsClient() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  };
-
-  useEffect(() => {
-    refresh();
   }, []);
+
+  // `refresh` is async: the setState lands in the resolved promise,
+  // never synchronously in the effect body. Going through a callback
+  // keeps that explicit (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    const load = () => void refresh();
+    load();
+  }, [refresh]);
 
   if (error) {
     return (
@@ -472,11 +476,14 @@ function BotRuntime({
   const [state, setState] = useState<RuntimeState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastFetchAt, setLastFetchAt] = useState<Date | null>(null);
-  // Re-render every 5s so the grace window flips to the verbose
-  // error message at the right time without waiting for a fetch.
-  const [, setTick] = useState(0);
+  // "Now", refreshed every 5s, so the grace window flips to the
+  // verbose error message at the right time without waiting for a
+  // fetch. Held in state rather than read during render: Date.now()
+  // in a render body is an impure read (react-hooks/purity) and
+  // would make the same render produce different output on replay.
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 5_000);
+    const t = setInterval(() => setNow(Date.now()), 5_000);
     return () => clearInterval(t);
   }, []);
 
@@ -524,8 +531,7 @@ function BotRuntime({
     // Outside the grace window, surface the verbose error so a
     // chronically-failing bot is visible rather than masked.
     const startedAtMs = startedAt ? new Date(startedAt).getTime() : 0;
-    const inGrace =
-      startedAtMs > 0 && Date.now() - startedAtMs < STARTUP_GRACE_MS;
+    const inGrace = startedAtMs > 0 && now - startedAtMs < STARTUP_GRACE_MS;
     return (
       <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
         {inGrace ? (

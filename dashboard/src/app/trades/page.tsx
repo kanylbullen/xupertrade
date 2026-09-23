@@ -15,8 +15,7 @@ import { exclusiveEnd, parseDateParam, parsePageParam } from "./filters";
 
 export const dynamic = "force-dynamic";
 
-const FILTERS = ["all", "paper", "testnet", "mainnet"] as const;
-type Filter = (typeof FILTERS)[number];
+type Filter = "all" | "paper" | "testnet" | "mainnet";
 
 const PAGE_SIZE = 50;
 
