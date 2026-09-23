@@ -21,8 +21,8 @@ lives in history. **Never commit any of these:**
 |---|---|---|
 | Telegram bot token | `8639592584:AAGj…` (digits, colon, 35 base64 chars) | Phase secrets manager (see § 3) |
 | HyperLiquid private key | `0x` + 64 hex chars | Phase secrets manager |
-| Cloudflare API token | 40-char base64 | Phase (`TLS_CF_API_TOKEN`), or Redis (`dashboard:tls:cf_token`) via operator-only `POST /api/tls/configure` |
-| OIDC client secret | provider-specific | Redis (`dashboard:auth:oidc_client_secret`) |
+| Cloudflare API token | 40-char base64 | Redis (`dashboard:tls:cf_token`) via operator-only `POST /api/tls/configure`. `lib/tls-config.ts` reads `TLS_CF_API_TOKEN` first, but `docker-compose.yml` doesn't pass it to the dashboard today |
+| OIDC client secret | provider-specific | Phase (`OIDC_CLIENT_SECRET`), copied into Redis (`dashboard:auth:oidc:client_secret`) at start |
 | `API_KEY` for the bot HTTP API | random string | Phase secrets manager |
 | Phase service token | base64 | only on the host's `~/.phase/` config; NEVER in repo |
 | Personal email used live | `you@yourdomain.com` | Phase (`TELEGRAM_*`, OIDC config); generic placeholder in docs (`you@example.com`) |
@@ -226,8 +226,9 @@ the installation authenticates: the stored `dashboard:auth:mode` is gone
 (Redis flushed, or the `redisdata` volume removed) and no basic user or
 OIDC config survived, or a stored/env mode is not a real mode. Every
 page redirects to `/login`, which explains this instead of rendering
-data. **`POST /api/auth/configure` cannot fix it** — it needs a
-signed-in operator, and sign-in sits behind the same lock — and there is **no env
+data. **`POST /api/auth/configure` cannot fix it** — while locked,
+`proxy.ts` redirects every non-public path to `/login`, that route
+included, even for a valid session — and there is **no env
 var for a basic user**: `getAuthConfig` reads only `AUTH_MODE` and
 `OIDC_*` from env. If `AUTH_MODE` in Phase is itself a typo, fix it
 there first — env wins over everything below. Otherwise any one of
