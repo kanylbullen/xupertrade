@@ -16,15 +16,22 @@
 #      the default username. A basic-auth username IS the tenant lookup
 #      key, so any other name signs in as a new, empty tenant with no
 #      operator rights.
-#   2. Prompts for the password twice, without echo.
+#      If a different basic user is already stored, it shows that name
+#      and asks before replacing it (default: no, nothing is written).
+#   2. Prompts for the password twice, without echo. Every character
+#      counts, leading and trailing whitespace included.
 #   3. bcrypt-hashes it (cost 12, the dashboard's own @node-rs/bcrypt —
 #      the same call Options -> Authentication makes) inside the
 #      dashboard container, with the password on stdin.
 #   4. Writes `dashboard:auth:basic:user` and `dashboard:auth:basic:hash`
-#      in one MULTI/EXEC, fed to redis-cli on stdin. When the stored
-#      mode is missing or unreadable (what makes the resolver answer
-#      `locked`) it also stores `basic`; a valid stored mode is left
-#      alone.
+#      in one MULTI/EXEC, fed to redis-cli on stdin. The stored mode:
+#        - missing or unreadable (what makes the resolver answer
+#          `locked`): also stores `basic`;
+#        - `disabled`: warns that the dashboard is OPEN right now and
+#          offers to switch it to `basic` (default: leave it). Builds
+#          before #171 copied AUTH_MODE=disabled from Phase into Redis,
+#          where it outlives the env var;
+#        - `basic` / `oidc`: left alone.
 #   5. Reads the keys back to confirm they landed.
 #
 # The password and the hash never appear in argv, in the output, or on
@@ -43,6 +50,13 @@ KEY_HASH=dashboard:auth:basic:hash
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# y/N prompt; anything but y/Y (including just Enter) is no.
+confirm() {
+    local answer
+    read -r -p "$1 [y/N] " answer
+    [[ $answer == [yY] ]]
+}
+
 find_container() {
     local service=$1 names count
     names=$(docker ps --filter "label=com.docker.compose.service=$service" --format '{{.Names}}')
@@ -56,6 +70,12 @@ command -v docker >/dev/null || die 'docker not found — run this on the dashbo
 
 DASH=${DASHBOARD_CONTAINER:-$(find_container dashboard)}
 REDIS=${REDIS_CONTAINER:-$(find_container redis)}
+
+# Current state, read before anything is asked or written.
+stored_mode=$(docker exec "$REDIS" redis-cli --raw GET "$KEY_MODE") \
+    || die 'could not read Redis'
+current_user=$(docker exec "$REDIS" redis-cli --raw GET "$KEY_USER") \
+    || die 'could not read Redis'
 
 # --- 1. username --------------------------------------------------------
 operator_sub=''
@@ -82,10 +102,19 @@ fi
 if [[ -n $operator_sub && $username != "$operator_sub" ]]; then
     echo 'WARNING: that is not the operator identity — sign-in will not reach the operator tenant.' >&2
 fi
+# There is one basic user. Setting a different name replaces the
+# current one, which then can no longer sign in.
+if [[ -n $current_user && $current_user != "$username" ]]; then
+    echo "A different basic user is already set: $current_user"
+    confirm "Replace it with $username? ($current_user will no longer be able to sign in)" \
+        || die 'left the existing basic user unchanged; nothing written'
+fi
 
 # --- 2. password --------------------------------------------------------
-read -r -s -p 'Password: ' password; echo
-read -r -s -p 'Repeat password: ' password2; echo
+# IFS= so leading/trailing whitespace is kept: it is part of the
+# password the operator will type at /login.
+IFS= read -r -s -p 'Password: ' password; echo
+IFS= read -r -s -p 'Repeat password: ' password2; echo
 [[ $password == "$password2" ]] || die 'passwords do not match'
 unset password2
 [[ ${#password} -ge 12 ]] || die 'password must be at least 12 characters'
@@ -109,10 +138,22 @@ unset password
     || die 'dashboard returned something that is not a cost-12 bcrypt hash'
 
 # --- 4. write -----------------------------------------------------------
-stored_mode=$(docker exec "$REDIS" redis-cli --raw GET "$KEY_MODE") \
-    || die 'could not read Redis'
 case $stored_mode in
-    basic|oidc|disabled) set_mode='' ;;
+    basic|oidc) set_mode='' ;;
+    disabled)
+        set_mode=''
+        {
+            echo
+            echo '!!! WARNING: the stored auth mode is "disabled" — the dashboard is OPEN'
+            echo '!!! to anyone who can reach it, with or without this user, including the'
+            echo "!!! operator tenant's trades and positions. Builds before #171 copied"
+            echo '!!! AUTH_MODE=disabled from Phase into Redis, where it outlives the env var.'
+            echo
+        } >&2
+        if confirm 'Switch the stored mode to basic (sign-in required)?'; then
+            set_mode=basic
+        fi
+        ;;
     *) set_mode=basic ;;
 esac
 
@@ -133,7 +174,10 @@ unset hash
 
 echo "Basic-auth user set: $username"
 if [[ -n $set_mode ]]; then
-    echo "Stored auth mode was missing or unreadable; set it to '$set_mode'."
+    echo "Stored auth mode was '${stored_mode:-<missing>}'; set it to '$set_mode'."
+elif [[ $stored_mode == disabled ]]; then
+    echo 'WARNING: stored auth mode left at "disabled" — the dashboard is still OPEN.' >&2
+    echo "  To require sign-in later: docker exec $REDIS redis-cli SET $KEY_MODE basic" >&2
 else
     echo "Stored auth mode '$stored_mode' left unchanged."
 fi

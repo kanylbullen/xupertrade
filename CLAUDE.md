@@ -251,7 +251,9 @@ these gets you back in:
    password, hashes it with the dashboard's own bcrypt inside the
    dashboard container, and writes `dashboard:auth:basic:{user,hash}`
    (plus `dashboard:auth:mode=basic` if the stored mode is missing or
-   unreadable). Never prints the password or hash; no restart needed.
+   unreadable). Asks before replacing a different existing basic user,
+   and warns — offering to switch to `basic` — if the stored mode is
+   `disabled`. Never prints the password or hash; no restart needed.
    Also the way to reset a forgotten basic password.
 
 **A fresh install boots `locked` too.** The resolver only answers
@@ -266,11 +268,29 @@ lists the variables.
 
 **Don't use `AUTH_MODE=disabled` as the way out.** It opens every page,
 the operator tenant's trades and positions included, to anyone who can
-reach the dashboard for as long as it is set. It is deliberately
+reach the dashboard for as long as it is set. Since #171 it is
 env-only — `phase-sync.ts` never copies `disabled` into Redis — so it
 stops applying once removed, but it is not a recovery path, and not a
 bootstrap one either: Options → Authentication needs a signed-in
 operator, and `disabled` signs nobody in.
+
+**Check for a leftover stored `disabled`.** Builds before #171 copied
+*any* `AUTH_MODE` into Redis on every boot, so an install that ever
+booted with `AUTH_MODE=disabled` still has `dashboard:auth:mode=disabled`
+stored — and stays open after the env var is gone:
+
+```bash
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "docker exec hypertrade-redis-1 redis-cli GET dashboard:auth:mode"
+```
+
+`basic` or `oidc` is fine. If it says `disabled` and that is not a
+deliberate choice, the dashboard is open to anyone right now: make sure
+a way to sign in exists first (a basic user — `scripts/set-basic-auth.sh`
+offers the switch itself — or the `OIDC_*` config), then
+`docker exec hypertrade-redis-1 redis-cli SET dashboard:auth:mode basic`
+(or `oidc`). Takes effect within 30 seconds. Setting it without a
+working sign-in path locks everyone out, operator included.
 
 ### Secrets management — Phase
 
