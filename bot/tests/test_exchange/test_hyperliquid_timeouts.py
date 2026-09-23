@@ -110,13 +110,13 @@ async def test_place_order_returns_rejected_on_timeout(fake_exchange):
 async def test_cancel_order_returns_false_on_timeout(fake_exchange):
     """Hung cancel doesn't propagate — returns False so the caller
     can decide on follow-up action."""
-    def hang(_oid):
+    def hang(_coin, _oid):
         time.sleep(2.0)
         return None
     fake_exchange._exchange.cancel = hang
 
     with patch.object(settings, "hl_order_timeout_seconds", 0.3):
-        ok = await fake_exchange.cancel_order("xyz")
+        ok = await fake_exchange.cancel_order("123", "BTC")
     assert ok is False
 
 

@@ -76,7 +76,12 @@ class Exchange(ABC):
         ...
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """Cancel a resting order. True only when the exchange confirmed it.
+
+        `symbol` is required: HyperLiquid identifies an order by coin and
+        oid together, so an id alone cannot be cancelled.
+        """
         ...
 
     @abstractmethod

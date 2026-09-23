@@ -722,6 +722,13 @@ stay in **Done** with the commit hash so the agent has institutional memory.
 #### Full-stack analysis (2026-09-15)
 - [x] Full-stack analysis 2026-09-15 — live production state (operator tenant, all three modes), strategy performance since the 2026-05-29 evaluation, a money-path review of the bot engine, a tenant-isolation review of the dashboard, local quality gates, and documentation drift. Read-only; nothing on the server, in Redis, or in the DB was changed. Surfaced the reconcile read-failure bug (now Open — Critical above), the engine/dashboard hardening items (now Open — Medium above), and this file's drift (fixed by this PR). Report: `bot/reports/analysis-2026-09-15.md` (PR #163).
 
+#### HyperLiquid exchange-wrapper hardening (2026-09-23, analysis-2026-09-15 § 4)
+- [x] `Order.size` from the HL wrapper is what HL took — the fill's `totalSz`, else the szDecimals-rounded size that was submitted — on both the immediate-fill and the timeout-poll path, never the unrounded request (the live 247× "BTC size mismatch — DB total 0.002523 vs exchange 0.002520"). The DB only stops drifting once the runner books `order.size` instead of its local `size`; that one-line runner change is described in the PR notes. — (PR #<n>)
+- [x] A failed or empty `meta()` at HL-exchange construction is retried inside the init retry loop and then raises, instead of booting with an empty szDecimals map that rounded every coin to 4 dp; `place_order` refuses a coin with no szDecimals rather than guessing. — (PR #<n>)
+- [x] HL read retry uses the `_is_retryable_server_error` predicate (transient network errors, including `requests`' own ConnectionError/Timeout, and HTTP 408/429/502/503/504 read from `status_code`) instead of an exception-type tuple; a 4xx or plain 500 fails on the first attempt. Writes still never retry. — (PR #<n>)
+- [x] `cancel_order` calls the SDK as `cancel(coin, oid)` — it passed only the id, so every call was a TypeError swallowed as False — and returns True only when HL's per-order status is `"success"`. `Exchange.cancel_order` now takes the symbol. — (PR #<n>)
+- [x] An order HL leaves resting is cancelled with a log line and reported CANCELLED, or PENDING with an error log when the cancel is not confirmed. Unreachable while every order is IOC market; it is the guard for the first GTC limit order. — (PR #<n>)
+
 ---
 
 ## 6. Working principles
