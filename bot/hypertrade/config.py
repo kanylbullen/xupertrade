@@ -160,6 +160,16 @@ class Settings(BaseSettings):
     # so the allowlist was never actually enforced.
     tenant_allowed_strategies: str = ""
 
+    # Per-tenant operator-set cap on concurrently enabled strategies
+    # (`tenants.max_active_strategies`), injected as a decimal string
+    # by the dashboard orchestrator. Empty = no cap (NULL in the DB);
+    # "0" is a real cap. Applied once at boot by
+    # `hypertrade/strategy_cap.py`, which disables the surplus via the
+    # Redis `disabled` set. Kept as a string rather than `int | None`
+    # so a malformed value fails CLOSED in that module instead of
+    # crashing Settings on load.
+    tenant_max_active_strategies: str = ""
+
     # Expiry dates for this tenant's HL private-key secrets, injected
     # by the dashboard orchestrator as a JSON object
     # `{"SECRET_KEY": "ISO-8601"}`. Drives the daily rotation-reminder

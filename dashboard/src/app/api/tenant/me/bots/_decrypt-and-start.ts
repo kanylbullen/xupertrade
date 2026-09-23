@@ -143,6 +143,10 @@ export async function decryptAndStart(args: Args): Promise<Result> {
       // here (dashboard-side, where the table is owned) is what makes
       // the per-tenant allowlist actually enforceable.
       allowedStrategies: tenant.allowedStrategies,
+      // The toggle route only gates enabling; a fresh bot boots with
+      // every allowlisted strategy on. The bot trims to this cap at
+      // boot. Same grant reason as the allowlist.
+      maxActiveStrategies: tenant.maxActiveStrategies,
       // Same rationale — the bot has no grant on `tenant_secrets`.
       // `secretRows` is already in hand from the decrypt loop above,
       // so this costs no extra query.

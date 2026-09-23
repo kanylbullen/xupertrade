@@ -19,6 +19,7 @@ from hypertrade.engine.strategy_allowlist import (
     parse_tenant_allowlist,
 )
 from hypertrade.strategies.registry import get_strategy, list_strategies, load_all
+from hypertrade.strategy_cap import enforce_strategy_cap
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,6 +140,19 @@ async def main() -> None:
             "Tenant allowlist applied: %d/%d strategies remain: %s",
             len(allowed_names), before, allowed_names,
         )
+
+    # Per-tenant cap on enabled strategies (alembic 0016). The dashboard
+    # only checks it when a tenant switches a strategy ON; without this
+    # a fresh bot booted with every allowlisted strategy enabled. Trims
+    # the surplus into the Redis `disabled` set before the first tick.
+    # Unset env = no cap; malformed or no Redis fails CLOSED.
+    allowed_names = await enforce_strategy_cap(
+        allowed_names,
+        settings.tenant_max_active_strategies,
+        control,
+        event_bus,
+        settings.exchange_mode,
+    )
     strategies = [get_strategy(name) for name in allowed_names]
     logger.info("Active strategies: %s", [s.name for s in strategies])
 
