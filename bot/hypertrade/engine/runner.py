@@ -79,6 +79,9 @@ _TRANSIENT_NETWORK_ERRORS = (
     aiohttp.ClientError,
 )
 
+# HTTP statuses from the HL SDK that clear on their own.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 502, 503, 504})
+
 
 def _is_transient_network_error(exc: BaseException) -> bool:
     """True for HL/network outages where the bot recovers on its own."""
@@ -91,13 +94,16 @@ def _is_transient_network_error(exc: BaseException) -> bool:
         return _is_transient_network_error(exc.__cause__)
     if isinstance(exc, _TRANSIENT_NETWORK_ERRORS):
         return True
-    # HL SDK ServerError uses a single class for all 4xx/5xx — only
-    # the 5xx + 408/429 are transient (4xx validation/auth aren't).
+    # The HL SDK raises `ServerError` for >= 500 and `ClientError` for
+    # 4xx, both carrying `.status_code`. Only gateway/unavailable 5xx and
+    # request-timeout / rate-limit clear on their own. Read the status
+    # instead of hunting for digits in the message: the message is the
+    # response body, and a 500 whose body mentions "502" is still a 500
+    # (same predicate as the exchange wrapper's read retry).
     try:
-        from hyperliquid.utils.error import ServerError  # noqa: PLC0415
-        if isinstance(exc, ServerError):
-            msg = str(exc)
-            return any(c in msg for c in ("502", "503", "504", "408", "429"))
+        from hyperliquid.utils.error import ClientError, ServerError  # noqa: PLC0415
+        if isinstance(exc, (ServerError, ClientError)):
+            return getattr(exc, "status_code", None) in _TRANSIENT_HTTP_STATUSES
     except ImportError:  # SDK not installed (unlikely in prod, possible in tests)
         pass
     # Bare `requests.exceptions.ConnectionError` doesn't subclass our
@@ -1354,6 +1360,22 @@ class EngineRunner:
         if order.status.value != "filled":
             logger.warning("Order not filled: %s", order.status)
             return False
+
+        # From here on `size` is what the exchange FILLED, not what we
+        # asked for: HyperLiquid rounds to the coin's szDecimals (and an
+        # IOC can fill short), and `Order.size` carries the filled amount.
+        # The fee, the realised PnL, the trade and position rows and the
+        # TradeExecuted event all used the unrounded request, which is the
+        # live "size mismatch" reconcile warning (analysis-2026-09-15.md
+        # § 4). A close that fills short still closes the whole DB row —
+        # partial-fill handling for closes is a separate follow-up.
+        if abs(order.size - size) > 1e-12:
+            logger.info(
+                "[%s] %s %s filled %s (requested %s)",
+                signal.strategy_name, signal.action.value, signal.symbol,
+                order.size, size,
+            )
+        size = order.size
 
         filled_price = order.filled_price or 0
         fee = filled_price * size * settings.taker_fee_rate

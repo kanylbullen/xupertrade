@@ -35,8 +35,7 @@ def test_classifies_standard_network_errors_as_transient(exc):
 
 
 def test_classifies_5xx_server_error_as_transient():
-    """HL SDK's ServerError is one class for all HTTP errors —
-    discriminate by code in the message."""
+    """HL SDK HTTP errors are discriminated by their `.status_code`."""
     try:
         from hyperliquid.utils.error import ServerError
     except ImportError:
@@ -86,6 +85,45 @@ def test_classifies_requests_connection_error_via_name_match():
         pass
     FakeConnErr.__name__ = "ConnectionError"
     assert _is_transient_network_error(FakeConnErr()) is True
+
+
+def test_status_code_decides_not_the_message_body():
+    """The SDK's `ServerError`/`ClientError` carry `.status_code`; the
+    message is the response body. A 500 whose body mentions "502" is a
+    500, and a 502 with an empty body is still a 502."""
+    from hyperliquid.utils.error import ServerError
+
+    assert _is_transient_network_error(
+        ServerError(500, "upstream said 502 earlier")
+    ) is False
+    assert _is_transient_network_error(ServerError(502, "")) is True
+
+
+@pytest.mark.parametrize("code, transient", [
+    (408, True), (429, True), (400, False), (401, False), (422, False),
+])
+def test_client_error_4xx_classified_by_status(code, transient):
+    """4xx arrives as `ClientError`, which the old message match never
+    looked at — a 429 rate limit was treated as a bug and published."""
+    from hyperliquid.utils.error import ClientError
+
+    exc = ClientError(code, None, "body", None)
+    assert _is_transient_network_error(exc) is transient
+
+
+def test_exchange_read_error_unwraps_to_status():
+    from hyperliquid.utils.error import ClientError, ServerError
+
+    from hypertrade.exchange.base import ExchangeReadError
+
+    def _wrapped(cause):
+        try:
+            raise ExchangeReadError("get_positions failed") from cause
+        except ExchangeReadError as e:
+            return e
+
+    assert _is_transient_network_error(_wrapped(ClientError(429, None, "", None))) is True
+    assert _is_transient_network_error(_wrapped(ServerError(500, "boom"))) is False
 
 
 def test_classifies_read_timeout_via_name_match():
