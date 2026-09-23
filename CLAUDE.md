@@ -254,17 +254,30 @@ these gets you back in:
    unreadable). Never prints the password or hash; no restart needed.
    Also the way to reset a forgotten basic password.
 
+**A fresh install boots `locked` too.** The resolver only answers
+`disabled` for a database with no tenants, and that never happens:
+alembic 0011 refuses to run without the operator tenant row, and before
+migrations the tenant probe fails, which counts as "tenants exist". So
+configure sign-in for the first boot the same way — `AUTH_MODE=oidc`
+plus the three `OIDC_*` values in Phase before the first `up` (sign in
+with the identity whose `sub` equals the operator row's
+`authentik_sub`), or path 3 once the stack is running. `.env.example`
+lists the variables.
+
 **Don't use `AUTH_MODE=disabled` as the way out.** It opens every page,
 the operator tenant's trades and positions included, to anyone who can
 reach the dashboard for as long as it is set. It is deliberately
 env-only — `phase-sync.ts` never copies `disabled` into Redis — so it
-stops applying once removed, but it is not a recovery path.
+stops applying once removed, but it is not a recovery path, and not a
+bootstrap one either: Options → Authentication needs a signed-in
+operator, and `disabled` signs nobody in.
 
 ### Secrets management — Phase
 
 **Source of truth: a self-hosted [Phase](https://phase.dev) instance.**
 All runtime secrets (HL keys, Telegram token+chat, API_KEY, public URL,
-Caddy host, vault tracking address, mainnet allowlist) live there in the
+Caddy host, vault tracking address, mainnet allowlist, dashboard sign-in
+`AUTH_MODE` + `OIDC_*`) live there in the
 `hypertrade` app's `Development` env. The host has the `phase` CLI
 installed + authenticated via service token. **No `.env` file on the
 host** — anything that previously lived there is now in Phase.

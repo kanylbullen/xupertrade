@@ -71,9 +71,12 @@ export function isConfigurableAuthMode(
 
 /**
  * Does this installation already have tenants? Used only by
- * `resolveMode`'s missing-key branch, to tell a genuinely fresh
- * install (bootstrap must stay possible) from an existing one whose
- * Redis was flushed (must fail closed).
+ * `resolveMode`'s missing-key branch, to tell an empty database from
+ * an existing install whose Redis was flushed (must fail closed).
+ *
+ * In practice the answer is always `true` — see the "no tenants"
+ * bullet on `resolveMode`: migrated databases always hold the
+ * operator row, and an unmigrated one makes this query throw.
  *
  * Lazily imported so the Postgres client is only pulled in on the
  * rare path that needs it — the steady state has a stored mode and
@@ -130,13 +133,20 @@ export type TenantProbe = () => Promise<boolean>;
  *       - a basic user + hash survive → `basic`
  *       - an OIDC issuer + client id survive (these come back from
  *         Phase env via `phase-sync.ts` on every boot) → `oidc`
- *       - nothing survives and the DB has no tenants → `disabled`,
- *         because a first boot has nothing to leak and has to be able
- *         to bootstrap
+ *       - nothing survives and the DB has no tenants → `disabled`.
+ *         Kept because an empty database has nothing to leak, but
+ *         effectively unreachable: alembic 0011 refuses to run without
+ *         the operator tenant row, so a migrated database always has
+ *         one, and before migrations the probe's query fails, which
+ *         answers "tenants exist". A FRESH INSTALL THEREFORE BOOTS
+ *         `locked` — it does not get an open first boot to configure
+ *         auth in (and `disabled` couldn't configure it anyway: the
+ *         configure route needs a signed-in operator). Bootstrap goes
+ *         through `AUTH_MODE=oidc` + `OIDC_*` in env, or
+ *         `scripts/set-basic-auth.sh`; see `.env.example`.
  *       - nothing survives and tenants exist → `locked`: the login
- *         page explains what happened and no page renders data. The
- *         operator recovers by setting `AUTH_MODE` (and the OIDC
- *         vars) in Phase and restarting, or by restoring `dump.rdb`.
+ *         page explains what happened and no page renders data.
+ *         Recovery: CLAUDE.md § 3, "Dashboard auth recovery".
  */
 export async function resolveMode(args: {
   envMode: string;
