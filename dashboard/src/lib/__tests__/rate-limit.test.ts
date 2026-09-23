@@ -245,3 +245,63 @@ describe("checkRateLimit — tenant-unlock fails closed", () => {
     expect(r.resetInSeconds).toBe(120);
   });
 });
+
+/**
+ * Post-merge review of #168, Low. Before #168 a rejected exec threw and
+ * the login route 500'd — effectively a deny. #168 routed that path
+ * through the scope policy, which made the login buckets fail OPEN on a
+ * Redis error: unlimited password guesses for anyone who can make the
+ * pipeline fail. Login needs Redis for the session anyway, so these
+ * scopes deny instead.
+ */
+describe.each(["auth-login-ip", "auth-login-user"])(
+  "checkRateLimit — %s fails closed",
+  (scope) => {
+    it("denies when pipeline.exec rejects, reporting the full window", async () => {
+      const { client, pipeline } = makeRedisStub([]);
+      pipeline.exec.mockRejectedValue(new Error("ECONNREFUSED"));
+      const r = await checkRateLimit(scope, "bucket", 10, 900, client);
+      expect(r.allowed).toBe(false);
+      expect(r.resetInSeconds).toBe(900);
+    });
+
+    it("denies when pipeline.exec returns null", async () => {
+      const { client } = makeRedisStub(null);
+      const r = await checkRateLimit(scope, "bucket", 10, 900, client);
+      expect(r.allowed).toBe(false);
+    });
+
+    it("denies when the INCR command errors", async () => {
+      const { client } = makeRedisStub([
+        [new Error("OOM command not allowed"), null],
+        [null, 1],
+        [null, 900],
+      ]);
+      const r = await checkRateLimit(scope, "bucket", 10, 900, client);
+      expect(r.allowed).toBe(false);
+    });
+
+    it("still allows a normal under-limit attempt", async () => {
+      const { client } = makeRedisStub([
+        [null, 1],
+        [null, 1],
+        [null, 900],
+      ]);
+      const r = await checkRateLimit(scope, "bucket", 10, 900, client);
+      expect(r.allowed).toBe(true);
+      expect(r.remaining).toBe(9);
+    });
+  },
+);
+
+describe("checkRateLimit — other scopes keep failing open", () => {
+  it.each(["auth-oidc-start", "unlock-link-send", "tg-link-mint"])(
+    "%s allows when pipeline.exec rejects",
+    async (scope) => {
+      const { client, pipeline } = makeRedisStub([]);
+      pipeline.exec.mockRejectedValue(new Error("ECONNREFUSED"));
+      const r = await checkRateLimit(scope, "bucket", 5, 300, client);
+      expect(r.allowed).toBe(true);
+    },
+  );
+});
