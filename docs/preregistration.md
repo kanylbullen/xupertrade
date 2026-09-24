@@ -1,6 +1,6 @@
 # Pre-registration: strategy candidates and their two variants
 
-> **Freeze date: the date this file was merged to master.** It is the
+> **Freeze date: the date this file was merged to master (PR #178).** It is the
 > committer date of the squash commit that added the file:
 > `git log --diff-filter=A --format='%cs %h' origin/master -- docs/preregistration.md`.
 > From that date on, forward evidence for every row below starts to count.
@@ -429,4 +429,4 @@ what it supersedes, and its forward window follows rule 2 in § 0.
 
 | # | Date (UTC) | Change | Applies to | Reason | PR |
 |---|---|---|---|---|---|
-| 1 | Freeze date (merge date of the PR that added this file) | Initial registration: variant A at `02ed3c1` and the variant B specification for the seven candidates; live set per 5.11; 14 retired per 5.2 | all | NU-10 point 1 | the PR that added this file |
+| 1 | Freeze date (merge date of #178) | Initial registration: variant A at `02ed3c1` and the variant B specification for the seven candidates; live set per 5.11; 14 retired per 5.2 | all | NU-10 point 1 | #178 |
