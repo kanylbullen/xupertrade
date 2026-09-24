@@ -39,7 +39,7 @@ Mainnet handlar inte. Operatörens egna vault-innehav stäms inte av mot scanner
 
 **Det viktigaste** är att inom tio veckor få ett ärligt och reproducerbart svar på om någon strategi har edge efter avgifter och funding. Fram till dess ska riktiga pengar hållas borta från en motor vars stopp bara finns i minnet.
 
-**Målbilden** är en bok på högst sju strategier, var och en med dokumenterad out-of-sample-evidens. Ledgern ska stämma mot börsen på dollarn och stoppen ska ligga på börsen. Larmen ska köras utanför hosten, återställningen ska vara testad och CI ska grinda varje merge. Det ska vara ett system som en person med agenter kan ändra varje dag utan att gissa.
+**Målbilden** är en bok på högst sju strategier, var och en med dokumenterad out-of-sample-evidens. Ledgern ska stämma mot börsen på dollarn och stoppen ska ligga på börsen. Larmen ska köras utanför hosten, en återställning ska inte kunna likvidera och CI ska grinda varje merge. Det ska vara ett system som en person med agenter kan ändra varje dag utan att gissa.
 
 **Planen har tre steg:**
 
@@ -222,7 +222,7 @@ Följande startar först efter ett ja i B1: netting-executorn, WebSocket-fillstr
 |---|---|---|---|---|
 | Ledger-residual: \|Δequity − (realized + funding − avgifter + Δunrealized)\| per månad | testnet; mainnet från pilotens första dag | testnet −$54…+$40/mån | < $1/mån | Nästa |
 | Funding-täckning: funding-rader per öppen positionstimme | testnet och paper | testnet: 1 rad sedan april; paper: modelleras inte, så paperns residual på $0 säger ingenting | ≥1 rad per öppen positionstimme i båda | Nu (NU-6) |
-| Återställbarhet (RPO och restore-test) | DB och Redis | ≤24 h via PBS, kraschkonsistent, aldrig testat | ≤24 h med en konsekvent dump i varje PBS-snapshot; månatligt restore-test grönt 3/3 | Nu |
+| Återställbarhet (RPO) | DB och Redis | ≤24 h via PBS, kraschkonsistent | Oförändrat. Operatören har accepterat risken (2026-09-24); en återställning får inte likvidera (NU-2-vakterna) | Nu |
 | Tid till upptäckt av host- eller botavbrott | alla körande bottar | obegränsad (22,7 h obemärkt) | ≤10 min, externt | Nu |
 | Tid till upptäckt av penningfel | testnet och paper | ≈108 d (fantomer), ≈150 d (funding) | <24 h | Nu |
 | Exits som fryses automatiskt vid Redis- eller DB-fel | alla modes | alla exits stoppas | 0; paus bara vid bekräftad inaktuell DB, med eskalerande larm | Nu |
@@ -317,7 +317,7 @@ B1 flyttas bara om NA-1 eller NA-2 inte är klara i vecka 9. Då flyttas det hö
 | Vecka | Arbete |
 |---|---|
 | 1 | NU-1 (dag 1); besluten 5.2, 5.11 och 5.12; NU-10; NU-4; NU-2 punkt 0–3; NU-11 (CLAUDE.md); NU-8 punkt 0–2 |
-| 2 | NU-2 kodvakter (första PR:en på orderstigen); NU-3; NU-6.1; NU-7.1; NU-8 punkt 3–6 (efter första gröna restore-testet) |
+| 2 | NU-2 kodvakter (första PR:en på orderstigen); NU-3; NU-6.1; NU-7.1; NU-8 punkt 3–6 |
 | 2–4 | NU-5 (fem PR:er, en i taget); NU-6.2–6.5; NU-7.2–7.4 |
 | 4 | NU-9; NU-11-hooken; NA-1 startar |
 
@@ -348,43 +348,31 @@ B1 flyttas bara om NA-1 eller NA-2 inte är klara i vecka 9. Då flyttas det hö
   - reserveBotStart vägrar beta-tenanten.
   - Hävstångshashen saknar overrides för avstängda strategier (ETH 8x försvinner ur bootloggen vid nästa omstart).
 
-#### NU-2 · Konsekventa dumpar i PBS, ett restore-test och en återställning som inte likviderar
-- **Vad:** en konsekvent Postgres-dump och Redis-kopia flera gånger per dygn som PBS får med, ett månatligt restore-test, en DR-runbook och två kodvakter som gör en återställning ofarlig.
+#### NU-2 · En återställning som inte likviderar
+- **Vad:** två kodvakter och en kort runbook för återställning från PBS. Backupen i sig ändras inte.
 - **Varför:**
-  - PBS tar dagliga backuper av containern (bekräftat av operatören 2026-09-24), men Postgres kopieras medan den kör. Det är kraschkonsistent, alltså i regel återställbart via WAL, men inte garanterat, och det har aldrig testats. `archive_mode=off`, och den senaste logiska dumpen är från 2026-05-11.
-  - En återställning är farlig även när backupen är bra. Med upp till ett dygn gammal data marknadsstänger reconcile pass 2 alla börspositioner som saknar DB-rad (repo.py:1039-1117), och en återställd eller tom Redis läses som "ej pausad" (control.py:48-52).
+  - PBS tar dagliga backuper av containern. Postgres-kopian är kraschkonsistent och otestad, men operatören har bedömt risken som godtagbar (2026-09-24). Dumpar, restore-test och extern lagring görs därför inte.
+  - En återställning är farlig även när backupen är bra. Med upp till ett dygn gammal data marknadsstänger reconcile pass 2 alla börspositioner som saknar DB-rad (repo.py:1039-1117), och en återställd eller tömd Redis läses som "ej pausad" (control.py:48-52). Samma sak händer om Redis töms utan någon återställning alls.
   - En vakt som bootar pausad skulle frysa även exits, och före SE-1 finns inga stopp på börsen. Därför slår den automatiska vakten på kill switch, inte paus.
 - **Hur:**
-  0. Skapa healthchecks.io-kontot med Telegram och e-post redan här; NU-3 återanvänder det. Ping-URL:er hämtas från Phase eller env, aldrig ur repot. Lägg till mönster för hc-ping-URL:er i `.githooks/pre-commit` och `.gitleaks.toml`.
-  1. Kontrollera i PBS vilket backupläge (snapshot eller suspend) och vilken tid jobbet har, och att containerns hela rootfs med Docker-volymerna ingår. Notera i bilaga P om PBS replikeras utanför huset.
-  2. Skriv `ops/backup.sh`. Den körs av host-cron var 6:e timme och gör följande:
-     - kör `pg_dump -Fc` och kopierar Redis-RDB efter `BGSAVE`, till en lokal katalog på containerns rootfs som PBS får med
-     - behåller 2 dygn lokalt; PBS står för historiken
-     - pingar healthchecks när den lyckas
-     - skickar till extern lagring med restic bara om `RESTIC_REPOSITORY` är satt, för det fall PBS inte replikeras utanför huset
-  3. Kör ett restore-test varje månad i en engångs-postgres:16 från senaste dumpen: `alembic current` plus radräkning för trades, positions och tenants. Gör en gång per kvartal en full återställning av en PBS-snapshot till en frånkopplad testcontainer.
-  4. Kodvakt för Redis (S). Om Redis-sentinel saknas bootar boten med kill switch aktiv, så att opens blockeras men exits körs. Den larmar med listan över öppna positioner. Om DB dessutom verkar inaktuell, alltså om börsens userFills innehåller fills som är nyare än den nyaste trade-raden, bootar boten pausad. Larmet upprepas då och eskaleras efter N minuter i frysning.
-  5. Kodvakt för reconcile (S). Reconcile pass 2 larmar i stället för att stänga i tre fall:
+  1. Kodvakt för Redis (S). Om Redis-sentinel saknas bootar boten med kill switch aktiv, så att opens blockeras men exits körs. Den larmar med listan över öppna positioner. Om DB dessutom verkar inaktuell, alltså om börsens userFills innehåller fills som är nyare än den nyaste trade-raden, bootar boten pausad. Larmet upprepas då och eskaleras efter N minuter i frysning.
+  2. Kodvakt för reconcile (S). Reconcile pass 2 larmar i stället för att stänga i tre fall:
      - fler än 1 orphan per pass
      - symbolen ligger utanför det registrerade universumet
      - nyaste DB-rad är äldre än N timmar
-  6. Skriv `docs/runbooks/disaster-recovery.md`, med återställning från PBS som huvudväg. Den gäller när en människa är närvarande:
+  3. `docs/runbooks/disaster-recovery.md` (kort): återställning från PBS när en människa är närvarande.
      1. Sätt kill switch och `paused=1` innan första boten startar.
      2. Kör paritetskontrollen.
      3. Unpausa inom 30 minuter.
      4. Slå av kill switch sist.
 
-     Radera också dumparna som ligger i checkouten, och rätta eller radera `bot/scripts/migrate.sh`, där rad 7 är en inaktuell användningskommentar.
-- **Insats:** S–M (dumpar, restore-test och runbook S; kodvakterna S–M) · **Påverkan:** 5/5 · **Beroenden:** inga · **Delegering:** skripten kan gå till kanban. Kodvakterna görs med Opus och full /review i en PR.
-- **Risker:** dumparna får inte fylla disken (2 dygn lokalt, diskkontroll i skriptet). Orphan-vakten får inte göra verkliga orphans permanenta, så larmet måste kvitteras manuellt.
-- **Klart när:**
-  - Nyaste dumpen är ≤6 h gammal och nyaste PBS-backupen ≤24 h, annars kommer larm.
-  - Första restore-testet är grönt.
-  - Tester visar att:
-    - tom DB plus börspositioner ger larm och inte stängning
-    - saknad sentinel ger kill switch med fungerande exits
-    - saknad sentinel plus inaktuell DB ger paus med eskalerande larm
-  - En testcommit med en påhittad hc-ping-URL stoppas av hooken.
+     Radera också dumparna som ligger i checkouten, och rätta `bot/scripts/migrate.sh`, där rad 7 är en inaktuell användningskommentar.
+- **Insats:** S · **Påverkan:** 4/5 · **Beroenden:** inga · **Delegering:** Opus med full /review, eftersom vakterna rör orderstigen.
+- **Risker:** orphan-vakten får inte göra verkliga orphans permanenta, så larmet måste kvitteras manuellt.
+- **Klart när:** tester visar att
+  - tom DB plus börspositioner ger larm och inte stängning
+  - saknad sentinel ger kill switch med fungerande exits
+  - saknad sentinel plus inaktuell DB ger paus med eskalerande larm
 
 #### NU-3 · Extern dead-man's switch och dagliga penninginvarianter
 - **Vad:** kontroller i healthchecks.io och ett SQL-jobb som larmar på Telegram bara när något bryts.
@@ -394,9 +382,9 @@ B1 flyttas bara om NA-1 eller NA-2 inte är klara i vecka 9. Då flyttas det hö
   - Funding har varit död sedan 2026-04-28.
   - En image på 98 dagar gick obemärkt.
 - **Hur:**
-  1. Gratis healthchecks.io-kontroller på kontot från NU-2:
+  1. Skapa ett gratis healthchecks.io-konto med Telegram och e-post. Ping-URL:er hämtas från Phase eller env, aldrig ur repot, och mönster för hc-ping-URL:er läggs i `.githooks/pre-commit` och `.gitleaks.toml`. Kontroller:
      - en per körande bot (period 1 min, grace 10 min), som watchdogen pingar efter varje lyckad probe
-     - en för backup och en för invariantjobbet
+     - en för invariantjobbet
      
      Ping-URL:erna hämtas från Phase.
   2. `python -m hypertrade.ops.invariants` körs dagligen som operatörens tenant-roll och kontrollerar fem saker:
@@ -409,7 +397,6 @@ B1 flyttas bara om NA-1 eller NA-2 inte är klara i vecka 9. Då flyttas det hö
      Senare läggs stopptäckning (SE-1) och HL:s adressbudget till.
   3. Första veckan loggar jobbet bara.
 - **Insats:** S–M (ROI: ungefär 2 dagar) · **Påverkan:** 5/5 · **Beroenden:**
-  - NU-2 (kontot)
   - NU-6.1 och NU-6.2 för (b)
   - NU-6.1 för att (c) ska tystna
   - NU-4 för (d)
@@ -574,7 +561,7 @@ B1 flyttas bara om NA-1 eller NA-2 inte är klara i vecka 9. Då flyttas det hö
      Allt skrivs i `ops/host/bootstrap.sh`. Hostspecifika värden, som LAN-intervallet för brandväggen, läses från en lokal fil på hosten. En nft-drop-policy införs bara när LAN-konsolen är tillgänglig.
   5. Granska, rotera och radera gamla env-kopior på hosten.
   6. Pusha TLS-konfigurationen nu. Återapplicering vid boot kommer i NA-15.
-- **Insats:** S–M (2 PR:er plus 2–3 dagars operatörsarbete) · **Påverkan:** 4/5 · **Beroenden:** NU-2 (backup före patch) · **Delegering:** Opus och huvudsessionen (hemligheter, produktion).
+- **Insats:** S–M (2 PR:er plus 2–3 dagars operatörsarbete) · **Påverkan:** 4/5 · **Beroenden:** inga (PBS-backup före patch) · **Delegering:** Opus och huvudsessionen (hemligheter, produktion).
 - **Risker:**
   - Access kan låsa ute operatören, så break-glass via LAN beskrivs i bilaga P.
   - NU-8 skyddar inte mot en komprometterad bot. Ett gemensamt lösenord på interna tjänster hjälper inte heller mot det hotet, eftersom bottarna då delar lösenordet. Det skyddet kommer med NA-15.
@@ -1165,11 +1152,10 @@ Nästa har två delar:
 - median för tillagda rader per mergad PR
 - antal invariantlarm och falsklarm
 - CI-tid p50
-- ålder på senaste externa snapshot
 
 Planen fungerar om följande gäller vid B1:
 
-1. Restore-testet är grönt, och de externa larmen är bevisade med drill.
+1. De externa larmen är bevisade med drill, och NU-2-vakterna är testade.
 2. Alla merges har gått igenom krävd CI.
 3. Ledger-residualen på testnet är under $1 per månad, och paper och testnet får funding-rader varje timme med öppen position.
 4. Varje kandidat har en validate-rapport i båda varianterna.
@@ -1201,7 +1187,7 @@ Planen fungerar om följande gäller vid B1:
 **Från den slutliga faktagranskningen (2 granskare per påstående):**
 
 - **Backtester:** buggen med tenant_id är latent. Ingen backtest har körts sedan 2026-05-01, så inga resultat har förlorats.
-- **Backuper:** PBS tar dagliga backuper av containern (operatören, 2026-09-24). "Inga backuper, RPO ≈136 d" var fel; det som saknas är konsekventa dumpar och ett testat restore. Manuella Redis-kopior finns dessutom från 07-29 och 09-23.
+- **Backuper:** PBS tar dagliga backuper av containern (operatören, 2026-09-24). "Inga backuper, RPO ≈136 d" var fel; det som saknas är konsekventa dumpar och ett testat restore, och den risken har operatören accepterat. Manuella Redis-kopior finns dessutom från 07-29 och 09-23.
 - **Avbrottet 06-17** var en deploy som väntade på upplåsning, inte ett tyst haveri. Positionerna var ändå oskyddade.
 - **Candle-timeouten** är hårdkodad i feed.py, inte i config.py.
 - **Larmen** från testnet och paper går ut via mainnet-processen. Problemet är beroendet av den processen och digestens filter.
