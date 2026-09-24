@@ -21,6 +21,7 @@ from hypertrade.engine.strategy_allowlist import (
 )
 from hypertrade.strategies.registry import get_strategy, list_strategies, load_all
 from hypertrade.strategy_cap import enforce_strategy_cap
+from hypertrade.version import load_build_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +69,9 @@ async def _connect_repo() -> Repository | None:
 
 
 async def main() -> None:
+    build = load_build_info()
+    logger.info("Build: sha=%s built_at=%s", build["sha"], build["built_at"])
+
     # Register strategies
     load_all()
     available = list_strategies()
