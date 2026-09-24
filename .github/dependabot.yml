@@ -1,0 +1,59 @@
+# Dependency hygiene (roadmap NU-4).
+#
+# Python (uv) and npm: security updates only. `open-pull-requests-limit: 0`
+# turns off routine version-bump PRs for these two while leaving security
+# updates on (those have their own limit and are switched on in the repo's
+# security settings, not here). A security fix still arrives as one PR per
+# ecosystem, grouped like the ones this repo has merged before.
+#
+# GitHub Actions and Dockerfile base images: one grouped PR per month, so
+# the SHA-pinned actions and the digest-pinned uv image do not rot. Runtime
+# majors (Python, Node) are ignored: those upgrades are a decision, not a
+# chore — Python 3.14 alone changes which pandas the lockfile resolves.
+
+version: 2
+
+updates:
+  - package-ecosystem: uv
+    directory: /bot
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
+    groups:
+      uv-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /dashboard
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 0
+    groups:
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directories:
+      - /bot
+      - /dashboard
+      - /caddy
+    schedule:
+      interval: monthly
+    groups:
+      docker:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]

@@ -1,0 +1,164 @@
+name: ci
+
+# The local gates, run on every PR and on master (roadmap NU-4). Meant to
+# be required checks in the master ruleset next to `gitleaks`; the job
+# `name:`s below are the check names the ruleset matches on, so rename
+# them only together with the ruleset.
+#
+# No secrets here: every value below is a dummy for a throwaway service
+# or build, and the workflow token is read-only.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per PR (or per master push); a new push to a PR cancels the
+  # run for the commit it replaced. Master runs are never cancelled.
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bot:
+    name: bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: bot
+    env:
+      # Derandomised hypothesis for a merge gate: the same examples on
+      # every run (tests/conftest.py registers the profile).
+      HYPOTHESIS_PROFILE: ci
+    steps:
+      # SHA-pinned like secret-scan.yml; Dependabot bumps them monthly.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      # CI runs the uv the bot image pins, read from bot/Dockerfile so a
+      # Dependabot bump of that line moves CI with it.
+      - name: uv version from bot/Dockerfile
+        id: uv
+        run: |
+          v=$(sed -n 's|^FROM ghcr.io/astral-sh/uv:\([0-9][0-9.]*\)[@ ].*|\1|p' Dockerfile)
+          test -n "$v" || { echo "no pinned uv image in bot/Dockerfile" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: ${{ steps.uv.outputs.version }}
+          working-directory: bot
+          enable-cache: true
+          cache-dependency-glob: bot/uv.lock
+
+      - name: Install (frozen lockfile)
+        run: uv sync --frozen
+
+      - name: pytest
+        run: uv run pytest -q -n auto
+
+  dashboard:
+    name: dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: dashboard
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          # Same major as dashboard/Dockerfile's node:22-alpine.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+        env:
+          # Dummies. The build does not need a live database or Redis;
+          # these only keep a module-scope read from falling back to
+          # something that looks like a real deployment.
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+          REDIS_URL: redis://127.0.0.1:6379/0
+
+  migrations:
+    name: migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: bot
+    services:
+      postgres:
+        # Same image as the postgres service in docker-compose.yml.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hypertrade
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hypertrade"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/hypertrade
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      # CI runs the uv the bot image pins, read from bot/Dockerfile so a
+      # Dependabot bump of that line moves CI with it.
+      - name: uv version from bot/Dockerfile
+        id: uv
+        run: |
+          v=$(sed -n 's|^FROM ghcr.io/astral-sh/uv:\([0-9][0-9.]*\)[@ ].*|\1|p' Dockerfile)
+          test -n "$v" || { echo "no pinned uv image in bot/Dockerfile" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: ${{ steps.uv.outputs.version }}
+          working-directory: bot
+          enable-cache: true
+          cache-dependency-glob: bot/uv.lock
+
+      - name: Install (frozen lockfile, runtime deps only)
+        run: uv sync --frozen --no-dev
+
+      # Every migration from 0001 up, on an empty database. Catches a
+      # migration that only works against production's existing rows —
+      # 0011 did until it stopped requiring the operator tenant row
+      # when there is nothing to backfill.
+      - name: alembic upgrade head (empty database)
+        run: uv run --no-dev alembic upgrade head
+
+      - name: Assert the database is at head
+        run: |
+          current=$(uv run --no-dev alembic current 2>/dev/null)
+          heads=$(uv run --no-dev alembic heads 2>/dev/null)
+          echo "current: $current"
+          echo "heads:   $heads"
+          test "$(echo "$heads" | wc -l)" -eq 1
+          test "$current" = "$heads"
