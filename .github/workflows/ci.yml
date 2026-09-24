@@ -3,7 +3,8 @@ name: ci
 # The local gates, run on every PR and on master (roadmap NU-4). Meant to
 # be required checks in the master ruleset next to `gitleaks`; the job
 # `name:`s below are the check names the ruleset matches on, so rename
-# them only together with the ruleset.
+# them only together with the ruleset. docs/runbooks/merge-gates.md
+# has which checks are required and the emergency bypass.
 #
 # No secrets here: every value below is a dummy for a throwaway service
 # or build, and the workflow token is read-only.
@@ -54,13 +55,23 @@ jobs:
           version: ${{ steps.uv.outputs.version }}
           working-directory: bot
           enable-cache: true
-          cache-dependency-glob: bot/uv.lock
+          # Relative to working-directory, so not bot/uv.lock. The
+          # suffix keeps this job's dev-group cache apart from the
+          # migrations job's runtime-only one.
+          cache-dependency-glob: uv.lock
+          cache-suffix: bot
 
-      - name: Install (frozen lockfile)
-        run: uv sync --frozen
+      # --locked, not --frozen: fail when uv.lock no longer matches
+      # pyproject.toml. --frozen installs the lock without that check,
+      # and a plain `uv run` after it re-locks on the runner, so a PR
+      # that forgot `uv lock` went green while the image — built from
+      # the stale lock — lacked the new dependency.
+      - name: Install (lockfile must match pyproject.toml)
+        run: uv sync --locked
 
+      # --no-sync: test exactly the environment the lock installed.
       - name: pytest
-        run: uv run pytest -q -n auto
+        run: uv run --no-sync pytest -q -n auto
 
   dashboard:
     name: dashboard
@@ -98,6 +109,33 @@ jobs:
           # something that looks like a real deployment.
           DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
           REDIS_URL: redis://127.0.0.1:6379/0
+
+  # `npm run test:integration`: real Postgres via testcontainers (the
+  # runner has Docker). The only tests that exercise the
+  # reserveBotStart row lock and the per-tenant Postgres roles; the unit
+  # suite mocks both. A separate job so it can be made a required
+  # check on its own once it has a green record.
+  dashboard-integration:
+    name: dashboard-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - run: npm ci
+      - name: Integration tests (testcontainers Postgres)
+        run: npm run test:integration
 
   migrations:
     name: migrations
@@ -142,22 +180,24 @@ jobs:
           version: ${{ steps.uv.outputs.version }}
           working-directory: bot
           enable-cache: true
-          cache-dependency-glob: bot/uv.lock
+          cache-dependency-glob: uv.lock  # relative to working-directory
+          cache-suffix: migrations
 
-      - name: Install (frozen lockfile, runtime deps only)
-        run: uv sync --frozen --no-dev
+      # --locked and --no-sync as in the bot job.
+      - name: Install (lockfile must match, runtime deps only)
+        run: uv sync --locked --no-dev
 
       # Every migration from 0001 up, on an empty database. Catches a
       # migration that only works against production's existing rows —
       # 0011 did until it stopped requiring the operator tenant row
       # when there is nothing to backfill.
       - name: alembic upgrade head (empty database)
-        run: uv run --no-dev alembic upgrade head
+        run: uv run --no-sync alembic upgrade head
 
       - name: Assert the database is at head
         run: |
-          current=$(uv run --no-dev alembic current 2>/dev/null)
-          heads=$(uv run --no-dev alembic heads 2>/dev/null)
+          current=$(uv run --no-sync alembic current 2>/dev/null)
+          heads=$(uv run --no-sync alembic heads 2>/dev/null)
           echo "current: $current"
           echo "heads:   $heads"
           test "$(echo "$heads" | wc -l)" -eq 1

@@ -12,7 +12,10 @@ WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+# --locked: a uv.lock that no longer matches pyproject.toml fails the
+# build instead of shipping an image without the new dependency (CI's
+# `bot` job fails the PR the same way).
+RUN uv sync --locked --no-dev
 
 # Every `uv run` in this image — the CMD below, and any `docker exec ...
 # uv run alembic ...` — must use the environment synced above. Without
