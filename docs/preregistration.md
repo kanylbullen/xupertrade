@@ -1,9 +1,13 @@
 # Pre-registration: strategy candidates and their two variants
 
-> **Freeze date: the date this file was merged to master (PR #178).** It is the
-> committer date of the squash commit that added the file:
-> `git log --diff-filter=A --format='%cs %h' origin/master -- docs/preregistration.md`.
-> From that date on, forward evidence for every row below starts to count.
+> **Freeze date: the UTC date this file was merged to master (PR #178).** It
+> is the UTC calendar date of the committer timestamp of the master commit
+> that added the file. Print it with
+> `TZ=UTC git log --first-parent --diff-filter=A --date=format-local:%Y-%m-%d --format='%cd %h' origin/master -- docs/preregistration.md`.
+> Do not use `%cs`: it prints the date in the timezone recorded in the
+> commit (+0200 on this repo), so a merge after 22:00 UTC lands on the next
+> day. Forward evidence for every row below counts from the day after the
+> freeze date (rule 2).
 >
 > **Nothing in this file is ever edited after the freeze.** Every later
 > change is a **new dated row** in the amendment log (§ 7). That covers a
@@ -11,10 +15,16 @@
 > row never changes the text above it. It supersedes that text from the
 > row's own date. Rows are appended and never edited or deleted.
 
-This is NU-10 point 1 of the next-level roadmap
-(`docs/plans/next-level-roadmap.md`, § 4.2). It fixes what will be measured
-before any forward data exists, so no candidate can be judged on a
-definition chosen after its results were seen.
+This is NU-10 point 1 of the next-level roadmap, which is PR #177
+(`docs/plans/next-level-roadmap.md` once merged). Every roadmap reference in
+this file (§ 4.x, decisions 5.x, NU-, NA-, SE- and B1) means that roadmap as
+of its commit `d7c32c6`, which stays reachable through
+`git fetch origin pull/177/head` whatever happens to the branch. The
+roadmap at that commit calls this file `docs/preregistration-2026-10-01.md`;
+this is that file.
+
+The file fixes what will be measured before any forward data exists, so no
+candidate can be judged on a definition chosen after its results were seen.
 
 ## 0. Rules
 
@@ -25,8 +35,11 @@ definition chosen after its results were seen.
    The only way to change B is a new row, and after anyone has seen a B
    result that row must say so.
 2. **Forward window.** Evidence for a row counts from the first bar that
-   opens at or after 00:00 UTC on the day after the row's date. No bar the
-   author could have seen before the freeze counts as forward data.
+   opens at or after 00:00 UTC on the day after the row's date. A row's
+   date is the UTC calendar date of the committer timestamp of the master
+   commit that added the row, never a local date; row 1's date is the
+   freeze date. No bar the author could have seen before the freeze counts
+   as forward data.
 3. **No results here.** This file holds no performance numbers. Results
    belong in the `validate` reports (NA-2) and the B1 decision (NA-14).
 4. **An engine change can change variant A.** Say a change alters what
@@ -42,9 +55,10 @@ definition chosen after its results were seen.
 | Runtime | Python 3.13 (`bot/Dockerfile`), pandas 3.0.2, numpy 2.2.6, pandas-ta 0.4.71b0 (`bot/uv.lock`) |
 | Registry | 22 registered strategies (`bot/hypertrade/strategies/registry.py:58-81`): the 7 candidates, the 14 retired (§ 6) and `vvv_hedge`. `golden_cross` is not registered (`registry.py:82-86`). |
 
-All paths below are relative to `bot/hypertrade/`. Every parameter was read
-from the code at this commit, and each `meta/<name>.json` agrees with its
-code on every parameter it lists.
+All paths below are relative to `bot/hypertrade/`, except `tv-source/`,
+which is at the repository root. Every parameter was read from the code at
+this commit, and each `strategies/meta/<name>.json` agrees with its code on
+every parameter it lists.
 
 ## 2. Execution contract shared by all candidates (variant A as it runs)
 
@@ -57,10 +71,14 @@ code on every parameter it lists.
   closed bars, about 299 of them.
 - **Recursive indicators depend on the window.** EMA, RSI, the RMA-smoothed
   ATR and the Kalman filter are seeded at the first bar of that window. The
-  window is therefore part of both variants. The backtester at this commit
-  feeds the full history instead (`backtest/runner.py:174`). A simulator
-  that does the same is not evaluating variant A as it runs live, and its
-  `validate` report must state which window it used.
+  window is therefore part of both variants, and only a simulation that
+  gives the strategy this window counts as evidence for A or B: what
+  `fetch_candles` with `limit=300` returns on the first tick after the bar
+  being evaluated closes, minus the forming bar. The backtester at this
+  commit feeds the full history instead (`backtest/runner.py:174`), so its
+  results are not evidence for either variant. Any other window, a longer
+  lookback included, is a different variant. It needs its own § 7 row
+  before any of its results are seen (roadmap § 4.0 and NA-1 point 3).
 - **Sizing.** Notional = `MAX_POSITION_SIZE_USD × leverage`
   (`strategies/base.py:45-49`; the code default is 1 000 at `config.py:121`,
   and the deployed value is operator config). A Redis override replaces a
@@ -87,7 +105,7 @@ code on every parameter it lists.
 
 ### 3.1 kalman_breakout
 
-`strategies/kalman_breakout.py` · `meta/kalman_breakout.json` · Pine: `tv-source/kalman_breakout.pine`
+`strategies/kalman_breakout.py` · `strategies/meta/kalman_breakout.json` · Pine: `tv-source/kalman_breakout.pine`
 
 | | |
 |---|---|
@@ -115,7 +133,7 @@ code on every parameter it lists.
 
 ### 3.2 keltner_breakout
 
-`strategies/keltner_breakout.py` · `meta/keltner_breakout.json` · Pine: `tv-source/keltner_breakout.pine`
+`strategies/keltner_breakout.py` · `strategies/meta/keltner_breakout.json` · Pine: `tv-source/keltner_breakout.pine`
 
 | | |
 |---|---|
@@ -155,7 +173,7 @@ code on every parameter it lists.
 
 ### 3.3 cdc_macd
 
-`strategies/cdc_macd.py` · `meta/cdc_macd.json` · Pine: `tv-source/cdc_macd.pine`
+`strategies/cdc_macd.py` · `strategies/meta/cdc_macd.json` · Pine: `tv-source/cdc_macd.pine`
 
 | | |
 |---|---|
@@ -176,7 +194,7 @@ code on every parameter it lists.
 
 ### 3.4 macd_zero
 
-`strategies/macd_zero.py` · `meta/macd_zero.json` · Pine: `tv-source/macd_zero.pine`
+`strategies/macd_zero.py` · `strategies/meta/macd_zero.json` · Pine: `tv-source/macd_zero.pine`
 
 | | |
 |---|---|
@@ -198,7 +216,7 @@ code on every parameter it lists.
 
 ### 3.5 sma_rsi
 
-`strategies/sma_rsi.py` · `meta/sma_rsi.json` · Pine: `tv-source/sma_rsi.pine`
+`strategies/sma_rsi.py` · `strategies/meta/sma_rsi.json` · Pine: `tv-source/sma_rsi.pine`
 
 | | |
 |---|---|
@@ -223,7 +241,7 @@ code on every parameter it lists.
 
 ### 3.6 ath_breakout
 
-`strategies/ath_breakout.py` · `meta/ath_breakout.json` · a custom strategy, not a Pine port
+`strategies/ath_breakout.py` · `strategies/meta/ath_breakout.json` · a custom strategy, not a Pine port
 
 | | |
 |---|---|
@@ -252,7 +270,7 @@ code on every parameter it lists.
 
 ### 3.7 btc_mean_reversion
 
-`strategies/btc_mean_reversion.py` · `meta/btc_mean_reversion.json` · Pine: `tv-source/btc_mean_reversion.pine`
+`strategies/btc_mean_reversion.py` · `strategies/meta/btc_mean_reversion.json` · Pine: `tv-source/btc_mean_reversion.pine`
 
 | | |
 |---|---|
@@ -333,10 +351,10 @@ candidates with no stop-loss.
   modelled entry fill.
 - **ATR at entry.** ATR(14) with Wilder (RMA) smoothing, computed exactly
   as `pandas_ta.atr(high, low, close, length=14)` with its default
-  `mamode="rma"`, which is the call `keltner_breakout.py:89` makes. It is
-  computed on the frame the strategy received, and the value is taken on
-  the signal bar. It is fixed for the life of the position and never
-  recomputed. If it is NaN, only the 8 % term applies.
+  `mamode="rma"`, which is the call `strategies/keltner_breakout.py:89`
+  makes. It is computed on the frame the strategy received, and the value
+  is taken on the signal bar. It is fixed for the life of the position and
+  never recomputed. If it is NaN, only the 8 % term applies.
 - **Distance.** D = max(3 × ATR at entry, 0.08 × E).
 - **Stop level.** L = E − D for a long. For a short, which only
   kalman_breakout can hold, L = E + D.
@@ -394,6 +412,16 @@ candidates are validated offline only, with `validate` and replay.
 
 - Live runs variant A. Variant B exists only in the NA-2 simulator until
   NA-3 puts an approved variant live behind a flag, which happens after B1.
+- Live counts as a fidelity check for A only once it actually runs A. A
+  running bot keeps the image it was started on (CLAUDE.md § 3), so the
+  paper and testnet bots that run the live set may still be on code from
+  before `02ed3c1`. The condition is that every one of those bots has been
+  restarted on an image built from `02ed3c1`, or from a later master
+  commit whose engine and candidate changes all have § 7 rows (rule 4).
+  The operator checks it by comparing each container's image build time
+  (`docker inspect` on the container, then on its image) with the commit
+  time, and records the restart as a § 7 row. Live evidence about A counts
+  only from that row's forward window (rule 2).
 - No candidate trades on mainnet. Decision 5.1 says mainnet is not funded
   before B1.
 - macd_zero cannot run live next to cdc_macd, because they share the family
