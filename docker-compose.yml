@@ -20,9 +20,13 @@ services:
       args:
         # Version stamp (GET /api/version, OCI label
         # org.opencontainers.image.revision). Pass the commit being
-        # built from the deploy shell, e.g.
+        # built, evaluated on the build host after its checkout, e.g.
         #   GIT_SHA=$(git rev-parse HEAD) phase run -- docker compose \
         #     --profile build build --no-cache --pull bot-image dashboard
+        # Inside `ssh host "..."` write `GIT_SHA=\$(git rev-parse HEAD)`.
+        # Unescaped, your local shell expands it to whatever your own
+        # clone has checked out, and the image reports that commit:
+        # nothing checks the value beyond "looks like hex".
         # Unset → "unknown": the build still succeeds, the endpoint just
         # can't say which commit it is.
         GIT_SHA: "${GIT_SHA:-unknown}"
