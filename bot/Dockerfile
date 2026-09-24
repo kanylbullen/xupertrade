@@ -27,9 +27,8 @@ COPY alembic.ini ./
 
 # Version stamp, read back by `GET /api/version` (hypertrade/version.py)
 # and logged at startup. GIT_SHA comes from the deploy environment via
-# docker-compose.yml's build args; build time is taken here, so it is
-# always the real build time. Last on purpose: a new SHA only rebuilds
-# these two layers.
+# docker-compose.yml's build args; build time is taken here, so it
+# needs no input. Last on purpose: a new SHA only reruns these steps.
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 RUN printf '{"sha": "%s", "built_at": "%s"}\n' \
