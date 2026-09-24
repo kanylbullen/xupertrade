@@ -40,10 +40,14 @@ node_modules/
 # Docker
 pgdata/
 
-# Database and Redis dumps (ops/backup.sh keeps them off-host, encrypted).
-# A plaintext copy holds the session secret and every tenant's encrypted keys.
+# Database and Redis dumps. A plaintext copy holds trades, positions and
+# equity, the session secret and every tenant's encrypted keys; the secret
+# patterns in .githooks/pre-commit do not recognise a dump. *.sql covers a
+# plain-format pg_dump. If a tracked .sql is ever needed, un-ignore that one
+# path with !path/file.sql.
 *.dump
 *.rdb
+*.sql
 
 # Local agent / secrets-manager session caches — NEVER commit
 .claude/

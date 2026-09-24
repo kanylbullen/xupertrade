@@ -164,33 +164,16 @@ soft_warn_pcre "operator-specific service subdomain (auth/phase/secrets/console.
 block_pcre "absolute /home/<user>/ path (use ~/path or relative)" \
     '(?<![a-zA-Z0-9])/home/[a-z][a-z0-9_-]{1,30}/'
 
-# === Backup and monitoring credentials (NU-2) ===
-# ops/backup.sh reads these from the environment; docs use placeholders
-# (hc-ping.com/<uuid>, RESTIC_PASSWORD=<...>). Kept in sync with
-# .gitleaks.toml — update both together.
+# === Monitoring credentials ===
+# healthchecks.io ping URLs come from Phase or env, never from the repo
+# (roadmap NU-3); docs use the placeholder hc-ping.com/<uuid>. Kept in
+# sync with .gitleaks.toml, so update both together.
 
-# healthchecks.io ping URL. Whoever holds one can report the check up
-# (hiding a dead backup) or down. Covers /<uuid> and /<ping-key>/<slug>,
-# on hc-ping.com and on a self-hosted instance's /ping/ path.
+# Whoever holds a ping URL can report the check up (hiding an outage) or
+# down. Covers /<uuid> and /<ping-key>/<slug>, on hc-ping.com and on a
+# self-hosted instance's /ping/ path.
 block_pcre "healthchecks.io ping URL" \
     '(hc-ping\.com|/ping)/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b|[A-Za-z0-9_-]{22}/)'
-
-# restic repository password assigned a literal. References such as
-# $RESTIC_PASSWORD or ${RESTIC_PASSWORD:?...} and <placeholders> pass.
-block_pcre "restic password literal" \
-    '(?i)RESTIC_PASSWORD\s*[:=]\s*["'"'"']?(?![$<{?}-])[^\s"'"'"']{8,}'
-
-# Backblaze B2 (restic's off-host storage). Application key ID: 25 chars,
-# a 3-digit prefix + 12-hex account ID + 10-digit key number; all-digit
-# strings are skipped as counters, not keys. Application key: "K" + 3
-# digits + 27 base64 chars. Plus the variables restic reads the pair from,
-# assigned a literal.
-block_pcre "Backblaze B2 application key ID" \
-    '\b(?![0-9]{25}\b)00[0-9][0-9a-f]{12}[0-9]{10}\b'
-block_pcre "Backblaze B2 application key" \
-    '(?<![A-Za-z0-9+/])K00[0-9][A-Za-z0-9+/]{27}(?![A-Za-z0-9+/])'
-block_pcre "Backblaze B2 credential literal" \
-    '(?i)\bB2_(ACCOUNT_ID|ACCOUNT_KEY|APPLICATION_KEY_ID|APPLICATION_KEY|KEY_ID)\s*[:=]\s*["'"'"']?(?![$<{?}-])[^\s"'"'"']{8,}'
 
 if [[ $violations -gt 0 ]]; then
     echo "Blocked $violations secret pattern(s) — refusing commit."
