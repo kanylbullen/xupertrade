@@ -118,8 +118,13 @@ class Exchange(ABC):
 
     async def fetch_user_fills(
         self, address: str | None = None, since_ms: int | None = None,
+        *, raise_on_error: bool = False,
     ) -> list[dict]:
-        """Fetch raw exchange fill records. Default no-op for paper."""
+        """Fetch raw exchange fill records. Default no-op for paper.
+
+        `raise_on_error=True` asks for ExchangeReadError instead of `[]`
+        when the read fails, for a caller to whom "no fills" and "could
+        not ask" mean different things."""
         return []
 
     def get_size_precision(self, symbol: str) -> int:

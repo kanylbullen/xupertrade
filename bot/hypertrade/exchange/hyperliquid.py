@@ -1023,13 +1023,17 @@ class HyperLiquidExchange(Exchange):
 
     async def fetch_user_fills(
         self, address: str | None = None, since_ms: int | None = None,
+        *, raise_on_error: bool = False,
     ) -> list[dict]:
         """Return raw HL fill records for the trading account.
 
         When `since_ms` is provided, uses the SDK's time-bounded
         `user_fills_by_time(address, start_time)`. Without it, returns
         the recent default window from `user_fills(address)`. Empty
-        list on any error so the reconcile caller can continue.
+        list on any error so the reconcile caller can continue, unless
+        `raise_on_error`: then ExchangeReadError, because to the restore
+        guard an unreadable exchange and one with no fills are not the
+        same answer.
         """
         addr = (address or self._account_address)
         try:
@@ -1041,8 +1045,10 @@ class HyperLiquidExchange(Exchange):
             return await self._run_with_retry(
                 self._info.user_fills, addr, validate=_check_list,
             ) or []
-        except Exception:
+        except Exception as e:
             logger.exception("Failed to fetch user fills for %s", addr)
+            if raise_on_error:
+                raise ExchangeReadError(f"fetch_user_fills failed: {e}") from e
             return []
 
     async def get_current_price(self, symbol: str) -> float:

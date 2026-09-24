@@ -13,14 +13,22 @@ State keys:
 - hypertrade:<mode>:control:sentinel  -> written once the bot has booted
                                         against this Redis and made it safe.
                                         MISSING means the control state
-                                        above was lost; see
+                                        above was lost (flushed, or an empty
+                                        volume); see
                                         `EngineRunner._check_control_sentinel`.
-                                        Do not delete it by hand unless you
-                                        want every bot of the mode to switch
-                                        its kill switch on.
+                                        A Redis restored from a snapshot
+                                        still has it, so it does NOT detect
+                                        a rollback. Do not delete it by hand
+                                        unless you want every bot of the
+                                        mode to switch its kill switch on.
 - hypertrade:<mode>:control:dr_freeze -> JSON {since, detail} while the bot
-                                        is paused by that guard; cleared when
-                                        an operator resumes it.
+                                        is paused by the restore guard;
+                                        cleared when an operator resumes it.
+- hypertrade:<mode>:control:held_orphans -> JSON {coin: reason} of exchange
+                                        positions reconcile holds for a
+                                        human instead of closing; a coin
+                                        leaves once it is flat or has a DB
+                                        row.
 """
 
 import json
@@ -51,6 +59,7 @@ class BotControl:
         self._key_kill_switch = _key(self._mode, "kill_switch")
         self._key_sentinel = _key(self._mode, "sentinel")
         self._key_dr_freeze = _key(self._mode, "dr_freeze")
+        self._key_held_orphans = _key(self._mode, "held_orphans")
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -243,9 +252,12 @@ class BotControl:
     # --- Control-state sentinel (roadmap NU-2, guard 1)
     # Every key in this class reads as its safe-looking default when it is
     # missing: not paused, nothing disabled, no kill switch, no leverage
-    # override, $0 lost today. So an empty Redis — lost, flushed, or
-    # restored from an old snapshot — silently re-arms everything. The
-    # sentinel is the one key whose absence means "this state was lost".
+    # override, $0 lost today. So an empty Redis (flushed, or recreated on
+    # an empty volume) silently re-arms everything. The sentinel is the
+    # one key whose absence means "this state was lost". It cannot see a
+    # Redis restored from a snapshot, which has the sentinel too: rolled
+    # back control state is the DR runbook's to catch, and a DB restored
+    # with it is caught by the runner's boot-time DB check.
     # Unlike the setters above, these raise on a Redis error: the guard
     # has to know whether its write landed.
 
@@ -289,6 +301,33 @@ class BotControl:
         if self._redis is None:
             return
         await self._redis.delete(self._key_dr_freeze)
+
+    async def get_held_orphans(self) -> dict[str, str]:
+        """Coins reconcile holds for a human (NU-2 guard 2), with why. A
+        malformed value is logged and read as empty."""
+        if self._redis is None:
+            return {}
+        raw = await self._redis.get(self._key_held_orphans)
+        if raw is None:
+            return {}
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            value = None
+        if not isinstance(value, dict):
+            logger.error("held_orphans in Redis is malformed: %r", raw)
+            return {}
+        return {str(k): str(v) for k, v in value.items()}
+
+    async def set_held_orphans(self, held: dict[str, str]) -> None:
+        if self._redis is None:
+            return
+        if held:
+            await self._redis.set(
+                self._key_held_orphans, json.dumps(held, sort_keys=True),
+            )
+        else:
+            await self._redis.delete(self._key_held_orphans)
 
     async def beat_heartbeat(self) -> None:
         """Write current timestamp + TTL of 5 minutes. A watchdog reads this

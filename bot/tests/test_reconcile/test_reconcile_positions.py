@@ -496,7 +496,7 @@ async def test_exchange_orphan_filled_is_an_action_with_a_trade_row(repo):
     assert len(result.actions) == 1
     assert "exchange-orphan" in result.actions[0]
     assert result.failures == []
-    assert result.held_orphans == []
+    assert result.held_orphans == {}
     assert ex.orders == [("ETH", "sell", 2.0, OrderType.MARKET)]
 
     trades = [
