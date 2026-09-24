@@ -229,6 +229,26 @@ class Settings(BaseSettings):
     # disables the persistent-outage alert entirely.
     fetch_outage_alert_seconds: int = 600
 
+    # Restore-safety guards (roadmap NU-2, points 4 and 5).
+    #
+    # Guard 1: a missing Redis control sentinel means the control state
+    # (pause, disabled set, kill switch, leverage overrides, daily PnL)
+    # was lost and now reads as defaults. The bot turns the kill switch
+    # on (opens blocked, exits keep running); if the DB also looks stale
+    # it pauses too, and repeats the alert every this many minutes for as
+    # long as that freeze holds. 0 disables the reminders, never the guard.
+    dr_freeze_realert_minutes: float = 15.0
+    # Guard 2: reconcile pass 2 alerts instead of market-closing an
+    # exchange position with no DB row when the newest trades row (not
+    # counting reconcile's own) is older than this many hours, or there
+    # is none. Also when a pass finds more than one such position, or the
+    # coin is not traded by any strategy in this bot.
+    reconcile_orphan_max_db_age_hours: float = 6.0
+    # A held exchange orphan is re-published at most this often while it
+    # stays unresolved, so it cannot become permanent after one alert.
+    # 0 disables the reminders (the first alert is always sent).
+    reconcile_held_orphan_realert_minutes: float = 60.0
+
     # API authentication
     api_key: str = ""  # if set, all POST endpoints require X-Api-Key header
 

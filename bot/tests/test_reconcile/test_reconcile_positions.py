@@ -135,6 +135,21 @@ def _sell_fill(**over):
     return fill
 
 
+# Pass 2 only market-closes an exchange orphan the orphan guard (NU-2)
+# lets through: one orphan in the pass, on a coin a strategy in the bot
+# trades, against a DB whose newest trade is recent. These pass-2 tests
+# are about what happens once a close is allowed, so they set that up.
+UNIVERSE = frozenset({"BTC", "ETH"})
+
+
+async def _live_db(repo):
+    """A recent signal-path trade: the DB is live, not restored."""
+    await repo.record_trade(
+        order_id="live-1", strategy_name="kalman_breakout", symbol="SOL",
+        side="buy", size=1.0, price=10.0, reason="signal entry",
+    )
+
+
 # ----------------------------------------------------------------------
 # 1. A failed read is not "flat"
 # ----------------------------------------------------------------------
@@ -467,19 +482,26 @@ async def test_on_strategy_close_not_called_for_unpriceable_rows(repo):
 
 @pytest.mark.asyncio
 async def test_exchange_orphan_filled_is_an_action_with_a_trade_row(repo):
+    """Single orphan, known coin, live DB: still closed, as before NU-2."""
+    await _live_db(repo)
     ex = FakeExchange(
         [[Position(symbol="ETH", side="long", size=2.0, entry_price=2000.0)]],
         mid=2100.0,
     )
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, strategy_symbols=UNIVERSE,
+    )
 
     assert len(result.actions) == 1
     assert "exchange-orphan" in result.actions[0]
     assert result.failures == []
+    assert result.held_orphans == []
     assert ex.orders == [("ETH", "sell", 2.0, OrderType.MARKET)]
 
-    trades = await _rows(repo, models.Trade)
+    trades = [
+        t for t in await _rows(repo, models.Trade) if t.order_id != "live-1"
+    ]
     assert len(trades) == 1
     assert trades[0].reason == "reconcile: exchange-orphan close"
     assert trades[0].strategy_name == "reconcile"
@@ -492,31 +514,39 @@ async def test_exchange_orphan_filled_is_an_action_with_a_trade_row(repo):
 async def test_rejected_exchange_orphan_is_a_failure_not_an_action(repo):
     """Seen twice live: a REJECTED close was reported as a cleanup while
     the position was still sitting on the exchange."""
+    await _live_db(repo)
     ex = FakeExchange(
         [[Position(symbol="ETH", side="long", size=2.0, entry_price=2000.0)]],
         mid=2100.0,
         order_status=OrderStatus.REJECTED,
     )
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, strategy_symbols=UNIVERSE,
+    )
 
     assert result.actions == []
     assert len(result.failures) == 1
     assert "rejected" in result.failures[0].lower()
-    assert await _rows(repo, models.Trade) == []
+    assert [t.order_id for t in await _rows(repo, models.Trade)] == ["live-1"]
 
 
 @pytest.mark.asyncio
 async def test_place_order_raising_is_a_failure(repo):
+    await _live_db(repo)
     ex = FakeExchange(
         [[Position(symbol="ETH", side="long", size=2.0, entry_price=2000.0)]],
         order_raises=RuntimeError("HL rejected the close"),
     )
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, strategy_symbols=UNIVERSE,
+    )
 
+    assert ex.orders, "the close was attempted"
     assert result.actions == []
     assert len(result.failures) == 1
+    assert result.failures[0].startswith("FAILED to close")
 
 
 @pytest.mark.asyncio
@@ -736,6 +766,7 @@ async def test_unbookkept_exchange_orphan_close_is_reported(repo, monkeypatch):
     """The close happened, so it stays an action — but an unrecorded
     fill is the exact divergence this work exists to stop, so it is a
     failure too, with the order id to reconcile by hand."""
+    await _live_db(repo)
     ex = FakeExchange(
         [[Position(symbol="ETH", side="long", size=2.0, entry_price=2000.0)]],
         mid=2100.0,
@@ -745,7 +776,9 @@ async def test_unbookkept_exchange_orphan_close_is_reported(repo, monkeypatch):
         raise RuntimeError("db gone")
 
     monkeypatch.setattr(repo, "record_trade", boom)
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, strategy_symbols=UNIVERSE,
+    )
 
     assert len(result.actions) == 1
     assert len(result.failures) == 1
@@ -758,11 +791,14 @@ async def test_pass_two_sees_a_symbol_freed_by_a_wrong_side_close(repo):
     """After pass 1 wrong-side-closes the only BTC row, the exchange's
     BTC position is untracked and must be closed NOW — not one cycle
     later, after a strategy OPEN has already netted against it."""
+    await _live_db(repo)
     await _open_row(repo, side="long", size=1.0, entry=100.0)
     ex_short = Position(symbol="BTC", side="short", size=1.0, entry_price=108.0)
     ex = FakeExchange([[ex_short], [ex_short]], fills=[_sell_fill()], mid=108.0)
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, strategy_symbols=UNIVERSE,
+    )
 
     assert any("wrong-side" in a for a in result.actions)
     assert any("exchange-orphan" in a for a in result.actions)

@@ -171,6 +171,28 @@ class EngineRunner:
         # aggregator exists to avoid. Identical consecutive summaries
         # are logged but published once.
         self._last_reconcile_notice: str | None = None
+        # When that notice was last published (monotonic). A notice with a
+        # HELD exchange orphan is re-published after
+        # RECONCILE_HELD_ORPHAN_REALERT_MINUTES even if unchanged, so a
+        # held orphan cannot go quiet after one alert.
+        self._last_reconcile_notice_at = 0.0
+        # NU-2 guard 1 (see `_check_control_sentinel`). An "episode" runs
+        # from finding the sentinel missing until every protective write
+        # has landed and the sentinel is back.
+        self._sentinel_unreadable = False
+        self._lost_state_since: float | None = None
+        self._lost_state_stale: bool | None = None
+        self._lost_state_detail = ""
+        self._lost_state_problems = ""
+        # The freeze could not be persisted as `paused`: hold ticks (and
+        # make reconcile a dry run) in this process until it can.
+        self._dr_hold = False
+        # The guard's persisted freeze ({since, detail}) while it holds;
+        # drives the repeated alert. Loaded from Redis after a restart.
+        self._dr_freeze: dict | None = None
+        self._dr_freeze_loaded = False
+        self._dr_freeze_last_alert = 0.0
+        self._dr_freeze_reminders = 0
         self._last_funding_poll = 0.0
         self._last_hodl_check = 0.0
         self._last_hodl_zones: dict[str, str] = {}  # signal_name -> last verdict
@@ -239,7 +261,14 @@ class EngineRunner:
         callers in this method were accidentally left behind and crashed
         every tenant-bot at startup with `AttributeError`. Removed in
         a follow-up hotfix.
+
+        The Redis sentinel guard runs FIRST, before the startup reconcile:
+        a lost Redis reads as "not paused", and when the DB is stale too
+        the pause it sets is what turns that reconcile into a dry run.
         """
+        await self._check_control_sentinel()
+        await self._load_dr_freeze()
+
         if not self.repo:
             return
 
@@ -359,6 +388,263 @@ class EngineRunner:
             )
         except Exception:
             logger.exception("%s: event publish failed", strategy)
+
+    # --- NU-2 guard 1: lost Redis control state ---------------------------
+
+    async def _check_control_sentinel(self) -> None:
+        """Make the bot safe when its Redis control state was lost.
+
+        Every BotControl key reads as a harmless-looking default when it
+        is missing: not paused, nothing disabled, no kill switch, no
+        leverage override, nothing lost today. A flushed Redis, a redis
+        container recreated on an empty volume or a restore from an old
+        snapshot therefore re-arms every strategy the operator switched
+        off, silently. The sentinel key is the one whose absence says so.
+        A very first boot looks the same and is treated the same.
+
+        The response is the weakest one that is still safe (decision 5.4):
+        the kill switch, so opens stop and exits keep running. Only when
+        the DB looks stale as well (exchange fills no trades row records)
+        is the bot also paused, which freezes exits too, and the alert
+        repeats while that freeze holds (`_remind_dr_freeze`).
+
+        Runs at startup, before the startup reconcile, and at the top of
+        every tick, since Redis can be lost under a running bot as well.
+        """
+        if self.control is None:
+            return
+        try:
+            present = await self.control.control_sentinel_present()
+        except Exception:
+            if not self._sentinel_unreadable:
+                self._sentinel_unreadable = True
+                logger.warning(
+                    "Control sentinel unreadable — cannot tell whether the "
+                    "Redis control state survived; retrying every tick",
+                    exc_info=True,
+                )
+            return
+        self._sentinel_unreadable = False
+        if not present:
+            await self._secure_lost_control_state()
+
+    async def _secure_lost_control_state(self) -> None:
+        """Kill switch on, pause too if the DB is stale, sentinel last.
+
+        The sentinel is written only after every protective write landed.
+        Until then the whole sequence repeats each tick, opens are held in
+        this process, and a freeze that could not be persisted as `paused`
+        holds ticks in this process (`_dr_hold`). One alert per episode.
+        """
+        now = time.time()
+        first = self._lost_state_since is None
+        if first:
+            self._lost_state_since = now
+            logger.critical(
+                "Redis control sentinel missing — control state lost; "
+                "switching the kill switch on",
+            )
+        problems: list[str] = []
+        try:
+            await self.control.set_kill_switch(True)
+        except Exception as e:
+            # A Redis that answers reads but refuses writes (maxmemory)
+            # would leave the key unset, which reads as the env default:
+            # off. Block opens in this process until the write lands.
+            self.portfolio.hold_opens("Redis control state lost (sentinel missing)")
+            problems.append(
+                f"the kill switch could not be saved to Redis "
+                f"({type(e).__name__}), so opens are blocked in this process only"
+            )
+        else:
+            self.portfolio.release_opens()  # Redis now says "on"
+
+        if first:
+            self._lost_state_stale, self._lost_state_detail = (
+                await self._assess_db_staleness()
+            )
+        freeze = self._lost_state_stale is True
+        if freeze:
+            try:
+                await self.control.set_paused(True)
+                await self.control.set_dr_freeze(
+                    self._lost_state_since, self._lost_state_detail,
+                )
+            except Exception as e:
+                self._dr_hold = True
+                problems.append(
+                    f"the pause could not be saved to Redis "
+                    f"({type(e).__name__}), so ticks are held in this process only"
+                )
+            else:
+                self._dr_hold = False
+                self._dr_freeze = {
+                    "since": self._lost_state_since,
+                    "detail": self._lost_state_detail,
+                }
+                self._dr_freeze_last_alert = now
+                self._dr_freeze_reminders = 0
+
+        if not problems:
+            try:
+                await self.control.write_control_sentinel()
+            except Exception as e:
+                problems.append(f"the sentinel could not be written ({type(e).__name__})")
+
+        summary = "; ".join(problems)
+        if first:
+            message = await self._lost_state_message(freeze, problems)
+            logger.critical("%s", message)
+            await self._publish_error("restore-guard", message)
+        elif summary and summary != self._lost_state_problems:
+            logger.error("Restore guard still incomplete: %s", summary)
+        self._lost_state_problems = summary
+        if not problems:
+            if not first:
+                # The first alert said something was NOT persisted.
+                done = (
+                    f"Restore guard complete: the kill switch"
+                    f"{' and the pause' if freeze else ''} are now saved in "
+                    f"Redis and the sentinel is written."
+                )
+                logger.warning("%s", done)
+                await self._publish_error("restore-guard", done)
+            self._lost_state_since = None
+            self._lost_state_stale = None
+
+    async def _assess_db_staleness(self) -> tuple[bool | None, str]:
+        """(stale?, one-line detail). None when it cannot be told."""
+        if self.repo is None:
+            return None, "no database to check for staleness"
+        try:
+            s = await self.repo.db_staleness(self.exchange)
+        except Exception as e:
+            logger.exception("Restore guard: DB staleness check failed")
+            return None, f"DB staleness could not be checked ({type(e).__name__})"
+        newest = (
+            s.newest_trade.isoformat(timespec="seconds") if s.newest_trade
+            else "none"
+        )
+        if s.stale:
+            return True, (
+                f"{s.unrecorded_fills} exchange fill(s) since the newest "
+                f"trades row ({newest}) have no trades row"
+            )
+        return False, (
+            f"no unrecorded exchange fills since the newest trades row ({newest})"
+        )
+
+    async def _lost_state_message(self, freeze: bool, problems: list[str]) -> str:
+        mode = settings.exchange_mode
+        parts = [
+            f"Redis control state LOST: hypertrade:{mode}:control:sentinel is "
+            f"missing, so pause, disabled strategies, leverage overrides and "
+            f"today's PnL read as defaults and every strategy would trade. "
+            f"Kill switch is now ON: opens blocked, exits keep running.",
+        ]
+        if freeze:
+            parts.append(
+                f"The DB also looks STALE ({self._lost_state_detail}), so the "
+                f"bot is PAUSED too: frozen, exits and stops do NOT run. "
+                f"Repair the DB, check parity, resume, and turn the kill "
+                f"switch off last. Repeated every "
+                f"{settings.dr_freeze_realert_minutes:g} min while frozen."
+            )
+        else:
+            parts.append(
+                f"DB check: {self._lost_state_detail}. Re-apply disabled "
+                f"strategies and leverage overrides, check parity, then turn "
+                f"the kill switch off (POST /api/control/kill-switch "
+                f'{{"active": false}}).'
+            )
+        parts.append(f"Open positions: {await self._describe_open_positions()}.")
+        if problems:
+            parts.append("NOT persisted, retrying each tick: " + "; ".join(problems) + ".")
+        parts.append(
+            "On the first boot of a fresh install or of the first build with "
+            "this guard nothing was lost: check, then turn the kill switch off."
+        )
+        return " ".join(parts)
+
+    async def _describe_open_positions(self) -> str:
+        parts: list[str] = []
+        try:
+            ex_positions = await self.exchange.get_positions()
+        except Exception as e:
+            parts.append(f"exchange unreadable ({type(e).__name__})")
+        else:
+            parts.append("exchange " + (", ".join(
+                f"{p.symbol} {p.side} {p.size:g}" for p in ex_positions
+            ) or "none"))
+        if self.repo is not None:
+            try:
+                rows = await self.repo.get_open_positions()
+            except Exception as e:
+                parts.append(f"DB rows unreadable ({type(e).__name__})")
+            else:
+                parts.append("DB rows " + (", ".join(
+                    f"{r.strategy_name} {r.symbol} {r.side} {float(r.size):g}"
+                    for r in rows
+                ) or "none"))
+        return "; ".join(parts)
+
+    async def _load_dr_freeze(self) -> None:
+        """Pick up a freeze the guard set before this process started, so
+        its alert keeps repeating across restarts. Retried until read."""
+        if self.control is None or self._dr_freeze_loaded:
+            return
+        try:
+            freeze = await self.control.get_dr_freeze()
+        except Exception:
+            logger.warning("Restore guard: freeze marker unreadable", exc_info=True)
+            return
+        self._dr_freeze_loaded = True
+        if isinstance(freeze, dict) and self._dr_freeze is None:
+            self._dr_freeze = freeze
+            self._dr_freeze_last_alert = 0.0  # remind on the first paused tick
+
+    async def _remind_dr_freeze(self, paused: bool) -> None:
+        """Repeat the freeze alert every DR_FREEZE_REALERT_MINUTES while the
+        guard's pause holds; an operator resume ends it. `paused` is the
+        flag as read from Redis this tick."""
+        freeze = self._dr_freeze
+        if freeze is None or self.control is None:
+            return
+        if not paused:
+            try:
+                await self.control.clear_dr_freeze()
+            except Exception:
+                logger.warning(
+                    "Restore guard: clearing the freeze marker failed; "
+                    "retrying next tick", exc_info=True,
+                )
+                return
+            self._dr_freeze = None
+            logger.warning(
+                "Restore guard freeze lifted: the bot was resumed. The kill "
+                "switch still decides whether opens are allowed.",
+            )
+            return
+        interval = settings.dr_freeze_realert_minutes * 60
+        now = time.time()
+        if interval <= 0 or now - self._dr_freeze_last_alert < interval:
+            return
+        self._dr_freeze_last_alert = now
+        self._dr_freeze_reminders += 1
+        try:
+            since = float(freeze.get("since") or now)
+        except (TypeError, ValueError):
+            since = now
+        minutes = max(0, int((now - since) // 60))
+        detail = str(freeze.get("detail") or "DB looked stale")
+        await self._publish_error(
+            "restore-guard",
+            f"ESCALATION #{self._dr_freeze_reminders}: the bot has been FROZEN "
+            f"by the restore guard for {minutes} min: exits and stops are NOT "
+            f"running. Cause: Redis control state lost and {detail}. Repair "
+            f"the DB, check parity, resume (/resume or the dashboard), and "
+            f"turn the kill switch off last.",
+        )
 
     def _restore_strategy_from_row(self, strat: Strategy, pos) -> None:
         """Restore one strategy's in-memory position state from its DB row.
@@ -538,6 +824,9 @@ class EngineRunner:
                     "PAUSED, so this pass writes nothing and orders nothing",
                 )
                 paused = True
+        if self._dr_hold:
+            # The restore guard wanted a pause it could not save to Redis.
+            paused = True
         if paused:
             logger.info(
                 "Reconcile: bot is paused — dry run. Divergences are "
@@ -549,6 +838,9 @@ class EngineRunner:
             close_exchange_orphans=not paused,
             on_strategy_close=self._on_reconcile_close,
             dry_run=paused,
+            # The coins this bot trades. An exchange orphan on any other
+            # coin is alerted, never market-closed (NU-2 guard 2).
+            strategy_symbols=frozenset(s.symbol for s in self.strategies),
         )
 
         if result.skipped:
@@ -561,6 +853,18 @@ class EngineRunner:
             )
 
         notice = result.summary() if (result.skipped or result.took_action) else None
+        prefix = ""
+        if (
+            notice is not None
+            and notice == self._last_reconcile_notice
+            and result.held_orphans
+            and settings.reconcile_held_orphan_realert_minutes > 0
+            and time.monotonic() - self._last_reconcile_notice_at
+                >= settings.reconcile_held_orphan_realert_minutes * 60
+        ):
+            # A held orphan waits for a human; one alert is not enough.
+            prefix = "STILL UNRESOLVED — "
+            self._last_reconcile_notice = None
         if notice is None:
             self._last_reconcile_notice = None
         elif notice == self._last_reconcile_notice:
@@ -570,17 +874,19 @@ class EngineRunner:
             )
         elif self.event_bus:
             self._last_reconcile_notice = notice
+            self._last_reconcile_notice_at = time.monotonic()
             try:
                 await self.event_bus.publish(
                     ErrorOccurred(
                         strategy="reconcile",
-                        message=f"{label} reconcile — {notice}",
+                        message=f"{prefix}{label} reconcile — {notice}",
                     )
                 )
             except Exception:
                 logger.exception("Reconcile: event publish failed")
         else:
             self._last_reconcile_notice = notice
+            self._last_reconcile_notice_at = time.monotonic()
         return result
 
     async def _on_reconcile_close(
@@ -663,6 +969,12 @@ class EngineRunner:
                 await self.control.beat_heartbeat()
             except Exception:
                 logger.warning("Heartbeat write failed (continuing)")
+
+        # Redis can be lost under a running bot too (a redis container
+        # recreated on an empty volume). Checked before anything that
+        # reads the pause flag, reconcile included.
+        await self._check_control_sentinel()
+        await self._load_dr_freeze()
 
         # Periodic reconcile every 5 minutes. Catches positions closed
         # manually on the exchange, partial fills, and any post-startup
@@ -787,6 +1099,7 @@ class EngineRunner:
         mainnet_enabled: set[str] | None = None
         if self.control:
             paused = await self.control.is_paused()
+            await self._remind_dr_freeze(paused)
             disabled = await self.control.get_disabled_strategies()
             leverage_overrides = await self.control.get_all_leverage_overrides()
             if settings.is_mainnet and settings.tenant_id:
@@ -811,6 +1124,11 @@ class EngineRunner:
         # even if that pause write failed, so no strategy re-opens seconds
         # after the book was flattened.
         if paused_by_flat_all:
+            paused = True
+
+        # The restore guard froze the bot but could not save the pause to
+        # Redis: hold in this process until it can.
+        if self._dr_hold:
             paused = True
 
         # A startup state restore that never succeeded paused the bot

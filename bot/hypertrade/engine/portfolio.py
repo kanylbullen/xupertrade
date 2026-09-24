@@ -51,6 +51,22 @@ class PortfolioManager:
         self._kill_switch_unreadable: bool = False
         self._persist_failure_logged: bool = False
         self._persist_alerted: bool = False
+        # Set by the runner's control-sentinel guard between "Redis state
+        # was lost" and "the kill switch is persisted in Redis". Covers a
+        # Redis that answers reads but refuses writes (maxmemory): without
+        # it, the unset kill-switch key reads as the env default, False.
+        self._opens_held: str | None = None
+
+    def hold_opens(self, reason: str) -> None:
+        """Block opens in this process, whatever Redis says, until
+        `release_opens()`. Closes are never blocked."""
+        if self._opens_held is None:
+            logger.warning("Opens held in-process: %s", reason)
+        self._opens_held = reason
+
+    def release_opens(self) -> None:
+        """Hand the kill switch back to Redis/env."""
+        self._opens_held = None
 
     async def _ensure_loaded(self) -> None:
         """Load today's PnL from Redis once per process start and once
@@ -181,7 +197,10 @@ class PortfolioManager:
         cannot read counts as ACTIVE — the old fallback to the env
         default (normally False) meant a Redis blip switched off a kill
         switch the operator had turned on. Logged once per outage.
+        An in-process hold (`hold_opens`) wins over both.
         """
+        if self._opens_held is not None:
+            return True
         if self.control is None:
             return settings.kill_switch
         try:

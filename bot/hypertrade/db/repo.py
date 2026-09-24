@@ -44,6 +44,20 @@ logger = logging.getLogger(__name__)
 # degrading.
 _HL_FILL_PAGE_CAP = 2000
 
+# `Trade.reason` of the rows reconcile writes itself. The orphan guard
+# measures how fresh the DB is by its newest trade, and must not count
+# these: a restored, stale DB gets a fresh reconcile row the moment pass 1
+# closes the first row the exchange no longer backs, and would then look
+# live to pass 2 of the very same pass.
+_RECONCILE_REASON_FILL = "reconcile: orphan close (fill)"
+_RECONCILE_REASON_MID = "ESTIMATED reconcile: orphan close @ mid"
+_RECONCILE_REASON_EXCHANGE_ORPHAN = "reconcile: exchange-orphan close"
+_RECONCILE_REASONS = (
+    _RECONCILE_REASON_FILL,
+    _RECONCILE_REASON_MID,
+    _RECONCILE_REASON_EXCHANGE_ORPHAN,
+)
+
 
 # Tables that alembic is the sole authority for — `init_db()` skips
 # them so a fresh-bot start can't race-create them ahead of `alembic
@@ -85,6 +99,10 @@ class ReconcileResult:
     db_open: int = 0
     exchange_open: int = 0
 
+    held_orphans: list[str] = field(default_factory=list)
+    """Coins whose exchange orphan pass 2 alerted on instead of closing.
+    Each also has an entry in `failures`, which is what gets published."""
+
     @property
     def took_action(self) -> bool:
         return bool(self.actions or self.failures)
@@ -94,6 +112,21 @@ class ReconcileResult:
             return f"skipped: {self.skipped}"
         parts = list(self.actions) + list(self.failures)
         return "; ".join(parts) if parts else "clean"
+
+
+@dataclass
+class DbStaleness:
+    """Does the exchange know about fills this DB has never recorded?"""
+
+    newest_trade: datetime | None
+    """Newest `trades` row for this mode (any kind), or None."""
+
+    unrecorded_fills: int
+    """Fills at or after `newest_trade` whose order id no trades row has."""
+
+    @property
+    def stale(self) -> bool:
+        return self.unrecorded_fills > 0
 
 
 @dataclass
@@ -644,6 +677,51 @@ class Repository:
             )
             return {name: count for name, count in result.all()}
 
+    async def newest_trade_time(
+        self, *, exclude_reconcile: bool = False,
+    ) -> datetime | None:
+        """Timestamp of the newest `trades` row for this mode (UTC-aware),
+        or None when there is none. `exclude_reconcile` skips the rows
+        reconcile wrote itself (see `_RECONCILE_REASONS`)."""
+        query = select(func.max(Trade.timestamp)).where(Trade.mode == self._mode)
+        if exclude_reconcile:
+            query = query.where(
+                (Trade.reason.is_(None))
+                | (Trade.reason.notin_(_RECONCILE_REASONS))
+            )
+        async with self._session_factory() as session:
+            newest = (await session.execute(query)).scalar_one_or_none()
+        if newest is not None and newest.tzinfo is None:
+            newest = newest.replace(tzinfo=timezone.utc)  # SQLite: naive UTC
+        return newest
+
+    async def db_staleness(self, exchange) -> DbStaleness:
+        """Count exchange fills this DB has never recorded (NU-2 guard 1).
+
+        Every fill the bot causes gets a `trades` row, so a fill at or
+        after the newest row whose order id no row carries is activity the
+        DB never saw: it was restored from an older backup, or lost writes.
+        Order ids, not timestamps alone, decide it, so a trade row stamped a
+        second before its own fill (clock skew) is not "stale".
+
+        A manual order or a liquidation on the account also counts. The
+        HL wrapper answers a failed fills read with [] (never raises), so
+        an unreadable exchange reads as "not stale".
+        """
+        newest = await self.newest_trade_time()
+        fills = list(
+            await exchange.fetch_user_fills(since_ms=_to_epoch_ms(newest)) or []
+        )
+        newest_ms = _to_epoch_ms(newest)
+        if newest_ms is not None:
+            fills = [f for f in fills if int(f.get("time", 0) or 0) >= newest_ms]
+        recorded = await self._recorded_order_ids(fill_order_ids(fills))
+        unrecorded = sum(
+            1 for f in fills
+            if fill_order_ids([f]).isdisjoint(recorded)
+        )
+        return DbStaleness(newest_trade=newest, unrecorded_fills=unrecorded)
+
     async def _open_position_rows(self) -> list[PositionRecord]:
         """Every open DB row for this mode. Read-only snapshot."""
         async with self._session_factory() as session:
@@ -711,7 +789,7 @@ class Repository:
                     exit_price=summary.price, size=size, fee=summary.fee,
                 ),
                 order_id=summary.order_id,
-                reason="reconcile: orphan close (fill)",
+                reason=_RECONCILE_REASON_FILL,
                 estimated=False,
             )
 
@@ -739,7 +817,7 @@ class Repository:
                 # visible in a trades listing: this PnL is booked like a
                 # real one (the money did move) but was priced from the
                 # mid, not from a fill.
-                reason="ESTIMATED reconcile: orphan close @ mid",
+                reason=_RECONCILE_REASON_MID,
                 estimated=True,
             )
         return None
@@ -759,6 +837,53 @@ class Repository:
                 (p, "wrong-side") for p in db_pos_list if p.side != ex_pos.side
             )
         return to_close
+
+    async def _orphan_hold_reasons(
+        self,
+        orphans: list,
+        strategy_symbols,
+        max_db_age_hours: float | None,
+    ) -> dict[str, list[str]]:
+        """Why pass 2 must NOT market-close each exchange orphan (NU-2
+        guard 2). An empty list for a coin means closing it is allowed.
+
+        Read after pass 1, but reconcile's own rows are not counted: pass
+        1 of a restored DB writes fresh ones and would vouch for itself.
+        """
+        if not orphans:
+            return {}
+        shared: list[str] = []
+        if len(orphans) > 1:
+            shared.append(
+                f"{len(orphans)} exchange positions lack a DB row in one pass "
+                f"(an empty or restored DB looks exactly like this)"
+            )
+        max_age = (
+            settings.reconcile_orphan_max_db_age_hours
+            if max_db_age_hours is None else max_db_age_hours
+        )
+        try:
+            newest = await self.newest_trade_time(exclude_reconcile=True)
+        except Exception:
+            logger.exception("Reconcile: reading the newest trade failed")
+            shared.append("the newest trades row could not be read")
+        else:
+            if newest is None:
+                shared.append("the DB has no trades row for this mode")
+            elif datetime.now(timezone.utc) - newest > timedelta(hours=max_age):
+                shared.append(
+                    f"the DB's newest trade is older than {max_age:g}h "
+                    f"(stale or restored DB?)"
+                )
+        reasons: dict[str, list[str]] = {}
+        for sym, _ex_pos in orphans:
+            own = list(shared)
+            if strategy_symbols is None:
+                own.append("this bot's strategy universe is unknown")
+            elif sym not in strategy_symbols:
+                own.append(f"no strategy in this bot trades {sym}")
+            reasons[sym] = own
+        return reasons
 
     @staticmethod
     def _log_size_mismatches(
@@ -795,6 +920,8 @@ class Repository:
         on_strategy_close=None,
         confirm_delay_seconds: float = 2.0,
         dry_run: bool = False,
+        strategy_symbols: set[str] | frozenset[str] | None = None,
+        orphan_max_db_age_hours: float | None = None,
     ) -> "ReconcileResult":
         """Compare DB open positions vs exchange reality:
 
@@ -809,6 +936,16 @@ class Repository:
            `close_exchange_orphans=False` to only log them — the runner
            does exactly that while the bot is paused, so a pause
            actually stops orders.
+           The orphan guard (roadmap NU-2) turns the close into an alert
+           in `failures`, with no order, whenever the pass cannot trust
+           that "no DB row" means "nobody owns this": more than one
+           exchange orphan in the pass, a coin outside `strategy_symbols`
+           (None = unknown universe, so every orphan is held), or a DB
+           whose newest non-reconcile trade is older than
+           `orphan_max_db_age_hours` (default from settings) or missing.
+           After a restore from an old backup, or against an empty DB,
+           every live position is an "orphan"; closing them is the
+           liquidation the guard exists to prevent.
         4. Same-side size mismatch → logged only (ambiguous attribution).
 
         Two invariants this function now keeps, both learned the hard way
@@ -1046,10 +1183,29 @@ class Repository:
                 db_symbols = {p.symbol for p in await self._open_position_rows()}
             else:
                 db_symbols = set(db_by_symbol.keys())
-            for sym, ex_pos in ex_by_symbol.items():
-                if sym in db_symbols:
-                    continue  # has DB tracking, handled above
-                if ex_pos.size < 1e-6:
+            orphans = [
+                (sym, ex_pos) for sym, ex_pos in ex_by_symbol.items()
+                # No DB tracking (tracked ones are handled above), not dust.
+                if sym not in db_symbols and ex_pos.size >= 1e-6
+            ]
+            hold_reasons = await self._orphan_hold_reasons(
+                orphans, strategy_symbols, orphan_max_db_age_hours,
+            )
+            for sym, ex_pos in orphans:
+                if hold_reasons.get(sym):
+                    # No live numbers (ages, prices) in the text: the
+                    # runner re-publishes a changed summary at once, so
+                    # the message must stay identical while nothing changes.
+                    msg = (
+                        f"HELD exchange-orphan, NOT closed: {ex_pos.side} "
+                        f"{ex_pos.size} {sym} has no DB row, but "
+                        f"{'; '.join(hold_reasons[sym])}. Close it on the "
+                        f"exchange (or flat-all), or restore its DB row; "
+                        f"this alert repeats until one of those happens."
+                    )
+                    result.failures.append(msg)
+                    result.held_orphans.append(sym)
+                    logger.error("Reconcile: %s", msg)
                     continue
                 close_side = "buy" if ex_pos.side == "short" else "sell"
                 try:
@@ -1095,7 +1251,7 @@ class Repository:
                         # No DB row means no entry price, so there is no
                         # honest PnL to record. NULL, not 0.0.
                         pnl=None,
-                        reason="reconcile: exchange-orphan close",
+                        reason=_RECONCILE_REASON_EXCHANGE_ORPHAN,
                     )
                 except Exception as e:
                     # The close DID happen, so it stays an action — but

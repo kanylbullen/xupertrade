@@ -10,9 +10,22 @@ State keys:
                                         new value, then writes the same
                                         token to flat_request_done
 - hypertrade:control:flat_request_done
+- hypertrade:<mode>:control:sentinel  -> written once the bot has booted
+                                        against this Redis and made it safe.
+                                        MISSING means the control state
+                                        above was lost; see
+                                        `EngineRunner._check_control_sentinel`.
+                                        Do not delete it by hand unless you
+                                        want every bot of the mode to switch
+                                        its kill switch on.
+- hypertrade:<mode>:control:dr_freeze -> JSON {since, detail} while the bot
+                                        is paused by that guard; cleared when
+                                        an operator resumes it.
 """
 
+import json
 import logging
+import time
 
 import redis.asyncio as redis
 
@@ -36,6 +49,8 @@ class BotControl:
         self._key_allow_multi = _key(self._mode, "allow_multi_coin")
         self._key_heartbeat = _key(self._mode, "heartbeat")
         self._key_kill_switch = _key(self._mode, "kill_switch")
+        self._key_sentinel = _key(self._mode, "sentinel")
+        self._key_dr_freeze = _key(self._mode, "dr_freeze")
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -224,6 +239,56 @@ class BotControl:
         if self._redis is None:
             return
         await self._redis.delete(self._key_kill_switch)
+
+    # --- Control-state sentinel (roadmap NU-2, guard 1)
+    # Every key in this class reads as its safe-looking default when it is
+    # missing: not paused, nothing disabled, no kill switch, no leverage
+    # override, $0 lost today. So an empty Redis — lost, flushed, or
+    # restored from an old snapshot — silently re-arms everything. The
+    # sentinel is the one key whose absence means "this state was lost".
+    # Unlike the setters above, these raise on a Redis error: the guard
+    # has to know whether its write landed.
+
+    async def control_sentinel_present(self) -> bool:
+        """True when the sentinel exists. Without a Redis client there is
+        no Redis state to lose, so that counts as present."""
+        if self._redis is None:
+            return True
+        return await self._redis.get(self._key_sentinel) is not None
+
+    async def write_control_sentinel(self) -> None:
+        if self._redis is None:
+            return
+        await self._redis.set(self._key_sentinel, str(int(time.time())))
+
+    async def get_dr_freeze(self) -> dict | None:
+        """The guard's freeze marker, or None. A malformed value still
+        counts as a freeze (with no detail): it only exists because the
+        guard paused the bot."""
+        if self._redis is None:
+            return None
+        raw = await self._redis.get(self._key_dr_freeze)
+        if raw is None:
+            return None
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            value = None
+        if not isinstance(value, dict):
+            return {"since": time.time(), "detail": ""}
+        return value
+
+    async def set_dr_freeze(self, since: float, detail: str) -> None:
+        if self._redis is None:
+            return
+        await self._redis.set(
+            self._key_dr_freeze, json.dumps({"since": since, "detail": detail}),
+        )
+
+    async def clear_dr_freeze(self) -> None:
+        if self._redis is None:
+            return
+        await self._redis.delete(self._key_dr_freeze)
 
     async def beat_heartbeat(self) -> None:
         """Write current timestamp + TTL of 5 minutes. A watchdog reads this
