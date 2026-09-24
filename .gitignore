@@ -40,6 +40,11 @@ node_modules/
 # Docker
 pgdata/
 
+# Database and Redis dumps (ops/backup.sh keeps them off-host, encrypted).
+# A plaintext copy holds the session secret and every tenant's encrypted keys.
+*.dump
+*.rdb
+
 # Local agent / secrets-manager session caches — NEVER commit
 .claude/
 .phase.json

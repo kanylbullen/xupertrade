@@ -74,6 +74,42 @@ id = "absolute-home-path"
 description = "Absolute /home/<user>/ path reveals operator OS username"
 regex = '''\b/home/[a-z][a-z0-9_-]{1,30}/'''
 
+# --- Backup and monitoring credentials (NU-2) ---
+# Mirrors the block_pcre rules at the end of .githooks/pre-commit. Go's
+# RE2 has no lookaround, so the "not a reference" first-character check
+# is a negated class here, and the all-digit guard on the B2 key ID is an
+# entropy floor instead (a real ID scores ~2.7; zero-padded counters ~0).
+
+[[rules]]
+id = "healthchecks-ping-url"
+description = "healthchecks.io ping URL (anyone holding it can report the check up or down)"
+regex = '''(?:hc-ping\.com|/ping)/(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b|[A-Za-z0-9_-]{22}/)'''
+keywords = ["hc-ping", "/ping/"]
+
+[[rules]]
+id = "restic-password"
+description = "restic repository password assigned a literal"
+regex = '''(?i)RESTIC_PASSWORD\s*[:=]\s*["']?[^\s"'$<{?}\-][^\s"']{7,}'''
+keywords = ["restic_password"]
+
+[[rules]]
+id = "backblaze-b2-key-id"
+description = "Backblaze B2 application key ID (3-digit prefix + 12-hex account ID + 10-digit key number)"
+regex = '''\b00[0-9][0-9a-f]{12}[0-9]{10}\b'''
+entropy = 2.0
+
+[[rules]]
+id = "backblaze-b2-application-key"
+description = "Backblaze B2 application key (K + 3 digits + 27 base64 chars)"
+regex = '''(?:^|[^A-Za-z0-9+/])(K00[0-9][A-Za-z0-9+/]{27})(?:[^A-Za-z0-9+/]|$)'''
+secretGroup = 1
+
+[[rules]]
+id = "backblaze-b2-credential-assignment"
+description = "B2 key ID / application key variable assigned a literal"
+regex = '''(?i)\bB2_(?:ACCOUNT_ID|ACCOUNT_KEY|APPLICATION_KEY_ID|APPLICATION_KEY|KEY_ID)\s*[:=]\s*["']?[^\s"'$<{?}\-][^\s"']{7,}'''
+keywords = ["b2_"]
+
 # --- Allowlist (false positives) ---
 
 [allowlist]
