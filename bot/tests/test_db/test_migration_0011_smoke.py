@@ -7,7 +7,8 @@ in dashboard's testcontainers integration tests (Phase 5c).
 Verifies:
 - Module imports + revision metadata is chained
 - Same 9 tables as 0009/0010 (no drift)
-- upgrade() guards on operator-tenant existence
+- upgrade() guards on operator-tenant existence, but only when there
+  are NULL-tenant rows to backfill (an empty DB migrates without it)
 - upgrade() emits UPDATE WHERE tenant_id IS NULL on every table
 - upgrade() flips NOT NULL on every table
 - downgrade() lifts NOT NULL but does NOT undo backfill
@@ -83,6 +84,30 @@ def test_upgrade_guards_on_operator_existence():
     guard = next(s for s in captured_sql if "RAISE EXCEPTION" in s)
     assert OPERATOR_TENANT_ID in guard
     assert "operator tenant" in guard.lower()
+
+
+def test_guard_only_requires_operator_when_rows_need_backfill():
+    """An empty database (CI, a fresh host) has nothing to backfill, so
+    the UPDATEs touch zero rows and no FK is ever checked. The guard
+    must not demand the operator row there, or `alembic upgrade head`
+    cannot run on an empty DB. It must still fire when ANY of the nine
+    tables holds a NULL-tenant row — so every table has to be probed,
+    ANDed with the missing-operator check."""
+    m = _load_migration()
+    captured_sql: list[str] = []
+    with patch("alembic.op.execute") as mock_exec, \
+         patch("alembic.op.alter_column"):
+        mock_exec.side_effect = lambda sql: captured_sql.append(str(sql))
+        m.upgrade()
+
+    guard = next(s for s in captured_sql if "RAISE EXCEPTION" in s)
+    condition = guard.split("THEN")[0]
+    assert "NOT EXISTS" in condition and ") AND (" in condition
+    for table in m._TABLES:
+        assert (
+            f"EXISTS (SELECT 1 FROM {table} WHERE tenant_id IS NULL)"
+            in condition
+        ), f"guard does not probe {table} for rows needing backfill"
 
 
 def test_upgrade_backfills_every_table_then_alters_not_null():

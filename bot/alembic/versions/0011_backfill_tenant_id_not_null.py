@@ -17,6 +17,10 @@ This migration:
   2. Flips `tenant_id` to NOT NULL so future inserts can never be
      tenant-less.
 
+The operator row is required only when step 1 has rows to backfill. A
+database with no NULL-tenant rows (a fresh, empty one) migrates without
+it, which is what lets CI run `alembic upgrade head` on an empty DB.
+
 Run on production AFTER taking a ZFS snapshot — the NULL → operator
 mapping is irreversible without one. Downgrade lifts the NOT NULL
 constraint but does NOT undo the backfill (data stays tagged).
@@ -54,17 +58,34 @@ _TABLES = (
 )
 
 
+def _null_tenant_rows_exist_sql() -> str:
+    """SQL boolean: does any row in `_TABLES` still lack a tenant?"""
+    return " OR ".join(
+        f"EXISTS (SELECT 1 FROM {table} WHERE tenant_id IS NULL)"
+        for table in _TABLES
+    )
+
+
 def upgrade() -> None:
-    # Defensive: bail with a clear error if the operator row isn't
-    # there. Without it the backfill points at a non-existent FK and
-    # the ALTER below fails confusingly.
+    # Defensive: bail with a clear error if the backfill below would
+    # need the operator row and it isn't there. Without it the UPDATE
+    # points at a non-existent FK and fails confusingly.
+    #
+    # The row is only needed when there is something to backfill. On a
+    # database with no NULL-tenant rows — a fresh, empty one (CI, a new
+    # host) — every UPDATE below touches zero rows, so no FK is ever
+    # checked, and SET NOT NULL succeeds on an empty column. Requiring
+    # the row there made `alembic upgrade head` impossible on an empty
+    # database. Where the operator row exists (production), the first
+    # condition is false exactly as before, and the UPDATEs and ALTERs
+    # run unchanged.
     op.execute(
         f"""
         DO $$
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM tenants WHERE id = '{OPERATOR_TENANT_ID}'
-            ) THEN
+            ) AND ({_null_tenant_rows_exist_sql()}) THEN
                 RAISE EXCEPTION 'Phase 6b operator tenant {OPERATOR_TENANT_ID} not found — run 6b backfill first';
             END IF;
         END $$;
