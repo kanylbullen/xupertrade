@@ -4,7 +4,11 @@
 Claude Code runs this before every Bash tool call (wired up in
 .claude/settings.json) and passes the call as JSON on stdin. Exit 0 lets
 the call through; exit 2 blocks it, and Claude is shown the reason this
-script prints on stderr.
+script prints on stderr. The settings.json command exits 0 without
+starting Python when this file is missing, e.g. after switching to a
+branch cut before it: Claude Code keeps the hook it read at session
+start, and `python3 <missing file>` exits 2, which would block every
+Bash call.
 
 Blocked:
   * A `git push` that would update master: an explicit master refspec
@@ -12,18 +16,30 @@ Blocked:
     a wildcard destination), `--all`/`--branches`/`--mirror`, or a push
     without a refspec (or with `HEAD`) whose target resolves to master.
   * Skipping the secret-scanning pre-commit hook (CLAUDE.md § 0):
-    `--no-verify` anywhere, `git commit -n`, `git -c core.hooksPath=...`.
+    `--no-verify` anywhere, `git commit -n`, `git -c core.hooksPath=...`,
+    `git --config-env=core.hooksPath=...`, and `GIT_CONFIG_KEY_<n>` or
+    `GIT_CONFIG_PARAMETERS` assignments that name core.hooksPath.
+  git accepts any unambiguous prefix of a long option, so these are
+  matched too: `--no-veri`, `--al`, `--mirr`, `--rep=origin`.
+  The command is found after shell reserved words (`if ! git push ...`,
+  `do git push ...`, `{ git push ...; }`), assignments and wrappers
+  (`sudo`, `env`, `timeout`, ...), and inside `bash -c '...'`. Heredocs
+  are checked as scripts when a shell in the same Bash call reads its
+  script from stdin (`bash <<EOF`, `cat <<EOF | sh`).
 
-Overrides, for the operator in an emergency. They are read from the
-environment Claude Code itself was started with, so a command cannot
-grant one to itself: `XUPERTRADE_ALLOW_MASTER_PUSH=1 git push ...` is
-still blocked.
-  XUPERTRADE_ALLOW_MASTER_PUSH=1   allow pushes that update master
+Overrides, for the operator. They are read from the environment Claude
+Code itself was started with, so a command cannot grant one to itself:
+`XUPERTRADE_ALLOW_MASTER_PUSH=1 git push ...` is still blocked.
+  XUPERTRADE_ALLOW_MASTER_PUSH=1   lift this guard for master pushes. Only
+                                   the local guard: the default-protection
+                                   ruleset still refuses them on GitHub.
+                                   An emergency fix is a PR (CLAUDE.md § 7).
   XUPERTRADE_ALLOW_NO_VERIFY=1     allow skipping git hooks
 
-This is a guard against mistakes, not a sandbox: a command that hides
-git behind a variable or a script is not seen. GitHub's ruleset on
-master is the server-side half. Stdlib only.
+This is a guard against mistakes, not a sandbox. It does not see git
+hidden behind a variable, `$(...)`, `eval` or a script file, nor
+`sudo -u user git ...`, nor a hooks path set earlier with `git config`.
+GitHub's ruleset on master is the server-side half. Stdlib only.
 """
 
 from __future__ import annotations
@@ -41,19 +57,25 @@ NO_VERIFY_OVERRIDE = "XUPERTRADE_ALLOW_NO_VERIFY"
 
 SEPARATORS = {";", "&", "&&", "|", "||", "|&", "(", ")", "\n"}
 SHELLS = {"bash", "sh", "zsh", "dash"}
+# Shell reserved words that can stand before a command.
+RESERVED = {"!", "{", "}", "if", "then", "elif", "else", "fi", "do", "done", "while", "until"}
 # Words that run the command after them. Their own options are skipped,
 # but an option that takes a separate value (sudo -u user) is not
 # understood, so `sudo -u x git push` is not seen.
 WRAPPERS = {"sudo", "env", "command", "exec", "time", "nice", "nohup", "timeout"}
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# `GIT_CONFIG_KEY_0=core.hooksPath`, `GIT_CONFIG_PARAMETERS='core.hooksPath'=...`
+HOOKS_PATH_ENV = re.compile(r"^GIT_CONFIG_(KEY_[0-9]+|PARAMETERS)=.*core\.hookspath", re.IGNORECASE)
 # `<<EOF`, `<<-'EOF'`, `<< "EOF"`, but not the here-string `<<<`.
 HEREDOC = re.compile(r"(?<!<)<<(-?)(?!<)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# --no-verify and every prefix of it down to --no-v, for unparseable text.
+NO_VERIFY_TEXT = re.compile(r"(?<!\S)--no-v(?:e(?:r(?:i(?:fy?)?)?)?)?(?=[\s=]|$)")
 
 # git global options that take the next word as their value.
 GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
-# git push options that take the next word as their value.
-PUSH_VALUE_OPTS = {"--repo", "-o", "--push-option", "--receive-pack", "--exec"}
-PUSH_EVERYTHING = {"--all", "--branches", "--mirror"}
+# git push long options that push every branch, and those that take a value.
+PUSH_EVERYTHING = ("--all", "--branches", "--mirror")
+PUSH_VALUE_OPTS = ("--repo", "--push-option", "--receive-pack", "--exec")
 # git commit short options that consume the rest of their cluster or the
 # next word, so an `n` after them is part of a value, not --no-verify.
 COMMIT_VALUE_SHORTS = set("mFcCtSu")
@@ -66,28 +88,55 @@ class Denied(Exception):
         self.reason = reason
 
 
-def strip_heredocs(text: str) -> str:
-    """Drop heredoc bodies and whole-line comments; join continuations.
+def abbrev_of(arg: str, option: str, min_len: int = 3) -> bool:
+    """Is `arg` (up to any `=`) `option`, or a prefix git may accept for it?
+
+    git's option parser takes any unambiguous prefix of a long option:
+    `--no-veri` is --no-verify and `--al` is --all. A prefix that is
+    ambiguous makes git fail, so matching it too is harmless.
+    """
+    head = arg.split("=", 1)[0]
+    return len(head) >= min_len and option.startswith(head)
+
+
+def resolve_dir(cwd: str, path: str) -> str:
+    """The directory `cd <path>` or `git -C <path>` means, as the shell would."""
+    path = os.path.expandvars(os.path.expanduser(path))
+    return os.path.normpath(os.path.join(cwd, path))
+
+
+def strip_heredocs(text: str) -> tuple[str, list[str]]:
+    """Split off heredoc bodies; drop whole-line comments; join continuations.
 
     A commit message in a heredoc may say "--no-verify" or "git push
     origin master" without being a command, and an apostrophe in it
-    would break shlex.
+    would break shlex. The bodies are returned separately, for when a
+    shell reads them as its script.
     """
     text = text.replace("\\\n", " ")
     out: list[str] = []
+    bodies: list[str] = []
+    body: list[str] = []
     pending: list[tuple[str, bool]] = []
     for line in text.split("\n"):
         if pending:
             delim, dash = pending[0]
             if (line.lstrip("\t") if dash else line) == delim:
                 pending.pop(0)
+                bodies.append("\n".join(body))
+                body = []
+            else:
+                body.append(line)
             continue
         if line.lstrip().startswith("#"):
             continue
         out.append(line)
         for m in HEREDOC.finditer(line):
             pending.append((m.group(3), m.group(1) == "-"))
-    return "\n".join(out)
+    if pending:
+        # An unterminated heredoc runs to the end of the script.
+        bodies.append("\n".join(body))
+    return "\n".join(out), bodies
 
 
 def tokenize(text: str) -> list[str]:
@@ -156,14 +205,16 @@ def check_push(args: list[str], cwd: str) -> None:
         if skip_next:
             skip_next = False
             continue
-        if arg in PUSH_EVERYTHING:
-            raise Denied("master", f"`git push {arg}` also pushes {PROTECTED}")
-        if arg in PUSH_VALUE_OPTS:
-            repo_given |= arg == "--repo"
-            skip_next = True
+        if arg.startswith("--"):
+            if any(abbrev_of(arg, opt) for opt in PUSH_EVERYTHING):
+                raise Denied("master", f"`git push {arg}` also pushes {PROTECTED}")
+            opt = next((o for o in PUSH_VALUE_OPTS if abbrev_of(arg, o)), None)
+            if opt:
+                repo_given |= opt == "--repo"
+                skip_next = "=" not in arg
             continue
         if arg.startswith("-"):
-            repo_given |= arg.startswith("--repo=")
+            skip_next = arg == "-o"
             continue
         positionals.append(arg)
 
@@ -192,17 +243,21 @@ def check_git(args: list[str], cwd: str) -> None:
     while i < len(args):
         arg = args[i]
         if arg in GIT_VALUE_OPTS and i + 1 < len(args):
-            value = args[i + 1]
-            if arg == "-C":
-                cwd = os.path.join(cwd, value)
-            elif arg in ("-c", "--config-env") and value.lower().startswith("core.hookspath"):
-                raise Denied("no-verify", f"`git {arg} {value}` swaps out the git hooks")
+            opt, value = arg, args[i + 1]
             i += 2
-            continue
-        if arg.startswith("-"):
+        elif arg.startswith("--"):
+            # Joined form: `--config-env=<name>=<var>`, `--git-dir=<path>`.
+            opt, _, value = arg.partition("=")
             i += 1
-            continue
-        break
+        elif arg.startswith("-"):
+            opt, value = arg[:2], arg[2:]
+            i += 1
+        else:
+            break
+        if opt == "-C" and value:
+            cwd = resolve_dir(cwd, value)
+        elif opt in ("-c", "--config-env") and value.lower().startswith("core.hookspath"):
+            raise Denied("no-verify", f"`git {opt} {value}` swaps out the git hooks")
     if i >= len(args):
         return
     sub, rest = args[i], args[i + 1:]
@@ -212,50 +267,73 @@ def check_git(args: list[str], cwd: str) -> None:
         check_push(rest, cwd)
 
 
-def check_command(argv: list[str], cwd: str, depth: int) -> str:
+def check_shell(args: list[str], cwd: str, depth: int, heredocs: list[str]) -> None:
+    """`bash -c '...'` runs its argument; `bash`, `bash -s` or `| sh` run stdin."""
+    for j, opt in enumerate(args):
+        if not opt.startswith("-"):
+            return  # a script file: not seen
+        if opt.startswith("--"):
+            continue
+        if "c" in opt and j + 1 < len(args):
+            check_script(args[j + 1], cwd, depth + 1)
+            return
+        if "s" in opt:
+            break
+    # The shell reads its script from stdin. That may be a heredoc on
+    # this line or one piped in (`cat <<EOF | sh`); check every heredoc.
+    for body in heredocs:
+        check_script(body, cwd, depth + 1)
+
+
+def check_command(argv: list[str], cwd: str, depth: int, heredocs: list[str]) -> str:
     """Check one simple command; return the cwd for the commands after it."""
     for tok in argv:
-        if tok == "--no-verify" or tok.startswith("--no-verify="):
-            raise Denied("no-verify", "`--no-verify` skips the pre-commit secret scan")
+        if abbrev_of(tok, "--no-verify", min_len=len("--no-v")):
+            flag = tok.split("=", 1)[0]
+            alias = "" if flag == "--no-verify" else " (git reads it as --no-verify)"
+            raise Denied("no-verify", f"`{flag}`{alias} skips the pre-commit secret scan")
+        if HOOKS_PATH_ENV.match(tok):
+            raise Denied("no-verify", f"`{tok.split('=', 1)[0]}` swaps out the git hooks")
     i = 0
-    while i < len(argv) and ASSIGNMENT.match(argv[i]):
-        i += 1
-    while i < len(argv) and os.path.basename(argv[i]) in WRAPPERS:
-        i += 1
-        while i < len(argv) and (
-            argv[i].startswith("-") or ASSIGNMENT.match(argv[i])
-            or re.fullmatch(r"[0-9.]+[smhd]?", argv[i])
-        ):
+    while i < len(argv):
+        word = argv[i]
+        if word in RESERVED or ASSIGNMENT.match(word):
             i += 1
+        elif os.path.basename(word) in WRAPPERS:
+            i += 1
+            while i < len(argv) and (
+                argv[i].startswith("-") or ASSIGNMENT.match(argv[i])
+                or re.fullmatch(r"[0-9.]+[smhd]?", argv[i])
+            ):
+                i += 1
+        else:
+            break
     if i >= len(argv):
         return cwd
     prog, rest = os.path.basename(argv[i]), argv[i + 1:]
     if prog == "cd" and rest:
-        target = os.path.join(cwd, os.path.expanduser(rest[0]))
-        return os.path.normpath(target) if os.path.isdir(target) else cwd
+        target = resolve_dir(cwd, rest[0])
+        return target if os.path.isdir(target) else cwd
     if prog == "git":
         check_git(rest, cwd)
     elif prog in SHELLS and depth < 3:
-        for j, opt in enumerate(rest[:-1]):
-            if opt.startswith("-") and not opt.startswith("--") and "c" in opt:
-                check_script(rest[j + 1], cwd, depth + 1)
-                break
+        check_shell(rest, cwd, depth, heredocs)
     return cwd
 
 
 def check_script(text: str, cwd: str, depth: int = 0) -> None:
-    text = strip_heredocs(text)
+    text, heredocs = strip_heredocs(text)
     try:
         tokens = tokenize(text)
     except ValueError:
         # Unbalanced quotes: fall back to a coarse scan, erring on deny.
-        if re.search(r"(?<!\S)--no-verify(?![^\s=])", text):
+        if NO_VERIFY_TEXT.search(text):
             raise Denied("no-verify", "`--no-verify` skips the pre-commit secret scan")
         if re.search(rf"\bgit\b[^;&|\n]*\bpush\b[^;&|\n]*[\s:+/]{PROTECTED}(?![\w./-])", text):
             raise Denied("master", f"this looks like a push to {PROTECTED}")
         return
     for argv in simple_commands(tokens):
-        cwd = check_command(argv, cwd, depth)
+        cwd = check_command(argv, cwd, depth, heredocs)
 
 
 def main() -> int:
@@ -274,16 +352,23 @@ def main() -> int:
         if os.environ.get(override) == "1":
             return 0
         if d.kind == "master":
-            why = ("Master only changes through a reviewed PR that the operator "
-                   "merges (CLAUDE.md § 7). Push a feature branch and open a PR.")
+            why = ("Master only changes through a PR that the operator merges "
+                   "(CLAUDE.md § 7): push a feature branch and open one. That "
+                   "holds in an emergency too; the operator merges an emergency "
+                   "PR without waiting for review. GitHub's default-protection "
+                   f"ruleset refuses direct pushes to {PROTECTED} even when the "
+                   f"operator lifts this local guard with {override}=1.")
+            hint = ""
         else:
             why = ("The pre-commit hook is the first secret scan on a public "
-                   "repo (CLAUDE.md § 0). Fix what it flags instead. (Searching "
-                   "for the flag? Leave out the leading dashes.)")
+                   "repo (CLAUDE.md § 0). Fix what it flags, or rephrase a "
+                   "verified false positive so it no longer matches. Only the "
+                   "operator can allow a skip, by restarting Claude Code with "
+                   f"{override}=1.")
+            hint = " (Searching for the flag? Leave out the leading dashes.)"
         print(
             f"Blocked by .claude/hooks/guard_bash.py: {d.reason}. {why} "
-            f"For an operator-approved emergency, the operator restarts Claude "
-            f"Code with {override}=1; a command cannot set it for itself.",
+            f"A command cannot set {override} for itself.{hint}",
             file=sys.stderr,
         )
         return 2

@@ -10,7 +10,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\"",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\"",
             "timeout": 10
           }
         ]

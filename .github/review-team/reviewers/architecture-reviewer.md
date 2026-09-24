@@ -30,7 +30,7 @@ tenants and strategies grow.
   separated by the `mode` column and `tenant_id`. New state must carry
   mode/tenant scoping from day one; cross-mode reads are almost always a
   bug (the vault scanner's per-mode duplicate scanning was exactly this
-  class, CLAUDE.md § 5).
+  class, docs/CHANGELOG.md, "Vault scanner Phase 1").
 - **Per-tenant orchestrator via dockerode.** Tenant-bot lifecycle (start/
   stop, container naming, no published ports, env injection) belongs in
   `dashboard/src/lib/bot-orchestrator.ts` + `docker.ts`. Spawning Docker
@@ -46,8 +46,8 @@ tenants and strategies grow.
 - **Strategy registry + meta.** New strategies register via
   `strategies/registry.py` (auto-instantiated by `main.py`) and need a
   `strategies/meta/<name>.json` descriptor for the data-driven
-  `/strategies` page (CLAUDE.md § 5). Hardcoded strategy lists elsewhere
-  are a regression.
+  `/strategies` page (docs/CHANGELOG.md, "data-driven /strategies").
+  Hardcoded strategy lists elsewhere are a regression.
 - **Schema changes go through Alembic.** New tables/columns need a
   migration under `bot/alembic/versions/` and tenant-scoped tables need
   their RLS policy considered (the security reviewer's lane).

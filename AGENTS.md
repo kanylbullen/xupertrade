@@ -62,6 +62,10 @@ git config --local core.hooksPath .githooks
 ```
 
 Never bypass with `--no-verify` unless verified false positive (CLAUDE.md § 0).
+Even then, rephrasing the value so it no longer matches is the better fix,
+and under Claude Code it is the only one: the guard hook refuses
+`--no-verify` unless the operator started the session with
+`XUPERTRADE_ALLOW_NO_VERIFY=1` (CLAUDE.md § 7).
 
 ## Task workflow (checklist)
 
@@ -81,9 +85,9 @@ Never bypass with `--no-verify` unless verified false positive (CLAUDE.md § 0).
 
 ## PR rules (every PR)
 
-- **Size budget.** Aim for ≤ ~600 added lines of non-test code per PR. Put
-  mechanical refactors (renames, moves, formatting) in their own PR, so a
-  review can see the behavior change.
+- **Size budget.** Aim for ≤ 600 added lines per PR, tests included
+  (roadmap § 4.1). Put mechanical refactors (renames, moves, formatting)
+  in their own PR, so a review can see the behavior change.
 - **WIP limit on the order path.** At most one open PR at a time may touch
   the order path: code that decides, sizes, sends or books an order —
   `bot/hypertrade/engine/runner.py`, `engine/portfolio.py`, `exchange/`,
@@ -98,7 +102,9 @@ Never bypass with `--no-verify` unless verified false positive (CLAUDE.md § 0).
 - **NO direct pushes to `master`.** The `default-protection` ruleset
   refuses them, and for Claude Code the PreToolUse hook
   `.claude/hooks/guard_bash.py` blocks them (and `--no-verify`) before they
-  run. Emergency fixes are PRs too (CLAUDE.md § 7).
+  run. Emergency fixes are PRs too, which the operator merges without
+  waiting for review; the hook's override does not get past the ruleset
+  (CLAUDE.md § 7).
 - **NO deploy to the remote server.** The operator deploys: dashboard and
   Caddy after merge, bot code in the weekly bot-deploy window
   ([docs/runbooks/deploy.md](docs/runbooks/deploy.md)).

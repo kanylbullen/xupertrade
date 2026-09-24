@@ -8,7 +8,7 @@ diverges from exchange reality. The agent works on its own up to a reviewed
 PR; the operator merges and deploys. It stops to ask when an action is
 destructive or genuinely ambiguous.
 
-Elsewhere, to keep this file short: fixed-backlog history in
+Kept elsewhere: fixed-backlog history in
 [docs/CHANGELOG.md](docs/CHANGELOG.md), operator runbooks in
 [docs/runbooks/](docs/runbooks/), the plan in
 `docs/plans/next-level-roadmap.md` (PR #177 until merged).
@@ -151,11 +151,12 @@ tenant's decrypted secrets into one container per tenant per mode
 ## 4. Subagents
 
 Model choice and delegation follow the workspace policy in `~/CLAUDE.md`
-(one level above this repo, not in git), section *"Offloada arbete till
+(above this repo, not in git), section *"Offloada arbete till
 subagenter på Opus och Sonnet"*. It decides; this repo has no model table.
-On top of it (roadmap § 4.1): the order path, live-DB migrations,
-production backfills, secrets and production Redis stay with Opus or the
-main session, never sonnet or Kanban.
+Per it, anything touching production data or secrets (live DB, Redis,
+backfills) stays in the main session. On top of it (roadmap § 4.1):
+order-path code and migrations are Opus or main-session work, never sonnet
+or Kanban.
 
 ---
 
@@ -228,7 +229,7 @@ test.
 2. Investigate: code, logs, DB rows (read-only).
 3. Non-trivial work: a plan in `docs/plans/<feature>.md`, signed off by the operator before coding.
 4. `git fetch origin && git switch -c <type>/<short-name> origin/master`. Types `feat`, `fix`, `docs`, `refactor`, `chore`; kebab-case and specific (`feat/vault-scanner`).
-5. Stay within the PR budget in [AGENTS.md](AGENTS.md): ~600 added non-test lines, mechanical refactors apart, one open order-path PR at a time.
+5. Stay within the PR rules in [AGENTS.md](AGENTS.md): ≤600 added lines, mechanical refactors apart, one open order-path PR at a time.
 6. Gates (§ 1), commit, `git push -u origin <branch>`, `gh pr create --base master`. PR body: `## Summary` (what, why), `## Test plan` (gates, checks), `## Notes for reviewer` (subtleties, follow-ups).
 7. Review (below); fix or answer every finding.
 8. The operator merges (`gh pr merge --squash --delete-branch`) and deploys (§ 1).
@@ -238,12 +239,14 @@ paragraph, and `Co-Authored-By: Claude <model> <noreply@anthropic.com>`.
 
 **No direct pushes to `master`.** The ruleset refuses them, and the
 PreToolUse hook `.claude/hooks/guard_bash.py` blocks them locally, plus
-`--no-verify`, `git commit -n` and `git -c core.hooksPath=…`. An emergency
+`--no-verify` in any form (`commit -n`, `core.hooksPath`). An emergency
 fix is a PR the operator merges without waiting for review; a broken
-master commit is undone by a `git revert` PR, never a force-push. The
-overrides `XUPERTRADE_ALLOW_MASTER_PUSH=1` / `XUPERTRADE_ALLOW_NO_VERIFY=1`
-are read from the environment Claude Code started with, so only the operator
-can set them. Hook tests: `python3 .claude/hooks/test_guard_bash.py`.
+master commit is undone by a `git revert` PR, never a force-push. Only the
+operator lifts the hook, by starting Claude Code with
+`XUPERTRADE_ALLOW_MASTER_PUSH=1` (the ruleset still refuses the push) or
+`XUPERTRADE_ALLOW_NO_VERIFY=1`, so an agent rephrases a verified false
+positive (§ 0) instead of skipping. Tests:
+`python3 .claude/hooks/test_guard_bash.py`.
 
 ### Review before merge — there is no automated code reviewer
 

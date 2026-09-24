@@ -113,7 +113,7 @@ export default async function LoginPage({
  * POST /api/auth/configure sits behind this same lock, and there is
  * no env var for a basic user — `getAuthConfig` reads only
  * `AUTH_MODE` and `OIDC_*` from env. The full procedure is in
- * CLAUDE.md § 3, "Dashboard auth recovery".
+ * docs/runbooks/dashboard-auth-recovery.md.
  */
 function LockedNotice() {
   return (

@@ -14,6 +14,8 @@ import tempfile
 import unittest
 
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guard_bash.py")
+PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(HOOK)))
+SETTINGS = os.path.join(PROJECT, ".claude", "settings.json")
 OVERRIDES = ("XUPERTRADE_ALLOW_MASTER_PUSH", "XUPERTRADE_ALLOW_NO_VERIFY")
 
 
@@ -24,15 +26,22 @@ def git(repo: str, *args: str) -> None:
     )
 
 
-def run_hook(command: str, cwd: str, tool: str = "Bash", **env: str) -> subprocess.CompletedProcess:
-    base = {k: v for k, v in os.environ.items() if k not in OVERRIDES}
-    event = {
+def hook_event(command: str, cwd: str, tool: str = "Bash") -> str:
+    return json.dumps({
         "session_id": "test", "hook_event_name": "PreToolUse", "cwd": cwd,
         "tool_name": tool, "tool_input": {"command": command},
-    }
+    })
+
+
+def clean_env(**env: str) -> dict[str, str]:
+    base = {k: v for k, v in os.environ.items() if k not in OVERRIDES}
+    return {**base, **env}
+
+
+def run_hook(command: str, cwd: str, tool: str = "Bash", **env: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, HOOK], input=json.dumps(event), text=True,
-        capture_output=True, env={**base, **env},
+        [sys.executable, HOOK], input=hook_event(command, cwd, tool), text=True,
+        capture_output=True, env=clean_env(**env),
     )
 
 
@@ -61,13 +70,13 @@ class GuardTest(unittest.TestCase):
     def on(self, branch: str) -> None:
         git(self.repo, "switch", "-q", branch)
 
-    def assertDenied(self, command: str, **env: str) -> None:
-        res = run_hook(command, self.repo, **env)
+    def assertDenied(self, command: str, cwd: str | None = None, **env: str) -> None:
+        res = run_hook(command, cwd or self.repo, **env)
         self.assertEqual(res.returncode, 2, f"not blocked: {command!r}\n{res.stderr}")
         self.assertIn("Blocked by .claude/hooks/guard_bash.py", res.stderr)
 
-    def assertAllowed(self, command: str, **env: str) -> None:
-        res = run_hook(command, self.repo, **env)
+    def assertAllowed(self, command: str, cwd: str | None = None, **env: str) -> None:
+        res = run_hook(command, cwd or self.repo, **env)
         self.assertEqual(res.returncode, 0, f"blocked: {command!r}\n{res.stderr}")
 
     def test_explicit_master_refspecs(self) -> None:
@@ -86,6 +95,12 @@ class GuardTest(unittest.TestCase):
             "git push --repo=origin master",
             "git push --all origin",
             "git push --mirror",
+            # git takes any unambiguous prefix of a long option.
+            "git push --al origin",
+            "git push --mirr",
+            "git push --branc origin",
+            "git push --rep=origin master",
+            "git push --rep origin master",
         ]:
             with self.subTest(cmd=cmd):
                 self.assertDenied(cmd)
@@ -104,6 +119,48 @@ class GuardTest(unittest.TestCase):
         ]:
             with self.subTest(cmd=cmd):
                 self.assertDenied(cmd)
+
+    def test_master_push_inside_shell_control_flow(self) -> None:
+        self.on("feature")
+        for cmd in [
+            "if ! git push origin master; then echo fail; fi",
+            "for r in origin; do git push $r master; done",
+            "while true; do git push origin HEAD:master; done",
+            "git status && { git push origin master; }",
+            "if true; then :; else git push origin master; fi",
+            "bash <<'X'\ngit push origin master\nX",
+            "bash -s <<X\ngit push origin master\nX",
+            "cat <<'X' | sh\ngit push origin master\nX",
+        ]:
+            with self.subTest(cmd=cmd):
+                self.assertDenied(cmd)
+        for cmd in [
+            "if git push origin feature; then echo ok; fi",
+            "for f in a b; do git push origin feature; done",
+            # A heredoc no shell reads is data, even when a shell runs a file.
+            "cat > notes.txt <<'X'\ngit push origin master\nX\nbash ./build.sh",
+        ]:
+            with self.subTest(cmd=cmd):
+                self.assertAllowed(cmd)
+
+    def test_tilde_and_variable_repo_paths(self) -> None:
+        # The shell expands `~` and `$HOME` before git sees them; so must
+        # the hook, or a push with no refspec resolves against nothing.
+        home = os.path.dirname(self.repo)
+        self.on("master")
+        try:
+            for cmd in [
+                "git -C ~/repo push",
+                "git -C ~/repo push origin",
+                "git -C $HOME/repo push",
+                'git -C "$HOME/repo" push -u origin HEAD',
+                "cd ~/repo && git push",
+            ]:
+                with self.subTest(cmd=cmd):
+                    self.assertDenied(cmd, cwd="/", HOME=home)
+        finally:
+            self.on("feature")
+        self.assertAllowed("git -C ~/repo push", cwd="/", HOME=home)
 
     def test_implicit_target_on_master(self) -> None:
         self.on("master")
@@ -158,6 +215,20 @@ class GuardTest(unittest.TestCase):
             "git push --no-verify origin feature",
             "git -c core.hooksPath=/dev/null commit -m wip",
             "npm publish --no-verify",
+            # Abbreviations git accepts for --no-verify.
+            "git commit --no-veri -m x",
+            "git commit --no-verif -m x",
+            "git push --no-ver origin feature",
+            "git commit --no-verify=1 -m x",
+            # Other ways to point core.hooksPath elsewhere for one command.
+            "HP=/dev/null git --config-env=core.hooksPath=HP commit -m y",
+            "git --config-env core.hooksPath=HP commit -m y",
+            "git -ccore.hooksPath=/dev/null commit -m y",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+            "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\"",
+            # -n hidden behind shell control flow.
+            "if git commit -n -m x; then :; fi",
+            "cat <<'X' | sh\ngit commit -n -m x\nX",
         ]:
             with self.subTest(cmd=cmd):
                 self.assertDenied(cmd)
@@ -171,6 +242,11 @@ class GuardTest(unittest.TestCase):
             "git commit -F - <<'EOF'\ndocs: don't --no-verify\n\ngit push origin master is blocked\nEOF",
             "git config --local core.hooksPath .githooks",
             "grep -rn 'no-verify' .",
+            # Longer options that merely start like --no-verify.
+            "git merge --no-verify-signatures feature",
+            "git commit --no-verbose -m x",
+            "git push --atomic origin feature",
+            "GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=x git commit -m x",
         ]:
             with self.subTest(cmd=cmd):
                 self.assertAllowed(cmd)
@@ -181,6 +257,8 @@ class GuardTest(unittest.TestCase):
         self.assertDenied("git push origin master  # don't")
         self.assertDenied("git commit --no-verify -m x  # it's fine")
         self.assertAllowed("git push origin feature  # don't")
+        self.assertDenied("git commit --no-veri -m x  # it's fine")
+        self.assertAllowed("git commit --no-verbose -m x  # it's fine")
 
     def test_operator_overrides(self) -> None:
         self.on("feature")
@@ -190,6 +268,39 @@ class GuardTest(unittest.TestCase):
         self.assertDenied("git push origin master", XUPERTRADE_ALLOW_NO_VERIFY="1")
         self.assertDenied("git commit --no-verify -m x", XUPERTRADE_ALLOW_MASTER_PUSH="1")
         self.assertDenied("git push origin master", XUPERTRADE_ALLOW_MASTER_PUSH="yes")
+
+    def test_deny_messages_point_at_the_pr_path(self) -> None:
+        # The ruleset refuses a direct push even when the guard is lifted,
+        # so the master message leads with the PR path, not the override.
+        self.on("feature")
+        master = run_hook("git push origin master", self.repo).stderr
+        self.assertIn("open one", master)
+        self.assertIn("emergency", master)
+        self.assertIn("ruleset refuses direct pushes", master)
+        no_verify = run_hook("git commit --no-veri -m x", self.repo).stderr
+        self.assertIn("git reads it as --no-verify", no_verify)
+        self.assertIn("rephrase a verified false positive", no_verify)
+
+    def test_settings_wiring_blocks_and_fails_open_without_the_script(self) -> None:
+        # Run the exact command from settings.json the way Claude Code does
+        # (through a shell). With the script present it blocks; with it
+        # missing (a branch cut before the hook) it must let Bash through,
+        # because `python3 <missing file>` exits 2, which would deny.
+        with open(SETTINGS) as f:
+            command = json.load(f)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.on("feature")
+        event = hook_event("git push origin master", self.repo)
+        wired = subprocess.run(
+            ["sh", "-c", command], input=event, text=True, capture_output=True,
+            env=clean_env(CLAUDE_PROJECT_DIR=PROJECT),
+        )
+        self.assertEqual(wired.returncode, 2, wired.stderr)
+        with tempfile.TemporaryDirectory() as empty:
+            missing = subprocess.run(
+                ["sh", "-c", command], input=event, text=True, capture_output=True,
+                env=clean_env(CLAUDE_PROJECT_DIR=empty),
+            )
+        self.assertEqual(missing.returncode, 0, missing.stderr)
 
     def test_other_tools_and_bad_input_pass(self) -> None:
         res = run_hook("git push origin master", self.repo, tool="Read")
