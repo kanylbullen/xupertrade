@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState, useTransition } from "react";
 import { UnlockModal } from "@/components/unlock-modal";
 import { LiveLog } from "@/components/live-log";
 import { MainnetStrategiesCard } from "@/components/mainnet-strategies-card";
+import { formatBuild, type BuildInfoLike } from "@/lib/build-label";
 
 const MODES = ["mainnet", "testnet", "paper"] as const;
 type Mode = (typeof MODES)[number];
@@ -21,7 +22,11 @@ type BotRow = {
   lastStoppedAt: string | null;
 };
 
-export function BotsClient() {
+export function BotsClient({
+  dashboardBuild,
+}: {
+  dashboardBuild: BuildInfoLike;
+}) {
   const [bots, setBots] = useState<BotRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showUnlock, setShowUnlock] = useState(false);
@@ -72,6 +77,9 @@ export function BotsClient() {
           onLocked={() => setShowUnlock(true)}
         />
       ))}
+      <p className="font-mono text-[11px] text-muted-foreground">
+        Dashboard build {formatBuild(dashboardBuild)}
+      </p>
       {showUnlock && (
         <UnlockModal
           onUnlocked={() => {
@@ -204,6 +212,40 @@ function SendUnlockLinkButton() {
   );
 }
 
+/**
+ * The build a running bot reports through `/api/bot-version`, fetched
+ * again whenever the bot (re)starts, since a restart is how a bot moves
+ * onto a new image. `undefined` while loading; `null` when the bot
+ * can't say, e.g. an image from before the version stamp, whose
+ * `/api/version` is a 404.
+ */
+function useBotBuild(
+  mode: Mode,
+  running: boolean,
+  startedAt: string | null,
+): BuildInfoLike | null | undefined {
+  const [build, setBuild] = useState<{
+    key: string;
+    info: BuildInfoLike | null;
+  } | null>(null);
+  const key = `${mode}:${startedAt ?? ""}`;
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    fetch(`/api/bot-version?mode=${mode}`, { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<BuildInfoLike>) : null))
+      .catch(() => null)
+      .then((info) => {
+        if (!cancelled) setBuild({ key, info });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, running, key]);
+  // Keyed, so a restart shows "loading" rather than the old image's SHA.
+  return build?.key === key ? build.info : undefined;
+}
+
 function BotCard({
   mode,
   bot,
@@ -218,6 +260,11 @@ function BotCard({
   const [error, setError] = useState<string | null>(null);
   const [reconcileMsg, setReconcileMsg] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+  const build = useBotBuild(
+    mode,
+    bot?.isRunning === true,
+    bot?.lastStartedAt ?? null,
+  );
 
   function reconcile() {
     if (!bot) return;
@@ -346,6 +393,9 @@ function BotCard({
                 <div>
                   Started {new Date(bot.lastStartedAt).toLocaleString()}
                 </div>
+              )}
+              {bot.isRunning && build !== undefined && (
+                <div className="font-mono">Build {formatBuild(build)}</div>
               )}
               {bot.lastStoppedAt && !bot.isRunning && (
                 <div>
