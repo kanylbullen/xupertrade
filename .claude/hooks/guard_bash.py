@@ -19,8 +19,11 @@ Blocked:
     `--no-verify` anywhere, `git commit -n`, `git -c core.hooksPath=...`,
     `git --config-env=core.hooksPath=...`, and `GIT_CONFIG_KEY_<n>` or
     `GIT_CONFIG_PARAMETERS` assignments that name core.hooksPath.
+  * The same for good: `git config` that unsets core.hooksPath, sets it
+    to anything but `.githooks` (the CLAUDE.md § 0 setup), or removes or
+    renames the `core` section. Reading it passes.
   git accepts any unambiguous prefix of a long option, so these are
-  matched too: `--no-veri`, `--al`, `--mirr`, `--rep=origin`.
+  matched too: `--no-veri`, `--al`, `--mirr`, `--rep=origin`, `--unset-a`.
   The command is found after shell reserved words (`if ! git push ...`,
   `do git push ...`, `{ git push ...; }`), assignments and wrappers
   (`sudo`, `env`, `timeout`, ...), and inside `bash -c '...'`. Heredocs
@@ -38,7 +41,8 @@ Code itself was started with, so a command cannot grant one to itself:
 
 This is a guard against mistakes, not a sandbox. It does not see git
 hidden behind a variable, `$(...)`, `eval` or a script file, nor
-`sudo -u user git ...`, nor a hooks path set earlier with `git config`.
+`sudo -u user git ...`, nor `git config --edit` or a config file edited
+by other means.
 GitHub's ruleset on master is the server-side half. Stdlib only.
 """
 
@@ -79,6 +83,24 @@ PUSH_VALUE_OPTS = ("--repo", "--push-option", "--receive-pack", "--exec")
 # git commit short options that consume the rest of their cluster or the
 # next word, so an `n` after them is part of a value, not --no-verify.
 COMMIT_VALUE_SHORTS = set("mFcCtSu")
+# git config: the key that points git at its hooks, and the one value
+# CLAUDE.md § 0 sets it to.
+HOOKS_KEY = "core.hookspath"
+HOOKS_DIR = ".githooks"
+# git config actions, as options (`--unset`) and as the subcommands of
+# git >= 2.46 (`git config unset`). Longest first where one is a prefix
+# of another, so `--unset-a` is --unset-all.
+CONFIG_ACTIONS = (
+    "--unset-all", "--unset", "--remove-section", "--rename-section",
+    "--replace-all", "--add", "--get-all", "--get-regexp", "--get-urlmatch",
+    "--get", "--list",
+)
+CONFIG_SUBCOMMANDS = {"get", "set", "unset", "list", "edit", "rename-section", "remove-section"}
+CONFIG_UNSETS = {"--unset", "--unset-all", "unset"}
+CONFIG_SECTION_OPS = {"--remove-section", "--rename-section", "remove-section", "rename-section"}
+CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list"}
+# git config options that take the next word as their value.
+CONFIG_VALUE_OPTS = ("--file", "--blob", "--type", "--default", "--comment", "--value", "--url")
 
 
 class Denied(Exception):
@@ -238,6 +260,47 @@ def check_push(args: list[str], cwd: str) -> None:
             raise Denied("master", f"refspec `{spec}` updates {PROTECTED}")
 
 
+def check_config(args: list[str]) -> None:
+    """`git config` that points core.hooksPath away from .githooks, or drops it."""
+    action: str | None = None
+    words: list[str] = []
+    skip_next = False
+    for j, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+        elif arg == "--":
+            words.extend(args[j + 1:])
+            break
+        elif arg.startswith("--"):
+            if any(abbrev_of(arg, opt) for opt in CONFIG_VALUE_OPTS):
+                skip_next = "=" not in arg
+            else:
+                action = next((a for a in CONFIG_ACTIONS if abbrev_of(arg, a)), action)
+        elif arg.startswith("-") and arg != "-":
+            # A short cluster; `-f` takes the rest of it, or the next word.
+            for i, ch in enumerate(arg[1:]):
+                if ch == "f":
+                    skip_next = i == len(arg) - 2
+                    break
+                if ch == "l":
+                    action = "-l"
+        else:
+            words.append(arg)
+    if action is None and words and words[0] in CONFIG_SUBCOMMANDS:
+        action = words.pop(0)
+    if action in CONFIG_SECTION_OPS:
+        if words and words[0].lower() == "core":
+            raise Denied("no-verify", f"`git config {action} core` drops core.hooksPath")
+        return
+    if not words or words[0].lower() != HOOKS_KEY or action in CONFIG_READS:
+        return
+    if action in CONFIG_UNSETS:
+        raise Denied("no-verify", f"`git config {action} {words[0]}` turns the git hooks off")
+    # A set: `<key> <value>`, --add, --replace-all or `set`. The key alone reads it.
+    if len(words) >= 2 and os.path.normpath(words[1]) != HOOKS_DIR:
+        raise Denied("no-verify", f"`git config {words[0]} {words[1]}` swaps out the git hooks")
+
+
 def check_git(args: list[str], cwd: str) -> None:
     i = 0
     while i < len(args):
@@ -265,6 +328,8 @@ def check_git(args: list[str], cwd: str) -> None:
         check_commit(rest)
     elif sub == "push":
         check_push(rest, cwd)
+    elif sub == "config":
+        check_config(rest)
 
 
 def check_shell(args: list[str], cwd: str, depth: int, heredocs: list[str]) -> None:

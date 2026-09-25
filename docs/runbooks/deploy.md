@@ -5,42 +5,54 @@ here touches the production host; an agent runs one only when the
 operator asks for it in the session. Placeholders such as `$DEPLOY_HOST`
 follow `CLAUDE.md` § 0 — never commit real values.
 
-**When.** Bot code is deployed once a week, in the bot-deploy window
-(for example Tuesdays), so the operator unlocks the tenant bots once
-rather than after every merge. Dashboard and Caddy changes are
-deployed after merge. Emergency fixes go outside the window. This is
-roadmap § 4.1 (`docs/plans/next-level-roadmap.md`); it holds until
-deploy-per-SHA (roadmap NA-8) replaces the manual build below.
+**When.** Three deploys on two schedules. This is roadmap § 4.1
+(`docs/plans/next-level-roadmap.md`); it holds until deploy-per-SHA
+(roadmap NA-8) replaces the manual builds below.
+
+| Changed | Deploy | When |
+|---|---|---|
+| `dashboard/` | [Dashboard deploy](#dashboard-deploy) | after merge |
+| `caddy/` | [Caddy deploy](#caddy-deploy) | after merge |
+| `bot/` | [Bot-deploy window](#bot-deploy-window) | once a week (for example Tuesdays), so the operator unlocks the bots once rather than after every merge; an emergency fix goes outside it |
+
+**Build `bot-image` only in the bot-deploy window.** Every bot Start
+creates a new container from whatever `xupertrade-bot:latest` is at that
+moment (`startBot` in `dashboard/src/lib/bot-orchestrator.ts`), and Stop
+removes the container. A mid-week rebuild of that tag from master puts
+every bot PR merged since the last window into the next Stop/Start of
+any bot, whatever it was for, and `/settings/bots` then shows HEAD, so
+nothing looks wrong. That is why the dashboard deploy builds `dashboard`
+alone.
 
 After a deploy, check the bots with [health-check.md](health-check.md).
 
-## Standard deploy command
+## Dashboard deploy
 
-**Always split build from `up -d` and verify image age between them.** The
+**Always split build from `up -d` and verify the image between them.** The
 chained one-liner (`build && up -d`) hit the layer cache and silently
 produced stale images on three back-to-back PR deploys in a 24h window
 (2026-05-12) — the chained command exited 0, dashboard "deployed", and
 live behavior matched the pre-PR state because `--force-recreate` then
 brought the container up off an unchanged image SHA. See the cache-trap
-warning below for the underlying mechanic.
+warning below for the underlying mechanic; don't reintroduce the old
+`bash -c 'build --pull && up -d'` form.
 
 ```bash
-# 1. Pull master + check disk + build with --no-cache --pull, stamping
-#    both images with the commit just checked out (GIT_SHA)
+# 1. Pull master + check disk + build the dashboard with --no-cache --pull,
+#    stamped with the commit just checked out (GIT_SHA)
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && \
    git fetch origin && git reset --hard origin/master && \
    df -h / | tail -1 && \
-   GIT_SHA=\$(git rev-parse HEAD) phase run -- docker compose --profile build build --no-cache --pull bot-image dashboard"
+   GIT_SHA=\$(git rev-parse HEAD) phase run -- docker compose build --no-cache --pull dashboard"
 
-# 2. Verify the images: both timestamps newer than your commit, and
-#    both `rev:` equal to the HEAD printed first
+# 2. Verify the image: built after your commit, and `rev:` equal to the
+#    HEAD printed first
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && echo \"HEAD: \$(git rev-parse HEAD)\" && \
-   docker image inspect hypertrade-dashboard -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}' && \
-   docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
+   docker image inspect hypertrade-dashboard -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
 
-# 3. Only THEN recreate the containers. `--no-deps` is not optional:
+# 3. Only THEN recreate the container. `--no-deps` is not optional:
 #    without it compose also recreates any dependency whose config
 #    changed (redis, postgres), and a recreated redis can come up empty.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
@@ -56,16 +68,16 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    case \"\$got\" in *\"\$want\"*) echo OK ;; *) echo MISMATCH >&2; exit 1 ;; esac"
 ```
 
-**The `\$` in `GIT_SHA=\$(git rev-parse HEAD)` is not optional.** The
-command must run on the host, after its `git reset`. Unescaped, your
-local shell expands it to whatever your own clone has checked out, and
-the image then reports a commit it was not built from; nothing checks
-the value beyond "looks like hex". Left out entirely, both images build
-fine but stamp `unknown`, so `rev: unknown` in step 2 and a `MISMATCH`
-in step 4 mean a rebuild with `GIT_SHA`, not a code problem (an empty
-`rev:` is an image from before the stamp existed, #182). A
-`MISMATCH` with a hex SHA means the dashboard is not running an image
-built from HEAD: check step 2 and the cache trap below.
+**The `\$` in `GIT_SHA=\$(git rev-parse HEAD)` is not optional**, here and
+in the bot-deploy window. The command must run on the host, after its
+`git reset`. Unescaped, your local shell expands it to whatever your own
+clone has checked out, and the image then reports a commit it was not
+built from; nothing checks the value beyond "looks like hex". Left out
+entirely, the image builds fine but stamps `unknown`, so `rev: unknown`
+in step 2 and a `MISMATCH` in step 4 mean a rebuild with `GIT_SHA`, not a
+code problem (an empty `rev:` is an image from before the stamp existed,
+#182). A `MISMATCH` with a hex SHA means the dashboard is not running an
+image built from HEAD: check step 2 and the cache trap below.
 
 > ⚠️ **Never let compose recreate `redis` by accident.** The dashboard
 > `depends_on` redis, so `up -d --force-recreate dashboard` *without*
@@ -82,20 +94,39 @@ built from HEAD: check step 2 and the cache trap below.
 > `dump.rdb` out, copy it into the target volume, and only then
 > recreate redis on its own and check `DBSIZE` and the key list match.
 
-> ⚠️ **`up -d --force-recreate dashboard` only refreshes the dashboard
-> container.** Tenant-bots are orchestrator-spawned (separate Docker
-> containers, not in `docker-compose.yml` post-PR-4c) and the orchestrator
-> does NOT auto-restart them when `xupertrade-bot:latest` updates. So a
-> bot code change ships the new image into the registry but already-running
-> tenant bots keep using the read-only layers from the image they spawned
-> against until the dashboard explicitly recreates them.
->
-> When the bot code itself changed (not just the dashboard), the
-> operator must trigger a tenant-bot restart per running bot via the
-> dashboard UI's `Settings → Bots → restart`. Or via API:
-> `POST /api/tenant/me/bots/<bot_id>/stop` then `/start`. Until that
-> happens, the new bot logic only applies to bots STARTED after the
-> deploy — not to ones already running.
+## Bot-deploy window
+
+One `bot-image` build (profile `build`) produces `xupertrade-bot:latest`
+for every mode, mainnet included. There is no per-mode compose service
+any more; that model predates the multi-tenant orchestrator
+(`CLAUDE.md` § 2).
+
+```bash
+# 1. Pull master + check disk + build the bot image, stamped with HEAD
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && \
+   git fetch origin && git reset --hard origin/master && \
+   df -h / | tail -1 && \
+   GIT_SHA=\$(git rev-parse HEAD) phase run -- docker compose --profile build build --no-cache --pull bot-image"
+
+# 2. Verify it: built after your commit, and `rev:` equal to HEAD
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && echo \"HEAD: \$(git rev-parse HEAD)\" && \
+   docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
+```
+
+3. **Stop, then Start each running bot**, mainnet included. A running
+   bot keeps the image it was started on, and the orchestrator does not
+   restart bots when the tag moves. `/settings/bots` has a Stop and a
+   Start button, no Restart. Start needs the tenant's passphrase
+   unlocked and opens the unlock dialog when it isn't. Through the API:
+   `POST /api/tenant/me/bots/<bot_id>/stop`, then `/start`, from a
+   signed-in session with the passphrase unlocked (`/start` answers 401
+   while it is locked).
+4. **Every bot card shows HEAD** (next paragraph).
+
+A dashboard change waiting for deploy can go in the same session: run
+the dashboard deploy as well.
 
 **Checking which build a bot runs.** `/settings/bots` shows the
 dashboard's build and each running bot's, as `<short sha>, built <time>`.
@@ -108,14 +139,45 @@ again. A bot's `/api/version` needs no API key, so from the host:
 `docker exec <bot-container> python -c 'import urllib.request; print(urllib.request.urlopen("http://localhost:<port>/api/version").read().decode())'`
 (ports as in [health-check.md](health-check.md)).
 
-**There is no per-mode compose profile or `bot-mainnet`/`bot-testnet`
-service any more** (that model predates the multi-tenant orchestrator, see
-`CLAUDE.md` § 2). One `bot-image` build (profile `build`) produces
-`xupertrade-bot:latest` for every mode; step 1 above (`--profile build
-build --no-cache --pull bot-image dashboard`) already covers mainnet bots
-too. To pick up new bot code, restart the running mainnet bot the same way
-as any other tenant bot: dashboard UI `Settings → Bots → restart`, or
-`POST /api/tenant/me/bots/<bot_id>/stop` then `/start`.
+**An emergency bot fix outside the window** is the same four steps, and
+the build takes all of master: every bot PR merged since the last window
+ships with the fix. See what that is first, on the host:
+`git log --oneline <sha on the bot cards>..origin/master -- bot/`.
+
+## Caddy deploy
+
+A merged change under `caddy/` needs its own build and recreate; the
+dashboard deploy leaves Caddy on its old image and config. The image is
+built from `caddy/Dockerfile`, and the Caddyfile is bind-mounted, so a
+Caddyfile-only change needs the recreate but not the build.
+
+```bash
+# 1. Pull master and build the Caddy image (skip the build for a
+#    Caddyfile-only change)
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && \
+   git fetch origin && git reset --hard origin/master && \
+   phase run -- docker compose build --no-cache --pull caddy"
+
+# 2. Recreate Caddy on its own, `--no-deps` as in the dashboard deploy.
+#    HTTPS on the LAN drops for a few seconds.
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && phase run -- docker compose up -d --no-deps --force-recreate caddy"
+
+# 3. It is up, and its log shows which config it booted
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "docker ps --filter name=hypertrade-caddy --format '{{.Status}}' && \
+   docker logs --since 5m hypertrade-caddy 2>&1 | tail -20"
+```
+
+**A Caddyfile change can still not apply.** Once a config has been
+pushed through `POST /api/tls/configure`, Caddy boots from that autosave
+(`--resume`), not from the Caddyfile, so a proxy fix has to land in
+`dashboard/src/lib/caddy-admin.ts` as well, and that ships with the
+dashboard deploy. `CLAUDE.md` § 9 says when each file applies and how
+to bring the Caddyfile back.
+
+## Cache trap and disk
 
 > ⚠️ **Cache trap on first build of a service that hasn't been built
 > recently.** An old image with the same `name:tag` from a long-stopped
@@ -130,6 +192,7 @@ as any other tenant bot: dashboard UI `Settings → Bots → restart`, or
 > first build of any service/image that hasn't been built recently:**
 >
 > ```bash
+> # bot-image: in the bot-deploy window only (see the top of this file)
 > cd /opt/hypertrade && GIT_SHA=$(git rev-parse HEAD) \
 >   phase run -- bash -c 'docker compose --profile build build --no-cache --pull bot-image'
 > ```
@@ -169,19 +232,6 @@ as any other tenant bot: dashboard UI `Settings → Bots → restart`, or
 > root partition above 80%. A daily host-side cron (see
 > "Host-side cron jobs" below) keeps this from accumulating between
 > deploys.
-
-Build only what changed for speed — but keep `--no-cache --pull` and
-the standalone build step (no chained `&& up -d`):
-
-```bash
-ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "cd /opt/hypertrade && GIT_SHA=\$(git rev-parse HEAD) phase run -- docker compose --profile build build --no-cache --pull dashboard"
-```
-
-Then verify the image, recreate and check `/api/version` per the steps
-above. The
-old `bash -c 'build --pull && up -d'` form is what bit us with the
-cache-trap — don't reintroduce it.
 
 ## Host-side cron jobs
 

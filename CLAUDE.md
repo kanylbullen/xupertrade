@@ -137,8 +137,8 @@ tenant's decrypted secrets into one container per tenant per mode
 
 | Runbook | For |
 |---|---|
-| [deploy](docs/runbooks/deploy.md) | `GIT_SHA` build, version checks, recreate, cache trap, Redis hazard, bot restarts, prune cron |
-| [merge-gates](docs/runbooks/merge-gates.md) | required CI checks, emergency bypass |
+| [deploy](docs/runbooks/deploy.md) | dashboard, Caddy and weekly bot deploys, `GIT_SHA` checks, cache trap, Redis hazard, prune cron |
+| [merge-gates](docs/runbooks/merge-gates.md) | required CI checks, emergency bypass (not set up) |
 | [health-check](docs/runbooks/health-check.md) | DB ↔ exchange parity, a bot's API, logs when `docker logs` breaks |
 | [dashboard-auth-recovery](docs/runbooks/dashboard-auth-recovery.md) | "Authentication is locked" on `/login`; fresh-install sign-in |
 | [postgres-password-rotation](docs/runbooks/postgres-password-rotation.md) | rotating `POSTGRES_PASSWORD` |
@@ -237,10 +237,10 @@ paragraph, and `Co-Authored-By: Claude <model> <noreply@anthropic.com>`.
 
 **No direct pushes to `master`.** The ruleset refuses them, and the
 PreToolUse hook `.claude/hooks/guard_bash.py` blocks them locally, plus
-`--no-verify` in any form (`commit -n`, `core.hooksPath`). An emergency
-fix is a PR the operator merges without waiting for review; a broken
-master commit is undone by a `git revert` PR, never a force-push. Only the
-operator lifts the hook, by starting Claude Code with
+`--no-verify`, `commit -n` and `core.hooksPath` swaps (gaps: its
+docstring). An emergency fix is a PR the operator merges without waiting
+for review; a broken master commit is undone by a `git revert` PR, never
+a force-push. Only the operator lifts the hook, by starting Claude Code with
 `XUPERTRADE_ALLOW_MASTER_PUSH=1` (the ruleset still refuses the push) or
 `XUPERTRADE_ALLOW_NO_VERIFY=1`, so an agent rephrases a verified false
 positive (§ 0) instead of skipping. Tests:
@@ -249,7 +249,7 @@ positive (§ 0) instead of skipping. Tests:
 ### Review before merge — there is no automated code reviewer
 
 `master` requires the CI checks `bot`, `dashboard`, `migrations` and
-`gitleaks`, emergency fixes included (bypass: § 3); wait with
+`gitleaks`, emergency fixes included (no bypass yet, § 3); wait with
 `gh pr checks <n> --watch`. None of them reviews code. Reading Copilot's
 silence (it stopped after #134) as approval once merged five unreviewed
 PRs (#156–#160).

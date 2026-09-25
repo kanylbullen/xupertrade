@@ -13,7 +13,7 @@ need the old password (see the script header for why the TCP check
 matters). Its usage block lists the full sequence. The manual steps
 below are the same dance by hand.
 
-`POSTGRES_PASSWORD` lives in Phase (app `xupertrade`, env `Development`).
+`POSTGRES_PASSWORD` lives in Phase (app `hypertrade`, env `Development`).
 Postgres only reads that env on **container init** — updating it in Phase
 does NOT change the password inside an already-initialized database. Full
 rotation is therefore a two-step dance: update the live DB user with
@@ -38,14 +38,17 @@ Steps:
    openssl rand -base64 36 | tr -d '/+=\n'
    ```
 
-2. **Update Phase**: web UI → app `xupertrade` → env `Development` → key
+2. **Update Phase**: web UI → app `hypertrade` → env `Development` → key
    `POSTGRES_PASSWORD` → save.
 
 3. **ALTER inside the running postgres container.** `docker exec … psql`
    connects over the socket, which `pg_hba.conf` trusts, so it works
    without the old password — and so it proves nothing about the password
-   either (the script's TCP check exists for that). Unlike the script, this
-   form puts the new password in argv, visible to `ps` on the host:
+   either (the script's TCP check exists for that). This form puts the new
+   password in argv, visible to `ps` on the host while it runs. The script
+   keeps it out of the `ALTER`'s argv, but its two TCP checks pass it as
+   `-e PGPASSWORD=…` on the `docker run` command line, so it is briefly
+   in argv there too:
    ```bash
    ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
      "docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade \
@@ -58,8 +61,9 @@ Steps:
    ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
      "cd /opt/hypertrade && phase run -- docker compose up -d --no-deps --force-recreate dashboard"
    ```
-   Each tenant bot must be Stop+Started via the dashboard UI
-   (Settings → Bots → restart) so its container is respawned with the
+   Each tenant bot must be stopped, then started, on `/settings/bots`
+   (Stop, then Start; there is no Restart button, and Start needs the
+   tenant's passphrase unlocked) so its container is respawned with the
    new env. Until that happens, already-running tenant bots keep using
    the OLD `DATABASE_URL` from their spawn-time env and will start
    failing auth on the next reconnect.

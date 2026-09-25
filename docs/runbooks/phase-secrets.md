@@ -18,7 +18,11 @@ injected as env vars only for the lifetime of the docker-compose call —
 they're never written to disk on the host.
 
 To add or change a secret:
-- Locally: `phase secrets create KEY=VALUE` or `phase secrets update KEY=VALUE`
+- Locally: `phase secrets create KEY` or `phase secrets update KEY`. The
+  CLI asks for the value, hidden, or reads it from stdin
+  (`printf %s "$VALUE" | phase secrets update KEY`); `--random base64url
+  --length 32` generates one instead, as `scripts/rotate-postgres-password.sh`
+  documents. There is no `KEY=VALUE` form: the whole string becomes the key.
 - Or via the Phase web UI on the operator's instance
 - Then redeploy (host pulls fresh values from Phase on the next `phase run`)
 

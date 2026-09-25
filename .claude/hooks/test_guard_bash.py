@@ -233,6 +233,47 @@ class GuardTest(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertDenied(cmd)
 
+    def test_git_config_hooks_path(self) -> None:
+        # A lasting swap disables the secret scan for every later commit.
+        self.on("feature")
+        for cmd in [
+            "git config core.hooksPath /dev/null",
+            "git config --local core.hooksPath /tmp/empty",
+            "git config --global core.hooksPath /dev/null",
+            "git config -f .git/config core.hooksPath /dev/null",
+            "git config -f.git/config.local core.hooksPath /dev/null",
+            "git config --type=path core.hookspath /dev/null",
+            "git config --replace-all core.hooksPath /dev/null",
+            "git config --unset core.hooksPath",
+            "git config --unset-a core.hooksPath",
+            "git config --local --unset-all core.hooksPath",
+            "git config set core.hooksPath /dev/null",
+            "git config unset core.hooksPath",
+            "git config --remove-section core",
+            "git config rename-section core old",
+            "git config core.hooksPath /dev/null && git commit -m x",
+            "git -C . config core.hooksPath /dev/null",
+        ]:
+            with self.subTest(cmd=cmd):
+                self.assertDenied(cmd)
+        for cmd in [
+            "git config --local core.hooksPath .githooks",
+            "git config core.hooksPath ./.githooks/",
+            "git config set core.hooksPath .githooks",
+            "git config core.hooksPath",
+            "git config --get core.hooksPath",
+            "git config get core.hooksPath",
+            "git config --get-regexp core.hooksPath .",
+            "git config --list",
+            "git config -l --show-origin",
+            "git config --unset push.default",
+            "git config user.name x",
+            "git config --remove-section alias",
+        ]:
+            with self.subTest(cmd=cmd):
+                self.assertAllowed(cmd)
+        self.assertAllowed("git config --unset core.hooksPath", XUPERTRADE_ALLOW_NO_VERIFY="1")
+
     def test_commits_that_only_mention_the_flags(self) -> None:
         self.on("feature")
         for cmd in [

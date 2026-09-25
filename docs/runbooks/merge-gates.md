@@ -45,13 +45,20 @@ gh api repos/kanylbullen/xupertrade/rulesets/15967890 \
 
 ## Emergency bypass
 
-On 2026-09-24 the ruleset had **no bypass actors**. Once checks are
-required, nobody can merge a PR whose required checks are red or still
-pending, admins included. Set the bypass up before it is needed:
+**Not set up yet.** On 2026-09-25 the checks are required and the
+ruleset still has **no bypass actors**, so today nobody can merge a PR
+whose required checks are red or still pending, admins included: step 3
+below is refused. Set the bypass up before it is needed:
 
 - Same ruleset page → Bypass list → Add bypass → Repository admin → **For
   pull requests only**. An admin can then merge a PR past failing checks,
   and direct pushes to master stay blocked.
+
+Read it back; `[]` means there is still no bypass:
+
+```sh
+gh api repos/kanylbullen/xupertrade/rulesets/15967890 --jq '.bypass_actors'
+```
 
 Using it is the operator's decision, never an agent's, and only for a
 real emergency: the bot is down, or waiting on CI costs money.
@@ -60,7 +67,9 @@ real emergency: the bot is down, or waiting on CI costs money.
 2. Comment on the PR why it cannot wait, and which check is red or pending
    and why that is accepted.
 3. Merge with `gh pr merge <n> --squash --admin`, or tick the bypass box
-   in the merge box.
+   in the merge box. Both are refused until the bypass above exists, so
+   add it first if the read-back says `[]`, rather than using the
+   enforcement switch below.
 4. Open a follow-up for whatever made the check red. The next PR is green
    again.
 

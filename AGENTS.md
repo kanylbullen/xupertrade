@@ -117,8 +117,9 @@ and under Claude Code it is the only one: the guard hook refuses
   and `master` **requires** the checks `bot`, `dashboard`, `migrations`
   and `gitleaks` (`.github/workflows/secret-scan.yml`): a PR with one red
   or pending cannot merge. `dashboard-integration` and CodeQL also run
-  but are not required. None of them is a code review. Details and the
-  emergency bypass: [docs/runbooks/merge-gates.md](docs/runbooks/merge-gates.md).
+  but are not required. None of them is a code review. Details, and the
+  emergency bypass, which is not set up yet:
+  [docs/runbooks/merge-gates.md](docs/runbooks/merge-gates.md).
 - Never bypass the pre-commit hook.
 
 ## Key commands

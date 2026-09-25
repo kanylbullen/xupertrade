@@ -60,11 +60,23 @@ Both of these, before the first sign-in:
   running.
 - **Create the operator tenant row** after `alembic upgrade head`, with
   `authentik_sub` set to the OIDC `sub` or the basic username you will
-  sign in with. `.env.example` has the `INSERT`. A first sign-in without
-  the row creates an ordinary, non-operator tenant for that identity,
-  and the `INSERT` then fails on the unique `authentik_sub`. For basic,
-  insert the row before running path 3, so `set-basic-auth.sh` offers
-  that username as its default.
+  sign in with:
+  ```bash
+  ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+    "docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
+     \"INSERT INTO tenants (id, authentik_sub, email, display_name, is_operator, multi_bot_enabled)
+       VALUES ('00000000-0000-0000-0000-000000000001', '<oidc-sub-or-basic-username>',
+               'you@example.com', 'Operator', true, true);\""
+  ```
+  `docker exec`, not `docker compose exec`: compose reads the whole
+  file first and stops on the `${POSTGRES_PASSWORD:?}` it requires
+  unless run under `phase run --`. That id is the operator tenant
+  everywhere (alembic 0011, `lib/tenant-server.ts`,
+  `scripts/set-basic-auth.sh`). A first sign-in without the row creates
+  an ordinary, non-operator tenant for that identity, and the `INSERT`
+  then fails on the unique `authentik_sub`. For basic, insert the row
+  before running path 3, so `set-basic-auth.sh` offers that username as
+  its default.
 
 Once the row exists, the install counts as provisioned: with no sign-in
 configured it resolves to `locked`, not `disabled`, and paths 2 and 3
