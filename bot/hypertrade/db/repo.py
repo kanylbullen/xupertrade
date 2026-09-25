@@ -607,9 +607,23 @@ class Repository:
         fee_rate: float,
         slippage_bps: float,
     ) -> int:
-        """Insert a backtest run summary. Returns the new row's id."""
+        """Insert a backtest run summary. Returns the new row's id.
+
+        The row belongs to this Repository's tenant (the constructor's
+        `tenant_id`, else `TENANT_ID`). Refuses to write without one:
+        `backtest_runs.tenant_id` is NOT NULL since alembic 0011, and the
+        dashboard's /backtests page shows only the signed-in tenant's
+        rows, so a tenant-less row either fails on Postgres or, on a
+        schema without the constraint, is saved where nobody can see it.
+        """
+        if self._tenant_id is None:
+            raise ValueError(
+                "backtest run has no tenant: construct the Repository "
+                "with tenant_id or set TENANT_ID"
+            )
         async with self._session_factory() as session:
             row = BacktestRun(
+                tenant_id=self._tenant_id,
                 strategy_name=strategy_name,
                 symbol=symbol,
                 timeframe=timeframe,
