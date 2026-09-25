@@ -59,7 +59,8 @@ boundaries, and abuse paths introduced or affected by the change.
   keep publishing no host ports (CLAUDE.md § 3).
 - **Public Docker surfaces.** Everything except Caddy's 80/443 stays on
   loopback or container-internal (the 2026-07-29 fix moved published
-  ports back, CLAUDE.md § 5). New compose services: check `ports:` and
+  ports back, docs/CHANGELOG.md "Host port exposure closed"). New compose
+  services: check `ports:` and
   `PortBindings`.
 
 ## Stay In Your Lane

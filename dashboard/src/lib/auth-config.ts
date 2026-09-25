@@ -148,7 +148,7 @@ export type TenantProbe = () => Promise<boolean>;
  *         `scripts/set-basic-auth.sh`; see `.env.example`.
  *       - nothing survives and tenants exist → `locked`: the login
  *         page explains what happened and no page renders data.
- *         Recovery: CLAUDE.md § 3, "Dashboard auth recovery".
+ *         Recovery: docs/runbooks/dashboard-auth-recovery.md.
  */
 export async function resolveMode(args: {
   envMode: string;

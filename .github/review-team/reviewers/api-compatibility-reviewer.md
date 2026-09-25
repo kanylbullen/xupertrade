@@ -28,8 +28,9 @@ changes, contract drift, and migration risks across those boundaries.
   under `bot/alembic/versions/` and keeps `db/models.py` in sync. Consider
   rollout ordering: the dashboard, compose bots, and orchestrator-spawned
   tenant bots pick up new images at different times, and the
-  `POSTGRES_PASSWORD`/`DATABASE_URL` rotation dance (CLAUDE.md § 3)
-  applies when touching connection config.
+  `POSTGRES_PASSWORD`/`DATABASE_URL` rotation dance
+  (docs/runbooks/postgres-password-rotation.md) applies when touching
+  connection config.
 - **Redis keys are cross-service contracts.** Namespaces like
   `dashboard:auth:*`, `tenant:<id>:pg_role_pw`, and the control keys are
   read by more than one service (bot control, dashboard, paper-exchange

@@ -23,7 +23,7 @@ user workflow, handles user-facing states well, and remains accessible.
   acts on a bot (pause, strategy toggle, start/stop, TLS configure) must
   be unambiguous about which mode / tenant bot it targets, and destructive
   or money-affecting actions need clear state and confirmation.
-- **Show exchange reality, not a stale cache** (CLAUDE.md § 5): position
+- **Show exchange reality, not a stale cache** (docs/CHANGELOG.md): position
   views reflect the exchange via the bot API — flag UI that re-introduces
   stale-DB views or hides divergence.
 - **Credential fields and password managers** (CLAUDE.md § 9): use

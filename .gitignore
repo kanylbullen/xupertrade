@@ -41,5 +41,9 @@ node_modules/
 pgdata/
 
 # Local agent / secrets-manager session caches — NEVER commit
-.claude/
+# (.claude/settings.json and .claude/hooks/ are the shared, checked-in
+# project config; everything else under .claude/ stays local)
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 .phase.json

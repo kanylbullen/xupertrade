@@ -8,11 +8,13 @@ services:
   # to start it as a long-running service — it has no command, no
   # depends_on, and isn't meant to run. Build it explicitly with:
   #
-  #   docker compose --profile build build --no-cache --pull bot-image
+  #   GIT_SHA=$(git rev-parse HEAD) docker compose --profile build build --no-cache --pull bot-image
   #
-  # or alongside dashboard rebuilds:
-  #
-  #   docker compose --profile build build --no-cache --pull bot-image dashboard
+  # (GIT_SHA is the version stamp; see the build args below.) On the
+  # production host, build it only in the weekly bot-deploy window
+  # (docs/runbooks/deploy.md): every bot Start runs whatever this tag
+  # is at that moment, so a mid-week rebuild from master reaches the
+  # next Stop/Start of any bot.
   bot-image:
     profiles: [build]
     build:
@@ -22,7 +24,7 @@ services:
         # org.opencontainers.image.revision). Pass the commit being
         # built, evaluated on the build host after its checkout, e.g.
         #   GIT_SHA=$(git rev-parse HEAD) phase run -- docker compose \
-        #     --profile build build --no-cache --pull bot-image dashboard
+        #     --profile build build --no-cache --pull bot-image
         # Inside `ssh host "..."` write `GIT_SHA=\$(git rev-parse HEAD)`.
         # Unescaped, your local shell expands it to whatever your own
         # clone has checked out, and the image reports that commit:

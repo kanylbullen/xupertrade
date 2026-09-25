@@ -22,9 +22,10 @@ information they need — or leaves docs lying.
 
 - **CLAUDE.md drift.** Behavior changes that alter documented workflows,
   commands, repo layout, or policy must update the corresponding
-  `CLAUDE.md § N` section in the same PR. The § 3 port-exposure claims
-  once went stale and had to be corrected after a security fix (§ 5) —
-  flag PRs that change behavior but not the doc that governs it.
+  `CLAUDE.md § N` section or `docs/runbooks/` file in the same PR. The § 3
+  port-exposure claims once went stale and had to be corrected after a
+  security fix (docs/CHANGELOG.md, "Host port exposure closed") — flag
+  PRs that change behavior but not the doc that governs it.
 - **No duplication into AGENTS.md/README.** New docs must reference
   `CLAUDE.md § N` instead of copying prose; restated material drifts (the
   root AGENTS.md states this rule — hold everything to it). Never quote
@@ -35,11 +36,11 @@ information they need — or leaves docs lying.
   included) — `req.url` inside Docker returns the container hostname.
   Examples use `$DEPLOY_HOST` / `$YOUR_DOMAIN` placeholders, never real
   hosts (CLAUDE.md § 0).
-- **Operational runbooks stay in CLAUDE.md**, not in chat or PR comments:
-  the deploy command shape (split build from `up -d`, verify image age),
-  `POSTGRES_PASSWORD` rotation, host cron jobs, and the "is the bot OK?"
-  checks. If the change alters any of those, updating that section is part
-  of "done".
+- **Operational runbooks live in `docs/runbooks/`** (indexed in CLAUDE.md
+  § 3), not in chat or PR comments: the deploy command shape (split build
+  from `up -d`, verify image age), `POSTGRES_PASSWORD` rotation, host cron
+  jobs, and the "is the bot OK?" checks. If the change alters any of
+  those, updating that runbook is part of "done".
 - **Placeholders, always**: `$DEPLOY_HOST`, `$DEPLOY_IP`, `$PHASE_URL`,
   `you@example.com`. A real hostname, IP, email, or token in docs is also
   a security finding — flag it here too.

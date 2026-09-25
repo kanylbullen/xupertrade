@@ -23,10 +23,11 @@ this repo exists to prevent (CLAUDE.md § 1, § 6).
   timing (`bot/hypertrade/strategies/<name>.py`). Custom in-house
   strategies (`vvv_hedge`, `ath_breakout`) have no `.pine` — check them
   against their docstring spec instead. This audit class caught four HIGH
-  port bugs before (CLAUDE.md § 5, "Audits & port fixes").
+  port bugs before (docs/CHANGELOG.md, "Audits & port fixes").
 - **None-sentinel stop-loss handling.** "No SL" must be represented as
   `None`, never `0.0` or a falsy check — `_sl=0.0` caused instant-close
-  cascades in `ema_crossover` (CLAUDE.md § 5). Flag any new strategy or
+  cascades in `ema_crossover` (docs/CHANGELOG.md, "Initial build"). Flag
+  any new strategy or
   refactor that reintroduces the falsy-SL pattern, and any `restore_state()`
   path that can leave SL/TP unset (the `supertrend` "running unprotected
   after restart" bug).
