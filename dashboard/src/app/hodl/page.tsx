@@ -4,12 +4,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { requireTenantServer } from "@/lib/tenant-server";
-import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
 import { requestNow } from "@/lib/now";
-import { servicesOwnerMode } from "@/lib/services-owner";
-import { and, eq } from "drizzle-orm";
+import { servicesOwnerModeFor } from "@/lib/services-owner";
+import { ownerBotRow } from "@/lib/services-owner-check";
 
 type Check = {
   name: string;
@@ -61,28 +60,23 @@ type Purchase = {
 };
 
 export default async function HodlPage() {
-  // HODL signals come from the services-owner bot (roadmap NU-7;
-  // HYPERTRADE_SERVICES_OWNER_MODE, paper by default) — the one bot that
-  // evaluates them. Their inputs are mode-agnostic market data, so no
-  // mode picker. The existing "bot offline" empty state renders when
-  // that bot isn't running.
-  const mode = servicesOwnerMode();
-
   // Read the clock once here, at the top of the request, and pass it
   // down — see lib/now.ts for why this isn't an inline Date.now().
   const now = requestNow();
 
+  // HODL signals come from the tenant's services-owner bot (roadmap
+  // NU-7; paper by default for the operator) — the one bot that
+  // evaluates them. Their inputs are mode-agnostic market data, so no
+  // mode picker. The existing "bot offline" empty state renders when
+  // that bot isn't running.
   const tenant = await requireTenantServer();
-  const botRows = await db
-    .select()
-    .from(tenantBots)
-    .where(and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.mode, mode)))
-    .limit(1);
-  const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
+  const mode = servicesOwnerModeFor(tenant);
+  const bot = await ownerBotRow(tenant);
+  const botApiUrl = bot ? getBotApiUrl(bot) : null;
 
   // /api/hodl/* are auth-gated. Per security audit H-1 the dashboard
   // looks up each bot's per-bot API key from Redis (no shared secret).
-  const apiKey = botRows[0] ? (await loadBotApiKey(botRows[0].id)) || "" : "";
+  const apiKey = bot ? (await loadBotApiKey(bot.id)) || "" : "";
   const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
   let signals: SignalState[] = [];

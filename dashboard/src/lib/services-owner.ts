@@ -4,30 +4,32 @@
  * command poller, HODL signal evaluation, the daily vault scanner and
  * the HL key-expiry reminders.
  *
- * It is the bot whose mode equals `HYPERTRADE_SERVICES_OWNER_MODE`
- * (default `paper`). Paper always runs, needs no exchange key and so
- * cannot be cleared by HyperLiquid, which lets testnet and mainnet be
- * stopped without silencing the alarms. The owner used to be mainnet:
- * stopping the real-money bot took Telegram, HODL and vaults with it.
+ * For the operator tenant it is the bot whose mode equals
+ * `HYPERTRADE_SERVICES_OWNER_MODE` (default `paper`). Paper always runs,
+ * needs no exchange key and so cannot be cleared by HyperLiquid, which
+ * lets testnet and mainnet be stopped without silencing the alarms.
  *
- * Every consumer reads the same function — the orchestrator's env gate
- * (`buildSpec` sets TELEGRAM_ENABLED + SERVICES_OWNER), the memory cap,
- * the /hodl and /vaults pages and send-unlock-link — so they cannot
- * disagree about which bot to talk to.
+ * Every other tenant keeps the owner it had before NU-7, mainnet
+ * (`servicesOwnerModeFor`). Event channels and control keys are not
+ * tenant-scoped yet, and a paper bot needs no exchange key, so moving
+ * the owner to paper for every tenant would hand a Telegram notifier to
+ * any tenant who creates a paper bot.
  *
  * A change reaches a bot only when that bot is restarted. Restart the
  * OLD owner first, then the new one: two bots polling Telegram
- * getUpdates with one token collide, and only one may send HODL and
- * vault alerts.
- *
- * Pure (no DB); the running-owner check lives in
- * `services-owner-check.ts` so the orchestrator stays DB-free.
+ * getUpdates with one token collide. `buildSpec` labels each container
+ * with what it was started as (`SERVICES_OWNER_LABEL`), and
+ * `services-owner-check.ts` (the DB side) reads those labels.
  */
 
 import type { BotMode } from "./bot-orchestrator";
 
 export const SERVICES_OWNER_MODE_ENV = "HYPERTRADE_SERVICES_OWNER_MODE";
 export const DEFAULT_SERVICES_OWNER_MODE: BotMode = "paper";
+/** The owner of every non-operator tenant, as before NU-7. */
+export const LEGACY_SERVICES_OWNER_MODE: BotMode = "mainnet";
+/** Container label `buildSpec` sets to "true" or "false". */
+export const SERVICES_OWNER_LABEL = "hypertrade.services_owner";
 
 const MODES: readonly string[] = ["paper", "testnet", "mainnet"];
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -36,10 +38,10 @@ let warnedInvalidMode: string | null = null;
 let warnedInvalidAddress = false;
 
 /**
- * The owner mode. Unset or empty → paper. An unknown value also falls
- * back to paper, with one warning per value: every dashboard code path
- * reads this same function, so a typo still yields exactly one owner
- * rather than a failed bot start or a page crash.
+ * The operator's owner mode. Unset or empty → paper. An unknown value
+ * also falls back to paper, with one warning per value: every dashboard
+ * code path reads this same function, so a typo still yields exactly
+ * one owner rather than a failed bot start or a page crash.
  */
 export function servicesOwnerMode(): BotMode {
   const raw = (process.env[SERVICES_OWNER_MODE_ENV] ?? "").trim().toLowerCase();
@@ -55,18 +57,26 @@ export function servicesOwnerMode(): BotMode {
   return DEFAULT_SERVICES_OWNER_MODE;
 }
 
-export function isServicesOwner(mode: BotMode): boolean {
-  return mode === servicesOwnerMode();
+type TenantLike = { isOperator?: boolean | null };
+
+/** The owner mode for one tenant (see the module comment). */
+export function servicesOwnerModeFor(tenant: TenantLike): BotMode {
+  return tenant.isOperator === true ? servicesOwnerMode() : LEGACY_SERVICES_OWNER_MODE;
 }
 
-/** Log line shared by the orchestrator routes and the watchdog. */
-export function servicesOwnerMissingMessage(tenantId: string): string {
-  return (
-    `no running ${servicesOwnerMode()} bot for tenant ${tenantId} — it is ` +
-    "the services owner, so Telegram, HODL, the vault scanner and key " +
-    "reminders are off. Start it, or point HYPERTRADE_SERVICES_OWNER_MODE " +
-    "at a running mode and restart the old owner first."
-  );
+export function isServicesOwner(mode: BotMode, tenant: TenantLike): boolean {
+  return mode === servicesOwnerModeFor(tenant);
+}
+
+/**
+ * Whether a container was started as the services owner, read from its
+ * labels. A container without the label was spawned before NU-7, when
+ * the orchestrator gave Telegram to the mainnet bot only.
+ */
+export function containerIsServicesOwner(labels: Record<string, string>): boolean {
+  const label = labels[SERVICES_OWNER_LABEL];
+  if (label !== undefined) return label === "true";
+  return labels["hypertrade.mode"] === LEGACY_SERVICES_OWNER_MODE;
 }
 
 /**

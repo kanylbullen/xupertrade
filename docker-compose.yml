@@ -191,7 +191,8 @@ services:
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
       # Side-services owner (roadmap NU-7, lib/services-owner.ts): the mode
-      # whose bot runs Telegram, HODL, the vault scanner and key reminders.
+      # whose bot runs Telegram, HODL, the vault scanner and key reminders
+      # for the operator tenant (other tenants keep mainnet).
       # The orchestrator sets TELEGRAM_ENABLED + SERVICES_OWNER on that bot
       # only; /hodl, /vaults and the unlock DM read it. Changing it takes
       # effect per bot on restart: restart the old owner first.

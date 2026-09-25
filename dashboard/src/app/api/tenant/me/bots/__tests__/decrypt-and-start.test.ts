@@ -250,7 +250,7 @@ describe("decryptAndStart", () => {
       ]);
     }
 
-    it("passes the operator's Phase vault address for the operator tenant", async () => {
+    it("passes the operator's Phase vault address and operator flag for the operator tenant", async () => {
       process.env.VAULT_TRACKING_ADDRESS = PHASE_ADDR;
       startOk();
       const args = makeArgs();
@@ -259,11 +259,11 @@ describe("decryptAndStart", () => {
       await decryptAndStart(args);
 
       expect(mockedStartBot).toHaveBeenCalledWith(
-        expect.objectContaining({ vaultTrackingAddress: PHASE_ADDR }),
+        expect.objectContaining({ vaultTrackingAddress: PHASE_ADDR, isOperator: true }),
       );
     });
 
-    it("never passes it for another tenant", async () => {
+    it("never passes either for another tenant", async () => {
       process.env.VAULT_TRACKING_ADDRESS = PHASE_ADDR;
       startOk();
       const args = makeArgs();
@@ -272,17 +272,18 @@ describe("decryptAndStart", () => {
       await decryptAndStart(args);
 
       expect(mockedStartBot).toHaveBeenCalledWith(
-        expect.objectContaining({ vaultTrackingAddress: null }),
+        expect.objectContaining({ vaultTrackingAddress: null, isOperator: false }),
       );
     });
 
-    it("checks for a running owner after a successful start", async () => {
+    it("checks the running owners after a successful start", async () => {
       startOk();
+      const args = makeArgs();
 
-      await decryptAndStart(makeArgs());
+      await decryptAndStart(args);
 
       expect(warnIfServicesOwnerNotRunning).toHaveBeenCalledWith(
-        TENANT_ID,
+        args.tenant,
         "after starting the paper bot",
       );
     });

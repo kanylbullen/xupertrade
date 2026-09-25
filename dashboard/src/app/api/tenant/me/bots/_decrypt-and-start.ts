@@ -162,6 +162,9 @@ export async function decryptAndStart(args: Args): Promise<Result> {
       // tenant's /vaults lists the operator's holdings.
       vaultTrackingAddress:
         tenant.isOperator === true ? operatorVaultTrackingAddress() : null,
+      // Picks the services owner: the configured mode for the operator,
+      // mainnet for everyone else (services-owner.ts).
+      isOperator: tenant.isOperator === true,
       systemEnv: {
         ...getOrchestratorSystemEnv(),
         DATABASE_URL: tenantDbUrl,
@@ -230,9 +233,10 @@ export async function decryptAndStart(args: Args): Promise<Result> {
         ),
       };
     }
-    // NU-7: say so when this tenant still has no running services owner
-    // (e.g. testnet started while paper is down). Never throws.
-    await warnIfServicesOwnerNotRunning(tenant.id, `after starting the ${mode} bot`);
+    // NU-7: say so when this tenant's running owners are not exactly one
+    // bot in its owner mode (testnet started while paper is down, or a
+    // handover half done). Never throws.
+    await warnIfServicesOwnerNotRunning(tenant, `after starting the ${mode} bot`);
     return { kind: "ok", bot: updated[0] };
   } catch (err) {
     try {

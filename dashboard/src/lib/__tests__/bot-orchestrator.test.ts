@@ -34,8 +34,17 @@ const BOT_ID = "11111111-2222-3333-4444-555566667777";
 // fixed value because they exercise envMap shape, not key generation.
 const TEST_API_KEY = "test-api-key";
 
+// Hermetic: the owner mode must not leak in from the environment that
+// runs the suite (e.g. a dashboard container with a non-default owner).
+const ORIG_OWNER_MODE = process.env.HYPERTRADE_SERVICES_OWNER_MODE;
+beforeEach(() => {
+  delete process.env.HYPERTRADE_SERVICES_OWNER_MODE;
+});
+
 afterEach(() => {
   vi.clearAllMocks();
+  if (ORIG_OWNER_MODE === undefined) delete process.env.HYPERTRADE_SERVICES_OWNER_MODE;
+  else process.env.HYPERTRADE_SERVICES_OWNER_MODE = ORIG_OWNER_MODE;
 });
 
 describe("isValidMode", () => {
@@ -296,72 +305,63 @@ describe("buildSpec", () => {
       process.env = { ...ORIG };
     });
 
-    it("gives the default owner (paper) 1 GiB", () => {
-      const spec = buildSpec({
+    const mem = (mode: "paper" | "testnet" | "mainnet", isOperator = true) =>
+      buildSpec({
         tenantId: TENANT_ID,
         botId: BOT_ID,
-        mode: "paper",
+        mode,
         decryptedSecrets: {},
         apiKey: TEST_API_KEY,
-      });
-      expect(spec.memoryBytes).toBe(1024 * 1024 * 1024);
-      // CPU cap is NOT touched by the memory fix.
-      expect(spec.nanoCpus).toBe(1_000_000_000);
+        isOperator,
+      }).memoryBytes;
+
+    it("gives the operator's default owner (paper) 1 GiB", () => {
+      expect(mem("paper")).toBe(1024 * 1024 * 1024);
     });
 
     it.each(["testnet", "mainnet"] as const)(
       "keeps non-owner %s at 512 MiB",
       (mode) => {
-        const spec = buildSpec({
-          tenantId: TENANT_ID,
-          botId: BOT_ID,
-          mode,
-          decryptedSecrets: {},
-          apiKey: TEST_API_KEY,
-        });
-        expect(spec.memoryBytes).toBe(512 * 1024 * 1024);
+        expect(mem(mode)).toBe(512 * 1024 * 1024);
       },
     );
 
     it("moves the 1 GiB with the owner", () => {
       process.env.HYPERTRADE_SERVICES_OWNER_MODE = "mainnet";
-      expect(memoryBytesForMode("mainnet")).toBe(1024 * 1024 * 1024);
-      expect(memoryBytesForMode("paper")).toBe(512 * 1024 * 1024);
-      expect(memoryBytesForMode("testnet")).toBe(512 * 1024 * 1024);
+      expect(mem("mainnet")).toBe(1024 * 1024 * 1024);
+      expect(mem("paper")).toBe(512 * 1024 * 1024);
+      expect(mem("testnet")).toBe(512 * 1024 * 1024);
+      // Another tenant's owner is mainnet whatever the operator's is.
+      process.env.HYPERTRADE_SERVICES_OWNER_MODE = "paper";
+      expect(mem("mainnet", false)).toBe(1024 * 1024 * 1024);
+      expect(mem("paper", false)).toBe(512 * 1024 * 1024);
     });
 
     it("per-mode env override wins over the default", () => {
       process.env.HYPERTRADE_BOT_MAINNET_MEMORY_BYTES = String(2 * 1024 * 1024 * 1024);
-      const spec = buildSpec({
-        tenantId: TENANT_ID,
-        botId: BOT_ID,
-        mode: "mainnet",
-        decryptedSecrets: {},
-        apiKey: TEST_API_KEY,
-      });
-      expect(spec.memoryBytes).toBe(2 * 1024 * 1024 * 1024);
+      expect(mem("mainnet")).toBe(2 * 1024 * 1024 * 1024);
       // Other modes are unaffected by the mainnet-specific override.
-      expect(memoryBytesForMode("testnet")).toBe(512 * 1024 * 1024);
+      expect(memoryBytesForMode("testnet", false)).toBe(512 * 1024 * 1024);
     });
 
     it("global HYPERTRADE_BOT_MEMORY_BYTES applies to modes without a per-mode var", () => {
       process.env.HYPERTRADE_BOT_MEMORY_BYTES = String(700 * 1024 * 1024);
-      expect(memoryBytesForMode("paper")).toBe(700 * 1024 * 1024);
-      expect(memoryBytesForMode("mainnet")).toBe(700 * 1024 * 1024);
+      expect(memoryBytesForMode("paper", true)).toBe(700 * 1024 * 1024);
+      expect(memoryBytesForMode("mainnet", false)).toBe(700 * 1024 * 1024);
     });
 
     it("per-mode env override beats the global fallback", () => {
       process.env.HYPERTRADE_BOT_MEMORY_BYTES = String(700 * 1024 * 1024);
       process.env.HYPERTRADE_BOT_MAINNET_MEMORY_BYTES = String(1536 * 1024 * 1024);
-      expect(memoryBytesForMode("mainnet")).toBe(1536 * 1024 * 1024);
-      expect(memoryBytesForMode("testnet")).toBe(700 * 1024 * 1024);
+      expect(memoryBytesForMode("mainnet", false)).toBe(1536 * 1024 * 1024);
+      expect(memoryBytesForMode("testnet", false)).toBe(700 * 1024 * 1024);
     });
 
     it.each(["", "0", "-1", "not-a-number"])(
       "ignores a bogus override value %j and falls back to the default",
       (bad) => {
         process.env.HYPERTRADE_BOT_PAPER_MEMORY_BYTES = bad;
-        expect(memoryBytesForMode("paper")).toBe(1024 * 1024 * 1024);
+        expect(memoryBytesForMode("paper", true)).toBe(1024 * 1024 * 1024);
       },
     );
   });
@@ -401,6 +401,7 @@ describe("buildSpec", () => {
       "hypertrade.tenant_id": TENANT_ID,
       "hypertrade.bot_id": BOT_ID,
       "hypertrade.mode": "testnet",
+      "hypertrade.services_owner": "false",
     });
   });
 
@@ -469,16 +470,14 @@ describe("buildSpec", () => {
 
   describe("services-owner gate: TELEGRAM_ENABLED + SERVICES_OWNER (NU-7)", () => {
     // Exactly one bot per tenant owns Telegram, HODL, the vault scanner
-    // and key reminders: the one whose mode is
-    // HYPERTRADE_SERVICES_OWNER_MODE (default paper). Two Telegram
+    // and key reminders: for the operator the one whose mode is
+    // HYPERTRADE_SERVICES_OWNER_MODE (default paper), for any other
+    // tenant mainnet. `gate` builds as the operator unless told. Two Telegram
     // pollers on one token collide, and every bot receives every mode's
     // events, so a second owner doubles every notification (the post-PR-4c
     // bug). The gate used to be pinned to mainnet, which meant stopping the
     // real-money bot silenced the alarms.
     const ORIG = { ...process.env };
-    beforeEach(() => {
-      delete process.env.HYPERTRADE_SERVICES_OWNER_MODE;
-    });
     afterEach(() => {
       process.env = { ...ORIG };
     });
@@ -493,6 +492,7 @@ describe("buildSpec", () => {
         mode,
         decryptedSecrets: {},
         apiKey: TEST_API_KEY,
+        isOperator: true,
         ...extra,
       });
       const pick = (k: string) => spec.env.filter((e) => e.startsWith(`${k}=`));
@@ -500,14 +500,35 @@ describe("buildSpec", () => {
         telegram: pick("TELEGRAM_ENABLED"),
         owner: pick("SERVICES_OWNER"),
         vault: pick("VAULT_TRACKING_ADDRESS"),
+        label: spec.labels?.["hypertrade.services_owner"],
       };
     }
 
-    it("makes paper the owner by default", () => {
+    it("makes paper the operator's owner by default, and labels it", () => {
       expect(gate("paper")).toMatchObject({
         telegram: ["TELEGRAM_ENABLED=true"],
         owner: ["SERVICES_OWNER=true"],
+        label: "true",
       });
+    });
+
+    it("never makes another tenant's paper bot the owner; their mainnet stays it", () => {
+      // Paper needs no exchange key, and event channels and control keys
+      // are not tenant-scoped yet (services-owner.ts).
+      for (const env of [undefined, "paper"]) {
+        if (env) process.env.HYPERTRADE_SERVICES_OWNER_MODE = env;
+        expect(gate("paper", { isOperator: false })).toMatchObject({
+          telegram: ["TELEGRAM_ENABLED=false"],
+          owner: ["SERVICES_OWNER=false"],
+          label: "false",
+        });
+        expect(gate("mainnet", { isOperator: false })).toMatchObject({
+          telegram: ["TELEGRAM_ENABLED=true"],
+          owner: ["SERVICES_OWNER=true"],
+        });
+      }
+      // Omitting isOperator is the same as false (fail closed).
+      expect(gate("paper", { isOperator: undefined }).owner).toEqual(["SERVICES_OWNER=false"]);
     });
 
     it.each(["testnet", "mainnet"] as const)(
@@ -540,12 +561,11 @@ describe("buildSpec", () => {
       vi.mocked(console.warn).mockRestore();
     });
 
-    it("a tenant secret cannot flip either flag on a non-owner", () => {
-      expect(
-        gate("testnet", {
-          decryptedSecrets: { TELEGRAM_ENABLED: "true", SERVICES_OWNER: "true" },
-        }),
-      ).toMatchObject({
+    it.each([
+      ["a tenant secret", { decryptedSecrets: { TELEGRAM_ENABLED: "true", SERVICES_OWNER: "true" } }],
+      ["systemEnv", { systemEnv: { TELEGRAM_ENABLED: "true", SERVICES_OWNER: "true" } }],
+    ])("%s cannot flip either flag on a non-owner", (_what, extra) => {
+      expect(gate("testnet", extra)).toMatchObject({
         telegram: ["TELEGRAM_ENABLED=false"],
         owner: ["SERVICES_OWNER=false"],
       });

@@ -3,12 +3,11 @@ export const dynamic = "force-dynamic";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { requireTenantServer } from "@/lib/tenant-server";
-import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
 import { requestNow } from "@/lib/now";
-import { servicesOwnerMode } from "@/lib/services-owner";
-import { and, eq } from "drizzle-orm";
+import { servicesOwnerModeFor } from "@/lib/services-owner";
+import { ownerBotRow } from "@/lib/services-owner-check";
 
 type Vault = {
   address: string;
@@ -66,29 +65,23 @@ type MyPositionsResponse = {
 };
 
 export default async function VaultsPage() {
-  // The services-owner bot (roadmap NU-7; HYPERTRADE_SERVICES_OWNER_MODE,
-  // paper by default) runs the vault scanner and holds the tracking
-  // address. Vaults are HL mainnet data whichever bot fetches them. The
-  // existing "bot offline" empty state renders when that bot isn't
-  // running.
-  const mode = servicesOwnerMode();
-
   // Read the clock once here, at the top of the request, and pass it
   // down, so every position card judges its lockup against the same
   // instant — see lib/now.ts.
   const now = requestNow();
 
+  // The tenant's services-owner bot (roadmap NU-7; paper by default for
+  // the operator) runs the vault scanner and holds the tracking address.
+  // Vaults are HL mainnet data whichever bot fetches them. The existing
+  // "bot offline" empty state renders when that bot isn't running.
   const tenant = await requireTenantServer();
-  const botRows = await db
-    .select()
-    .from(tenantBots)
-    .where(and(eq(tenantBots.tenantId, tenant.id), eq(tenantBots.mode, mode)))
-    .limit(1);
-  const botApiUrl = botRows[0] ? getBotApiUrl(botRows[0]) : null;
+  const mode = servicesOwnerModeFor(tenant);
+  const bot = await ownerBotRow(tenant);
+  const botApiUrl = bot ? getBotApiUrl(bot) : null;
 
   // /api/vaults/mine is auth-gated. Per security audit H-1 the
   // dashboard looks up each bot's per-bot API key from Redis.
-  const apiKey = botRows[0] ? (await loadBotApiKey(botRows[0].id)) || "" : "";
+  const apiKey = bot ? (await loadBotApiKey(bot.id)) || "" : "";
   const authHeaders: HeadersInit = apiKey ? { "X-Api-Key": apiKey } : {};
 
   let vaults: Vault[] = [];
@@ -141,6 +134,16 @@ export default async function VaultsPage() {
 
       {myPositions && myPositions.positions.length > 0 && (
         <MyPositionsCard data={myPositions} now={now} />
+      )}
+      {myPositions && !myPositions.address && (
+        <Card className="mb-6">
+          <CardContent className="pt-6 text-sm text-muted-foreground">
+            No vault-tracking address on the {mode} bot, so your vault
+            holdings are not listed. Set <code className="rounded bg-muted px-1 py-0.5 text-xs">VAULT_TRACKING_ADDRESS</code>{" "}
+            (operator: in Phase; otherwise on Settings → Credentials), then
+            restart the {mode} bot.
+          </CardContent>
+        </Card>
       )}
       {myPositions && myPositions.address && myPositions.positions.length === 0 && (
         <Card className="mb-6">

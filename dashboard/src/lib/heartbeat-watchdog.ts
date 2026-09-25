@@ -54,14 +54,6 @@
  * one "down" alert per outage and one "recovered" alert when it comes
  * back — no per-minute spam.
  *
- * Services owner (roadmap NU-7): `runServicesOwnerSweep` runs on the
- * same interval. A tenant with running bots but no running bot in the
- * services-owner mode (paper by default) has Telegram, HODL, the vault
- * scanner and key reminders off — the case above that `is_running`
- * hides, because the owner was stopped on purpose. After a grace period
- * (so a Stop→Start of the owner in the bot-deploy window stays quiet)
- * it logs and sends one operator alert, re-sent daily while it lasts.
- *
  * Fail-safe: every per-bot check is wrapped in try/catch; one bot's
  * failure never kills the loop, and the loop itself never throws out of
  * the interval callback. The watchdog must never crash the dashboard.
@@ -78,7 +70,6 @@ import { loadBotApiKey } from "./bot-api-key";
 import { getBotApiUrl } from "./bot-api";
 import { db, tenantBots } from "./db";
 import { getRedisClient } from "./redis";
-import { servicesOwnerMissingMessage, servicesOwnerMode } from "./services-owner";
 import { escapeTelegramHtml, sendOperatorTelegramAlert } from "./telegram-alert";
 
 /**
@@ -281,79 +272,6 @@ export async function runHeartbeatSweep(
   }
 }
 
-/** How long a tenant may lack a running services owner before we alert. */
-const OWNER_MISSING_GRACE_SECONDS = 600;
-
-/**
- * First sweep (epoch seconds) that found each tenant without a running
- * owner. In memory: the watchdog runs in one long-lived process, and a
- * dashboard restart merely restarts the grace period.
- */
-const ownerMissingSince = new Map<string, number>();
-
-function ownerAlertKey(tenantId: string): string {
-  return `dashboard:services-owner-alert:${tenantId}`;
-}
-
-/**
- * One pass of the services-owner check (see the module comment).
- * Tenants with no running bot at all are skipped: nothing runs, so
- * nothing went quiet unexpectedly. Exported for tests; `nowSeconds` is
- * injectable so the grace period is testable without sleeping.
- */
-export async function runServicesOwnerSweep(
-  redis: Redis = getRedisClient(),
-  sendAlert: SendAlert = sendOperatorTelegramAlert,
-  nowSeconds: number = Math.floor(Date.now() / 1000),
-): Promise<void> {
-  const owner = servicesOwnerMode();
-  const rows = await db
-    .select({ tenantId: tenantBots.tenantId, mode: tenantBots.mode })
-    .from(tenantBots)
-    .where(eq(tenantBots.isRunning, true));
-
-  const ownerRunning = new Map<string, boolean>();
-  for (const row of rows) {
-    ownerRunning.set(
-      row.tenantId,
-      ownerRunning.get(row.tenantId) === true || row.mode === owner,
-    );
-  }
-  for (const tenantId of ownerMissingSince.keys()) {
-    if (ownerRunning.get(tenantId) !== false) ownerMissingSince.delete(tenantId);
-  }
-
-  for (const [tenantId, running] of ownerRunning) {
-    try {
-      if (running) {
-        // Re-arm: the next episode alerts again.
-        await redis.del(ownerAlertKey(tenantId));
-        continue;
-      }
-      const since = ownerMissingSince.get(tenantId) ?? nowSeconds;
-      ownerMissingSince.set(tenantId, since);
-      if (nowSeconds - since < OWNER_MISSING_GRACE_SECONDS) continue;
-      const key = ownerAlertKey(tenantId);
-      if ((await redis.get(key)) !== null) continue;
-      console.warn(`[heartbeat-watchdog] ${servicesOwnerMissingMessage(tenantId)}`);
-      await sendAlert(
-        `⚠️ No running <b>${escapeTelegramHtml(owner)}</b> bot ` +
-          `(${escapeTelegramHtml(tenantId)}). It is the services owner, so ` +
-          "Telegram commands, HODL, the vault scanner and key reminders " +
-          "are off until it runs again.",
-      );
-      // Set even if the send wasn't confirmed, as for a down bot: one
-      // missed alert beats one per sweep. The 24h TTL re-alerts.
-      await redis.set(key, "alerted", "EX", DEDUP_TTL_SECONDS);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `[heartbeat-watchdog] owner check failed tenant=${tenantId}: ${msg}`,
-      );
-    }
-  }
-}
-
 let started = false;
 
 /**
@@ -377,10 +295,6 @@ export function startHeartbeatWatchdog(): void {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[heartbeat-watchdog] sweep failed: ${msg}`);
     });
-    runServicesOwnerSweep().catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[heartbeat-watchdog] owner sweep failed: ${msg}`);
-    });
   };
 
   const timer = setInterval(tick, POLL_INTERVAL_MS);
@@ -394,8 +308,7 @@ export function startHeartbeatWatchdog(): void {
   tick();
 }
 
-/** Test-only: reset the module-level start guard and owner grace state. */
+/** Test-only: reset the module-level start guard. */
 export function _resetWatchdogStartedForTests(): void {
   started = false;
-  ownerMissingSince.clear();
 }

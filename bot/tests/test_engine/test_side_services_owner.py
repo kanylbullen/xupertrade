@@ -10,6 +10,8 @@ mainnet bot does not.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from hypertrade.config import settings
@@ -85,6 +87,34 @@ async def test_failed_vault_scan_retries_next_tick(monkeypatch):
     await runner._run_side_services()
     await runner._run_side_services()
     assert rec.calls == ["hodl", "vaults", "vaults"]
+
+
+class _FlatExchange:
+    """Just enough for tick()'s equity-snapshot tail."""
+
+    async def get_balance(self):
+        return SimpleNamespace(total=0.0, available=0.0, unrealized_pnl=0.0)
+
+    async def get_positions(self):
+        return []
+
+
+@pytest.mark.parametrize("owner", [True, False])
+async def test_tick_runs_side_services_only_on_the_owner(monkeypatch, owner):
+    """tick() is the only caller of _run_side_services: dropping that call
+    would silence HODL and vaults on every bot, the owner included."""
+    monkeypatch.setattr(settings, "services_owner", owner)
+    rec = _Recorder()
+    runner = EngineRunner(
+        exchange=_FlatExchange(),  # type: ignore[arg-type]
+        strategies=[],
+        repo=None,
+        event_bus=None,
+        control=None,
+    )
+    monkeypatch.setattr(runner, "_evaluate_hodl_signals", rec.hook("hodl"))
+    await runner.tick()
+    assert rec.calls == (["hodl"] if owner else [])
 
 
 def test_kelly_command_is_gone():

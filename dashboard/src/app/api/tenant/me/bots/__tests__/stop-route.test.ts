@@ -272,7 +272,7 @@ describe("POST /api/tenant/me/bots/[id]/stop", () => {
     const res = await POST(makeReq(), makeCtx());
     expect(res.status).toBe(200);
     expect(warnIfServicesOwnerNotRunning).toHaveBeenCalledWith(
-      TENANT_ID,
+      expect.objectContaining({ id: TENANT_ID }),
       "after stopping the paper bot",
     );
   });

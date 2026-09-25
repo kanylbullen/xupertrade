@@ -63,9 +63,10 @@ class Settings(BaseSettings):
     # Side-services owner (roadmap NU-7, operator decision 5.12). Exactly
     # one bot per tenant runs HODL signal evaluation, the daily vault
     # scanner and the HL key-expiry reminders. The dashboard orchestrator
-    # sets this — together with TELEGRAM_ENABLED — on the bot whose mode
-    # equals HYPERTRADE_SERVICES_OWNER_MODE (default paper), and false on
-    # every other bot. Default False: a bot started by hand runs none of
+    # sets this — together with TELEGRAM_ENABLED — on the operator's bot
+    # whose mode equals HYPERTRADE_SERVICES_OWNER_MODE (default paper) and
+    # on every other tenant's mainnet bot, and false on every other bot.
+    # Default False: a bot started by hand runs none of
     # them unless told to, so two bots never both scan vaults or send
     # the same HODL verdict. These jobs used to be gated on mainnet,
     # which meant stopping the real-money bot silenced them.

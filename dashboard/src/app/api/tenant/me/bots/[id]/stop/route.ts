@@ -106,7 +106,7 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
 
   // NU-7: stopping the services owner silences Telegram, HODL, the vault
   // scanner and the key reminders. Say so in the log. Never throws.
-  await warnIfServicesOwnerNotRunning(tenant.id, `after stopping the ${bot.mode} bot`);
+  await warnIfServicesOwnerNotRunning(tenant, `after stopping the ${bot.mode} bot`);
 
   return Response.json({ bot: updated[0] });
 }

@@ -118,8 +118,8 @@ docker-compose.yml      # postgres, redis, dashboard, caddy, cloudflared (profil
 `xupertrade-bot:latest`. The orchestrator turns a `tenant_bots` row plus the
 tenant's decrypted secrets into one container per tenant per mode
 (`xupertrade-bot-<16-hex id>-<mode>`, no published ports,
-`restart: unless-stopped`). Only the `HYPERTRADE_SERVICES_OWNER_MODE` bot
-(default paper) runs Telegram, HODL, vaults and key reminders.
+`restart: unless-stopped`). Telegram, HODL, vaults and key reminders run on
+the operator's `HYPERTRADE_SERVICES_OWNER_MODE` bot (paper), other tenants' mainnet bot.
 
 ---
 

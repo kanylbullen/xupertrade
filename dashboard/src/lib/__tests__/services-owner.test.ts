@@ -7,10 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   _resetServicesOwnerWarningsForTests,
+  containerIsServicesOwner,
   isServicesOwner,
   operatorVaultTrackingAddress,
-  servicesOwnerMissingMessage,
+  SERVICES_OWNER_LABEL,
   servicesOwnerMode,
+  servicesOwnerModeFor,
 } from "../services-owner";
 
 const ORIG_ENV = { ...process.env };
@@ -52,8 +54,40 @@ describe("servicesOwnerMode", () => {
 
   it("isServicesOwner is true for exactly one mode", () => {
     process.env.HYPERTRADE_SERVICES_OWNER_MODE = "testnet";
-    const owners = (["paper", "testnet", "mainnet"] as const).filter(isServicesOwner);
+    const owners = (["paper", "testnet", "mainnet"] as const).filter((m) =>
+      isServicesOwner(m, { isOperator: true }),
+    );
     expect(owners).toEqual(["testnet"]);
+  });
+});
+
+describe("servicesOwnerModeFor", () => {
+  it("applies the configured mode to the operator only", () => {
+    expect(servicesOwnerModeFor({ isOperator: true })).toBe("paper");
+    process.env.HYPERTRADE_SERVICES_OWNER_MODE = "testnet";
+    expect(servicesOwnerModeFor({ isOperator: true })).toBe("testnet");
+  });
+
+  it.each([{ isOperator: false }, { isOperator: null }, {}])(
+    "keeps mainnet for any other tenant (%j): a paper bot never owns their Telegram",
+    (tenant) => {
+      process.env.HYPERTRADE_SERVICES_OWNER_MODE = "paper";
+      expect(servicesOwnerModeFor(tenant)).toBe("mainnet");
+      expect(isServicesOwner("paper", tenant)).toBe(false);
+    },
+  );
+});
+
+describe("containerIsServicesOwner", () => {
+  it("reads the label buildSpec sets", () => {
+    const labels = { "hypertrade.mode": "mainnet" };
+    expect(containerIsServicesOwner({ ...labels, [SERVICES_OWNER_LABEL]: "true" })).toBe(true);
+    expect(containerIsServicesOwner({ ...labels, [SERVICES_OWNER_LABEL]: "false" })).toBe(false);
+  });
+
+  it("treats a pre-NU-7 container (no label) as the owner only on mainnet", () => {
+    expect(containerIsServicesOwner({ "hypertrade.mode": "mainnet" })).toBe(true);
+    expect(containerIsServicesOwner({ "hypertrade.mode": "paper" })).toBe(false);
   });
 });
 
@@ -80,13 +114,4 @@ describe("operatorVaultTrackingAddress", () => {
       expect(logged).not.toContain(bad);
     },
   );
-});
-
-describe("servicesOwnerMissingMessage", () => {
-  it("names the owner mode, the tenant and what went quiet", () => {
-    process.env.HYPERTRADE_SERVICES_OWNER_MODE = "testnet";
-    const msg = servicesOwnerMissingMessage("tenant-1");
-    expect(msg).toContain("no running testnet bot for tenant tenant-1");
-    expect(msg).toContain("Telegram, HODL, the vault scanner and key reminders");
-  });
 });

@@ -10,12 +10,11 @@
 
  *   2. Look up the tenant's linked Telegram chat (PR 3a/3b).
  *      412 if none — the tenant must run /link first.
- *   3. Find the tenant's running services-owner bot (roadmap NU-7;
- *      the mode in HYPERTRADE_SERVICES_OWNER_MODE, paper by
- *      default). Only that bot runs a Telegram notifier: every other
- *      bot starts with TELEGRAM_ENABLED=false and answers 503, so
- *      picking "any running bot" failed whenever the pick was not
- *      the owner.
+ *   3. Find the tenant's running bot that was started as the
+ *      services owner (roadmap NU-7; `services-owner-check.ts`). Only
+ *      that bot runs a Telegram notifier: every other bot starts with
+ *      TELEGRAM_ENABLED=false and answers 503, so picking "any
+ *      running bot" failed whenever the pick was not the owner.
  *   4. Mint a short-lived signed unlock token + build the
  *      `/unlock?token=...` URL on PUBLIC_URL.
  *   5. POST it to the bot's `/api/internal/send-unlock-link`
@@ -25,14 +24,15 @@
  * 412 if Telegram is not linked.
  */
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { appendAuditLog } from "@/lib/audit-log";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
-import { db, tenantBots, tenantTelegramLinks } from "@/lib/db";
+import { db, tenantTelegramLinks } from "@/lib/db";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { servicesOwnerMode } from "@/lib/services-owner";
+import { servicesOwnerModeFor } from "@/lib/services-owner";
+import { runningServicesOwners } from "@/lib/services-owner-check";
 import { requireTenant } from "@/lib/tenant";
 import { mintUnlockToken } from "@/lib/unlock-token";
 
@@ -99,25 +99,17 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // 2. The services-owner bot is the only Telegram sender.
-  const ownerMode = servicesOwnerMode();
-  const runningBots = await db
-    .select()
-    .from(tenantBots)
-    .where(
-      and(
-        eq(tenantBots.tenantId, tenant.id),
-        eq(tenantBots.mode, ownerMode),
-        eq(tenantBots.isRunning, true),
-      ),
-    )
-    .limit(1);
-  const bot = runningBots[0];
+  // 2. A running bot started as the services owner is the only Telegram
+  //    sender. Read from the containers, not the configured mode: after an
+  //    owner change the bots keep their old env until restarted.
+  const ownerMode = servicesOwnerModeFor(tenant);
+  const owners = await runningServicesOwners(tenant.id);
+  const bot = owners.find((b) => b.mode === ownerMode) ?? owners[0];
   if (!bot) {
     return Response.json(
       {
         error:
-          `no running ${ownerMode} bot — it owns Telegram, so start it to deliver the DM`,
+          `no running bot owns Telegram — start (or restart) the ${ownerMode} bot to deliver the DM`,
       },
       { status: 503 },
     );

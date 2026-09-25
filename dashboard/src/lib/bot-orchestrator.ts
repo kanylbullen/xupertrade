@@ -21,7 +21,7 @@ import {
   inspectContainer,
   stopAndRemove,
 } from "./docker";
-import { isServicesOwner } from "./services-owner";
+import { isServicesOwner, SERVICES_OWNER_LABEL } from "./services-owner";
 
 export type BotMode = "paper" | "testnet" | "mainnet";
 
@@ -138,6 +138,14 @@ export type BotStartParams = {
    * `null` / omitted → nothing injected here.
    */
   vaultTrackingAddress?: string | null;
+  /**
+   * `tenants.is_operator`. Picks the services owner: the configured
+   * mode for the operator, mainnet (the pre-NU-7 owner) for everyone
+   * else (`services-owner.ts:servicesOwnerModeFor`). Omitted → not the
+   * operator, so a caller that forgets it never makes a paper bot the
+   * owner.
+   */
+  isOperator?: boolean;
 };
 
 const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "xupertrade-bot:latest";
@@ -190,13 +198,13 @@ const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024; // 512 MiB
 const SERVICES_OWNER_MEMORY_BYTES = 1024 * 1024 * 1024; // 1 GiB — vault scan + HODL + Telegram
 
 /**
- * Resolve the memory cap (bytes) for a bot mode. Honors a per-mode env
+ * Resolve the memory cap (bytes) for a bot. Honors a per-mode env
  * override first, then a global override, then the default (1 GiB for
  * the services owner, 512 MiB otherwise). Non-positive or non-numeric
  * env values are ignored (fall through to the next source) so a typo
  * can't silently set a 0-byte / NaN limit.
  */
-export function memoryBytesForMode(mode: BotMode): number {
+export function memoryBytesForMode(mode: BotMode, servicesOwner: boolean): number {
   const perMode = process.env[`HYPERTRADE_BOT_${mode.toUpperCase()}_MEMORY_BYTES`];
   const global = process.env.HYPERTRADE_BOT_MEMORY_BYTES;
   for (const raw of [perMode, global]) {
@@ -204,7 +212,7 @@ export function memoryBytesForMode(mode: BotMode): number {
     const n = Number(raw);
     if (Number.isFinite(n) && n > 0) return Math.floor(n);
   }
-  return isServicesOwner(mode) ? SERVICES_OWNER_MEMORY_BYTES : DEFAULT_MEMORY_BYTES;
+  return servicesOwner ? SERVICES_OWNER_MEMORY_BYTES : DEFAULT_MEMORY_BYTES;
 }
 
 /**
@@ -357,7 +365,7 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   // getBotApiUrl helper in lib/bot-api.ts works for everything).
   // TELEGRAM_ENABLED pins the single-Telegram-owner convention (only
   // the services owner posts; see the comment on that key below).
-  const servicesOwner = isServicesOwner(params.mode);
+  const servicesOwner = isServicesOwner(params.mode, { isOperator: params.isOperator });
   const envMap: Record<string, string> = {
     TENANT_ID: params.tenantId,
     BOT_ID: params.botId,
@@ -366,8 +374,9 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     ...(params.systemEnv ?? {}),
     API_PORT: String(API_PORT_BY_MODE[params.mode]),
     // Exactly ONE bot per tenant owns the side services (roadmap NU-7,
-    // decision 5.12): the one whose mode is HYPERTRADE_SERVICES_OWNER_MODE
-    // (default paper; `services-owner.ts`). It gets TELEGRAM_ENABLED —
+    // decision 5.12): for the operator the one whose mode is
+    // HYPERTRADE_SERVICES_OWNER_MODE (default paper), for any other
+    // tenant mainnet (`services-owner.ts`). It gets TELEGRAM_ENABLED —
     // its notifier subscribes to all three modes' event channels, and two
     // bots polling getUpdates with one token collide — and SERVICES_OWNER,
     // which gates HODL, the vault scanner and the key reminders in the
@@ -424,7 +433,7 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     image: IMAGE,
     env,
     networkName: NETWORK,
-    memoryBytes: memoryBytesForMode(params.mode),
+    memoryBytes: memoryBytesForMode(params.mode, servicesOwner),
     nanoCpus: DEFAULT_NANO_CPUS,
     logConfig: DEFAULT_LOG_CONFIG,
     restartPolicy: "unless-stopped",
@@ -432,6 +441,10 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
       "hypertrade.tenant_id": params.tenantId,
       "hypertrade.bot_id": params.botId,
       "hypertrade.mode": params.mode,
+      // What this container was started as: a bot reads its env once, so
+      // after an owner change the running containers, not the configured
+      // mode, say who owns Telegram (`services-owner-check.ts`).
+      [SERVICES_OWNER_LABEL]: servicesOwner ? "true" : "false",
     },
   };
 }
