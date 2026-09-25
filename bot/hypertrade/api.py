@@ -18,6 +18,7 @@ from hypertrade.engine.control import BotControl
 from hypertrade.engine.indicators_status import get_all_status
 from hypertrade.exchange.base import Exchange, ExchangeReadError
 from hypertrade.strategies.base import Strategy
+from hypertrade.version import load_build_info
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,17 @@ def _require_auth(request: web.Request) -> web.Response | None:
 
 async def health(_request: web.Request) -> web.Response:
     return _cors({"status": "ok"})
+
+
+async def version(request: web.Request) -> web.Response:
+    """Which build this bot runs: `{"sha": ..., "built_at": ...}`.
+
+    Unauthenticated on purpose, like `/health`: a commit hash of a
+    public repo and a build time are not secrets, and the point is that
+    anyone checking a deploy can ask without the per-bot API key.
+    Read-only, and read once at startup (see `create_app`).
+    """
+    return _cors(request.app["build_info"])
 
 
 async def hyperliquid_diagnostic(request: web.Request) -> web.Response:
@@ -883,7 +895,10 @@ def create_app(
     app["exchange"] = exchange
     app["strategies"] = strategies or []
     app["telegram"] = telegram
+    # The image's build info never changes while the process runs.
+    app["build_info"] = load_build_info()
     app.router.add_get("/health", health)
+    app.router.add_get("/api/version", version)
     app.router.add_get("/strategies", list_strategies_handler)
     app.router.add_get("/api/positions", positions_handler)
     app.router.add_get("/api/indicator-status", indicator_status)
