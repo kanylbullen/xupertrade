@@ -160,8 +160,55 @@ async def test_invalid_tenant_from_settings_is_a_usage_error(db_url, fetches, mo
 async def test_unknown_strategy_exits_non_zero(db_url, fetches):
     code = await cli.main(["--strategy", "no_such_strategy", "--tenant-id", TENANT])
 
-    assert code == 1
+    # 3, not the save failure's 1: nothing was there to save.
+    assert code == 3
     assert await _rows(db_url) == []
+
+
+@pytest.fixture
+def binance(monkeypatch):
+    """Stub the Binance dump download; the real `unsupported()` check
+    still decides which symbols it can serve."""
+    from hypertrade.data import binance_dump
+
+    calls: list[str] = []
+
+    async def fake_load(symbol, timeframe, days=None, start=None, end=None):
+        calls.append(symbol)
+        return _candles()
+
+    monkeypatch.setattr(binance_dump, "load_dump", fake_load)
+    return calls
+
+
+async def test_all_on_binance_skips_what_the_dump_lacks(db_url, binance, monkeypatch, capsys):
+    # vvv_hedge trades VVV, which the Binance dump has no pair for. Under
+    # --all that used to count as a failed run, so `--all --source
+    # binance` could never exit 0 and a failed save looked the same.
+    monkeypatch.setattr(cli, "list_strategies", lambda: [STRATEGY, "vvv_hedge"])
+
+    code = await cli.main(["--all", "--source", "binance", "--tenant-id", TENANT])
+
+    assert code == 0
+    assert binance == ["BTC"]
+    assert [r.strategy_name for r in await _rows(db_url)] == [STRATEGY]
+    assert "skipped, no binance data: vvv_hedge" in capsys.readouterr().err
+
+
+async def test_asking_for_a_strategy_the_source_lacks_fails(db_url, binance):
+    code = await cli.main(
+        ["--strategy", "vvv_hedge", "--source", "binance", "--tenant-id", TENANT]
+    )
+
+    assert code == 3
+    assert binance == []
+    assert await _rows(db_url) == []
+
+
+async def test_all_skipped_is_not_success(db_url, binance, monkeypatch):
+    monkeypatch.setattr(cli, "list_strategies", lambda: ["vvv_hedge"])
+
+    assert await cli.main(["--all", "--source", "binance", "--no-save"]) == 3
 
 
 async def test_repository_refuses_a_tenantless_run(db_url):

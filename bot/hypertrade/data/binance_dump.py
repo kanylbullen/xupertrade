@@ -122,6 +122,17 @@ async def _fetch_month(
     return df
 
 
+def unsupported(symbol: str, timeframe: str) -> str | None:
+    """Why the dump has no data for this symbol and timeframe, or None
+    when it has. Lets a caller skip a pair up front instead of treating
+    the `load_dump` error as a failed fetch."""
+    if symbol.upper() not in SYMBOL_MAP:
+        return f"No Binance mapping for {symbol!r}; add to SYMBOL_MAP"
+    if timeframe not in TF_MAP:
+        return f"Unsupported timeframe {timeframe!r}"
+    return None
+
+
 async def load_dump(
     symbol: str, timeframe: str, days: int | None = None,
     start: str | datetime | None = None,
@@ -132,12 +143,11 @@ async def load_dump(
 
     Specify either days (relative to now) or start+end dates.
     """
-    pair = SYMBOL_MAP.get(symbol.upper())
-    if pair is None:
-        raise ValueError(f"No Binance mapping for {symbol!r}; add to SYMBOL_MAP")
-    interval = TF_MAP.get(timeframe)
-    if interval is None:
-        raise ValueError(f"Unsupported timeframe {timeframe!r}")
+    reason = unsupported(symbol, timeframe)
+    if reason is not None:
+        raise ValueError(reason)
+    pair = SYMBOL_MAP[symbol.upper()]
+    interval = TF_MAP[timeframe]
 
     now = datetime.now(timezone.utc)
     if start is None and end is None:

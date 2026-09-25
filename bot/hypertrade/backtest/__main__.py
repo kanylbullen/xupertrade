@@ -8,10 +8,15 @@ Usage:
     cd bot && uv run python -m hypertrade.backtest --all --days 180
 
 Every run is saved to `backtest_runs` under a tenant — `--tenant-id`, else
-`TENANT_ID` from the environment — unless `--no-save` is given. Exit
-codes: 0 when every requested strategy ran (and was saved), 1 when a
-strategy produced no result or a save failed, 2 on a usage error such as
-saving with no tenant.
+`TENANT_ID` from the environment — unless `--no-save` is given. With
+`--all`, a strategy the data source has no candles for (VVV on the Binance
+dump, say) is skipped with a note rather than counted as a failure.
+
+Exit codes: 0 when every requested strategy ran (and was saved); 1 when a
+save failed; 2 on a usage error such as saving with no tenant; 3 when a
+requested strategy produced no result (unknown name, no candles, or
+nothing left to run). A save failure keeps its own code so that it can't
+be mistaken for a missing candle series.
 """
 
 from __future__ import annotations
@@ -36,6 +41,10 @@ if TYPE_CHECKING:
     from hypertrade.db.repo import Repository
 
 logger = logging.getLogger(__name__)
+
+
+class _SourceLacksData(Exception):
+    """The data source has no series for this symbol and timeframe."""
 
 
 # HyperLiquid candleSnapshot caps each request — pull in chunks for long
@@ -96,7 +105,9 @@ async def _run_one(
 ) -> tuple[BacktestResult, int] | None:
     """Run one strategy. Returns the result and the strategy's leverage
     (saved with the run), or None when there is nothing to run — an
-    unknown strategy or no candles; the reason is printed."""
+    unknown strategy or no candles; the reason is printed. Raises
+    `_SourceLacksData` before fetching when the source has no series for
+    the strategy's symbol or timeframe at all."""
     try:
         strategy = get_strategy(strategy_name)
     except ValueError as e:
@@ -106,6 +117,11 @@ async def _run_one(
         strategy.symbol = symbol
     if timeframe:
         strategy.timeframe = timeframe
+    if source == "binance":
+        from hypertrade.data.binance_dump import unsupported
+        reason = unsupported(strategy.symbol, strategy.timeframe)
+        if reason is not None:
+            raise _SourceLacksData(reason)
 
     print(
         f"Fetching {strategy.symbol} {strategy.timeframe} candles ({days}d) from {source}...",
@@ -239,15 +255,23 @@ async def main(argv: list[str] | None = None) -> int:
 
     results: list[BacktestResult] = []
     no_result: list[str] = []
+    skipped: list[str] = []
     save_failed = False
     try:
         for name in names:
-            run = await _run_one(
-                name, args.symbol, args.timeframe, args.days,
-                args.initial_equity, args.position_size,
-                args.fee_rate, args.slippage_bps,
-                source=args.source,
-            )
+            try:
+                run = await _run_one(
+                    name, args.symbol, args.timeframe, args.days,
+                    args.initial_equity, args.position_size,
+                    args.fee_rate, args.slippage_bps,
+                    source=args.source,
+                )
+            except _SourceLacksData as e:
+                # Expected under --all (the Binance dump has no VVV, so
+                # vvv_hedge); a failure when that strategy was asked for.
+                print(f"{name}: {e}", file=sys.stderr)
+                (skipped if args.all else no_result).append(name)
+                continue
             if run is None:
                 no_result.append(name)
                 continue
@@ -275,6 +299,8 @@ async def main(argv: list[str] | None = None) -> int:
 
     if args.all and results:
         print(_format_apr_table(results))
+    if skipped:
+        print(f"skipped, no {args.source} data: {', '.join(skipped)}", file=sys.stderr)
 
     if save_failed:
         print(
@@ -285,7 +311,10 @@ async def main(argv: list[str] | None = None) -> int:
         return 1
     if no_result:
         print(f"error: no result for: {', '.join(no_result)}", file=sys.stderr)
-        return 1
+        return 3
+    if not results:
+        print("error: nothing ran — every strategy was skipped", file=sys.stderr)
+        return 3
     return 0
 
 
