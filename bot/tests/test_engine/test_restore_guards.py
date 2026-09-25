@@ -141,6 +141,14 @@ class FakeExchange:
         )
 
 
+class RoundingExchange(FakeExchange):
+    """Rounds every order to 4 dp, to nearest, as the HL wrapper rounds
+    to szDecimals — so a close can fill more than its row asked."""
+
+    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET):
+        return await super().place_order(symbol, side, round(size, 4), order_type)
+
+
 class Strat:
     """What `_execute_signal` needs of a strategy; `side` is the position
     it believes in."""
@@ -637,6 +645,84 @@ async def test_clearing_the_hold_reconciles_before_any_strategy_runs(repo):
     assert seen == [(True, [("ETH", "sell", 2.0)])] * 2
 
 
+async def test_opens_wait_for_the_first_unpaused_pass_and_the_tick_runs_it(repo):
+    """The runbook after a restore: boot paused, Redis intact. The
+    startup pass and the paused ticks are dry runs, and each moves the
+    5-minute clock. The first unpaused tick still runs pass 2 before any
+    strategy, and it holds the orphan — no strategy could open into it
+    at any point."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    redis.data[PAUSED] = "1"
+    ex = FakeExchange([ETH])
+    runner, bus = _runner(repo, redis, ex, first_pass=True)
+    await runner.startup()
+    runner._last_funding_poll = time.time()
+    seen = []
+
+    async def run_strategy(strategy):
+        seen.append((await _opens_allowed(runner), HOLD in redis.data))
+
+    runner._run_strategy = run_strategy
+    await runner.tick()  # paused: a dry run
+    assert seen == [] and HOLD not in redis.data
+    assert await _opens_allowed(runner) is False
+
+    del redis.data[PAUSED]
+    await runner.tick()  # the periodic pass is not due
+
+    assert seen == [(False, True)]
+    assert ex.orders == []
+    assert "Reconcile hold SET: ETH" in bus.errors("reconcile")[-1]
+
+
+async def test_the_first_unpaused_tick_opens_once_its_pass_found_nothing(repo):
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    redis.data[PAUSED] = "1"
+    runner, _ = _runner(repo, redis, FakeExchange(), first_pass=True)
+    await runner.startup()
+    await runner.tick()
+    runner._last_funding_poll = time.time()
+    seen = []
+
+    async def run_strategy(strategy):
+        seen.append(await _opens_allowed(runner))
+
+    runner._run_strategy = run_strategy
+    del redis.data[PAUSED]
+    await runner.tick()
+
+    assert seen == [True]
+
+
+async def test_a_skipped_pass_after_a_clear_keeps_opens_waiting(repo):
+    """The pass a clear forces reads the exchange; when that read fails
+    the pass is skipped, opens keep waiting, and the next tick tries
+    again instead of waiting 5 minutes."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    redis.data[HOLD] = "1"
+    ex = FakeExchange([ETH])
+    runner, _ = _runner(repo, redis, ex)
+    await runner._check_control_state()
+    runner._last_reconcile = time.time()
+    runner._last_funding_poll = time.time()
+    seen = []
+
+    async def run_strategy(strategy):
+        seen.append((await _opens_allowed(runner), list(ex.orders)))
+
+    runner._run_strategy = run_strategy
+    del redis.data[HOLD]
+    ex.read_error = ExchangeReadError("502 Bad Gateway")
+    await runner.tick()
+    ex.read_error = None
+    await runner.tick()
+
+    assert seen == [(False, []), (True, [("ETH", "sell", 2.0)])]
+
+
 async def test_a_hold_set_again_after_a_clear_is_announced(repo):
     """Cleared while both orphans remain: the next pass sets the hold
     again with the same summary, which must not be deduplicated away."""
@@ -789,6 +875,85 @@ async def test_short_filled_flip_close_opens_nothing(repo):
     assert runner.strategies[0].side == "long"
 
 
+async def _rounding_runner(repo, size_on_exchange):
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    ex = RoundingExchange([Position(
+        symbol="ETH", side="long", size=size_on_exchange, entry_price=2000.0,
+    )])
+    runner, bus = _runner(repo, redis, ex)
+    runner._ensure_leverage_pushed = AsyncMock(return_value=True)
+    return runner, bus, ex
+
+
+async def test_a_short_fill_rest_is_rounded_and_its_close_finishes(repo):
+    """The rest goes on the row rounded to szDecimals — 0.2, not the
+    0.19999999999999998 of 0.3 - 0.1 — and the exit that closes it is a
+    finished close: row closed, strategy left flat, True."""
+    runner, _, ex = await _rounding_runner(repo, 0.3)
+    await _row(repo, "ETH", strategy="s_ETH", size=0.3)
+    strat = runner.strategies[0]
+    ex.fill_cap = 0.1
+
+    assert await runner._execute_signal(_signal(SignalAction.CLOSE_LONG), 2100.0) is False
+    [row] = await repo.get_open_positions()
+    assert row.size == 0.2
+
+    ex.fill_cap = None
+    strat.side = None  # a strategy that exits goes flat itself
+    ok = await runner._execute_signal(_signal(SignalAction.CLOSE_LONG), 2100.0)
+
+    assert ok is True
+    assert await repo.get_open_positions() == [] and ex.positions == []
+    assert strat.side is None
+
+
+@pytest.mark.parametrize("row_size", [0.49996, 0.19999999999999998])
+async def test_a_close_that_rounds_up_past_a_legacy_row_finishes(repo, row_size):
+    """A row from before the fill-size fix holds the unrounded request;
+    the exchange rounds its close up and fills more than the row. That
+    is not a remainder: the row closes and nothing re-syncs to it."""
+    runner, _, ex = await _rounding_runner(repo, round(row_size, 4))
+    await _row(repo, "ETH", strategy="s_ETH", size=row_size)
+
+    ok = await runner._execute_signal(_signal(SignalAction.CLOSE_LONG), 2100.0)
+
+    assert ok is True
+    assert ex.orders == [("ETH", "sell", round(row_size, 4))]
+    assert await repo.get_open_positions() == [] and ex.positions == []
+    assert runner.strategies[0].side is None
+
+
+async def test_a_flip_whose_close_rounds_up_opens_its_new_side(repo):
+    runner, bus, ex = await _rounding_runner(repo, 0.5)
+    await _row(repo, "ETH", strategy="s_ETH", size=0.49996)
+
+    ok = await runner._execute_signal(_signal(SignalAction.OPEN_SHORT), 2100.0)
+
+    assert ok is True
+    assert ex.orders[0] == ("ETH", "sell", 0.5)
+    assert len(ex.orders) == 2 and ex.orders[1][1] == "sell"
+    [row] = await repo.get_open_positions()
+    assert row.side == "short"
+    assert not any("Flip-close failed" in m for m in bus.errors("s_ETH"))
+
+
+async def test_a_one_step_short_fill_is_a_remainder_not_rounding(repo):
+    """Rounding moves a size by half a step at most; an order that
+    filled a whole step short left that step on the exchange, and it
+    stays on the row."""
+    runner, _, ex = await _rounding_runner(repo, 2.0)
+    await _row(repo, "ETH", strategy="s_ETH", size=2.0)
+    ex.fill_cap = 1.9999
+
+    ok = await runner._execute_signal(_signal(SignalAction.CLOSE_LONG), 2100.0)
+
+    assert ok is False
+    [row] = await repo.get_open_positions()
+    assert row.size == 0.0001
+    assert runner.strategies[0].side == "long"
+
+
 # --- delivery ------------------------------------------------------------
 
 
@@ -912,7 +1077,8 @@ async def test_endpoint_answers_a_redis_error_with_a_structured_503():
 
 async def test_an_api_clear_releases_a_hold_the_runner_set(repo):
     """The runner and the endpoint share one BotControl: a POST clear,
-    not only a `redis-cli DEL`, lets the lone survivor be closed."""
+    not only a `redis-cli DEL`, lets the lone survivor be closed. Opens
+    wait for that pass."""
     redis = FakeRedis()
     redis.data[SENTINEL] = "1"
     ex = FakeExchange([ETH, SOL])
@@ -927,9 +1093,10 @@ async def test_an_api_clear_releases_a_hold_the_runner_set(repo):
             json={"active": False},
         ))[0] == 200
     await runner._check_control_state()
-    assert await _opens_allowed(runner) is True
+    assert await _opens_allowed(runner) is False
     await runner._run_reconcile("Periodic")
     assert ex.orders == [("ETH", "sell", 2.0)]
+    assert await _opens_allowed(runner) is True
 
 
 async def test_an_api_clear_ends_a_hold_whose_write_failed(repo):
@@ -958,12 +1125,14 @@ async def test_an_api_clear_ends_a_hold_whose_write_failed(repo):
         )
     await runner._check_control_state()
     assert HOLD not in redis.data
+    await runner._run_reconcile("Periodic")
     assert await _opens_allowed(runner) is True
 
 
 async def test_a_queued_alert_says_so_once_the_hold_was_cleared(repo):
     """Undelivered until after a human cleared the hold: what arrives
-    says the state was lost and the hold is gone, not that it holds."""
+    says the state was lost and the hold is gone, not that it holds —
+    and still what the loss reset, which the clear did not undo."""
     redis = FakeRedis()
     runner, bus = _runner(repo, redis, FakeExchange())
     bus.deliver = False
@@ -975,8 +1144,47 @@ async def test_a_queued_alert_says_so_once_the_hold_was_cleared(repo):
 
     [alert] = bus.errors("restore-guard")
     assert "has since been cleared" in alert and "UTC" in alert
+    assert "daily-loss counter were reset" in alert
     assert "Reconcile hold ON" not in alert
+    await runner._run_reconcile("Periodic")
     assert await _opens_allowed(runner) is True
+
+
+async def test_a_clear_after_a_flush_leaves_guard_one_to_fire(repo):
+    """Redis emptied, and a clear lands before the runner's next check:
+    the clear must not write the sentinel, or the lost state — disabled
+    strategies back on — is never noticed."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    redis.data[HOLD] = "1"
+    runner, bus = _runner(repo, redis, FakeExchange())
+    await runner._check_control_state()
+
+    redis.data.clear()
+    await runner.control.set_reconcile_hold(False)
+    assert SENTINEL not in redis.data
+
+    await runner._check_control_state()
+    assert HOLD in redis.data and SENTINEL in redis.data
+    assert len(bus.errors("restore-guard")) == 1
+    assert await _opens_allowed(runner) is False
+
+
+async def test_a_clear_acknowledges_a_loss_whose_sentinel_write_failed(repo):
+    """The hold landed, the sentinel did not: a human clear acknowledges
+    the loss the runner already announced, so the hold stays cleared."""
+    redis = FakeRedis()
+    redis.fail_set.add(SENTINEL)
+    runner, bus = _runner(repo, redis, FakeExchange())
+    await runner._check_control_state()
+    assert HOLD in redis.data and SENTINEL not in redis.data
+
+    redis.fail_set.clear()
+    await runner.control.set_reconcile_hold(False)
+    await runner._check_control_state()
+
+    assert SENTINEL in redis.data and HOLD not in redis.data
+    assert len(bus.errors("restore-guard")) == 1
 
 
 async def test_new_keys_carry_the_tenant_id(monkeypatch):

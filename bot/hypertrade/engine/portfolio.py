@@ -53,7 +53,8 @@ class PortfolioManager:
         self._persist_alerted: bool = False
         # NU-2: set by the runner on every tick and reconcile pass while
         # this bot's reconcile hold stands (or could not be read or
-        # written). It blocks OPENS like a kill switch scoped to this
+        # written), and until a reconcile pass that counts ran after boot
+        # or after a clear. It blocks OPENS like a kill switch scoped to this
         # bot — the kill switch key itself is shared by every tenant of
         # the mode. Kept in memory so a hold whose write failed still holds.
         self.opens_held: str | None = None

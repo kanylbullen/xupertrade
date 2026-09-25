@@ -145,6 +145,9 @@ _start_time = time.time()
 HOLD_REALERT_SECONDS = 1800.0
 _HOLD_SET = "reconcile hold is set"
 _FIRST_PASS = "first reconcile pass since the bot started"
+# Why opens wait for a reconcile pass that counts (readable, unpaused).
+_AWAIT_FIRST_PASS = "waiting for the first reconcile pass since the bot started"
+_AWAIT_PASS_AFTER_CLEAR = "waiting for a reconcile pass after the hold cleared"
 
 
 class EngineRunner:
@@ -232,11 +235,19 @@ class EngineRunner:
         self._lost_state_alerted = False
         self._lost_state_alert: str | None = None
         self._lost_state_at = ""
+        self._lost_state_effects = ""
         # Monotonic time of the last hold alert; None when nothing is held.
         self._hold_alert_at: float | None = None
         # Pass 2 holds every orphan until one readable, unpaused pass ran:
         # a restore, a key change or an emptied DB shows up there first.
+        # Opens wait for that pass too, and for the first such pass after
+        # a hold (or an unreadable control state) cleared: an open that
+        # nets into an orphan gives its coin a row, and the orphan is
+        # then never held, only logged as a size mismatch.
         self._orphans_checked = False
+        self._pass_after_clear = False
+        # The last `_check_control_state` answer, to see a hold clear.
+        self._control_hold: str | None = None
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -576,7 +587,10 @@ class EngineRunner:
             traded_symbols=traded,
         )
         if not (paused or result.skipped) and hold in (None, _HOLD_SET):
+            # A pass that counts: opens no longer wait for one.
             self._orphans_checked = True
+            self._pass_after_clear = False
+            self.portfolio.opens_held = hold
         held = sorted(traded.intersection(result.held_orphans)) if hold is None else []
         if held:
             # Held on a coin we trade: several at once, or the first pass.
@@ -585,7 +599,7 @@ class EngineRunner:
             # that drops to one, or the next pass, releases it to a market
             # close — and blocks opens that would net into them.
             await self._write_hold()
-            hold = self.portfolio.opens_held = _HOLD_SET
+            hold = self.portfolio.opens_held = self._control_hold = _HOLD_SET
             self._last_reconcile_notice = None  # a re-set hold is news
             result.failures.append(
                 f"Reconcile hold SET: {', '.join(held)} on the exchange with "
@@ -633,18 +647,23 @@ class EngineRunner:
         holds — and never raises, so exits keep running.
         """
         why = await self._read_control_state()
-        was_held = self.portfolio.opens_held
-        # Without BotControl there is no hold to honour (not production).
-        self.portfolio.opens_held = why if self.control is not None else None
-        if was_held and self.portfolio.opens_held is None:
-            # Just cleared: reconcile runs first in this tick, before any
-            # strategy can open into a held orphan.
+        if self._control_hold is not None and why is None:
+            # Just cleared: opens wait for a pass that counts, and that
+            # pass runs first in this tick, before any strategy runs.
+            self._pass_after_clear = True
             self._last_reconcile = 0.0
+        self._control_hold = why
+        # Without BotControl there is no hold to honour (not production).
+        self.portfolio.opens_held = (
+            (why or self._awaited_pass()) if self.control is not None else None
+        )
         if why is None and self._lost_state_alert is not None:
-            # Cleared before anyone got the alert: the hold it names is gone.
+            # Cleared before anyone got the alert: the hold it names is
+            # gone, what the lost state reset is not.
             self._lost_state_alert = (
                 f"Redis control state was lost at {self._lost_state_at}; "
-                "the reconcile hold has since been cleared by hand."
+                "the reconcile hold has since been cleared by hand. "
+                f"{self._lost_state_effects}"
             )
         if self._lost_state_alert is not None and await self._publish_error(
             "restore-guard", self._lost_state_alert,
@@ -652,6 +671,30 @@ class EngineRunner:
             self._lost_state_alert = None
             self._hold_alert_at = time.monotonic()
         return why
+
+    def _awaited_pass(self) -> str | None:
+        """Why opens wait for a readable, unpaused reconcile pass, or
+        None. Without a repo there is no pass to wait for."""
+        if self.repo is None:
+            return None
+        if not self._orphans_checked:
+            return _AWAIT_FIRST_PASS
+        return _AWAIT_PASS_AFTER_CLEAR if self._pass_after_clear else None
+
+    async def _reconcile_due(self) -> bool:
+        """Every 5 minutes, and on every tick while opens wait for a pass
+        that counts (`_awaited_pass`) — a skipped pass is retried on the
+        next tick. A paused pass counts for nothing, so a paused bot
+        keeps the 5-minute cadence and the wait ends on its first
+        unpaused tick."""
+        if time.time() - self._last_reconcile > 300:
+            return True
+        if self.control is None or self._awaited_pass() is None:
+            return False
+        try:
+            return not await self.control.is_paused()
+        except Exception:
+            return False
 
     async def _read_control_state(self) -> str | None:
         if self.control is None:
@@ -697,7 +740,11 @@ class EngineRunner:
         if not self._lost_state_alerted:
             self._lost_state_alerted = True
             self._lost_state_at = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
-            mainnet = (
+            # What the loss reset; clearing the hold does not undo it.
+            self._lost_state_effects = (
+                "If Redis was emptied, disabled strategies, leverage "
+                "overrides and the daily-loss counter were reset."
+            ) + (
                 " On mainnet the tenant's strategy opt-in set lived in this "
                 "Redis too, so no strategy runs, exits included, until it "
                 "is re-enabled." if settings.is_mainnet else ""
@@ -712,10 +759,9 @@ class EngineRunner:
                 "build's first boot). "
                 "Reconcile hold ON for this bot: it opens nothing and "
                 "market-closes no exchange position without a DB row. "
-                "Exits keep running; the bot is NOT paused. If Redis was "
-                "emptied, disabled strategies, leverage overrides and the "
-                "daily-loss counter were reset. Open DB positions: "
-                f"{await self._open_positions_text()}.{mainnet}{broken} "
+                "Exits keep running; the bot is NOT paused. "
+                f"{self._lost_state_effects} Open DB positions: "
+                f"{await self._open_positions_text()}.{broken} "
                 f"{self._clear_hold_how()}."
             )
         if not landed:
@@ -879,7 +925,7 @@ class EngineRunner:
         # Periodic reconcile every 5 minutes. Catches positions closed
         # manually on the exchange, partial fills, and any post-startup
         # divergence between DB and exchange.
-        if self.repo and (time.time() - self._last_reconcile) > 300:
+        if self.repo and await self._reconcile_due():
             try:
                 await self._run_reconcile("Periodic")
             except Exception:
@@ -1587,7 +1633,7 @@ class EngineRunner:
                     f"{head} — closed the {existing.side} "
                     f"{signal.symbol} half of a flip but blocked "
                     f"{signal.action.value}; flat, strategy reset to flat"
-                    + (f". {self._clear_hold_how()}" if held else ""),
+                    + (f". {self._clear_hold_how()}" if held == _HOLD_SET else ""),
                     publish=True,
                 )
             return False
@@ -1726,23 +1772,17 @@ class EngineRunner:
         # The fee, the realised PnL, the trade and position rows and the
         # TradeExecuted event all used the unrounded request, which is the
         # live "size mismatch" reconcile warning (analysis-2026-09-15.md
-        # § 4). A close that fills short still closes the whole DB row —
-        # partial-fill handling for closes is a separate follow-up.
+        # § 4). A close that filled short keeps its unfilled rest open on
+        # its row (`_unfilled`); one that filled it all closes the row.
         if abs(order.size - size) > 1e-12:
             logger.info(
                 "[%s] %s %s filled %s (requested %s)",
                 signal.strategy_name, signal.action.value, signal.symbol,
                 order.size, size,
             )
-        # A close that filled short by more than szDecimals rounding keeps
-        # its row open for the rest, so the strategy's next exit closes it
-        # — nothing is left on the exchange without a row for reconcile
-        # (and a reconcile hold) to strand.
-        remaining = 0.0 if is_open else size - order.size
-        if remaining > 0 and remaining <= 10 ** -self.exchange.get_size_precision(
-            signal.symbol,
-        ):
-            remaining = 0.0
+        remaining = (
+            0.0 if is_open else self._unfilled(signal.symbol, size, order.size)
+        )
         size = order.size
 
         filled_price = order.filled_price or 0
@@ -1967,6 +2007,25 @@ class EngineRunner:
 
         # A short-filled close did not finish: a flip must not open on it.
         return parity_ok and not remaining
+
+    def _unfilled(self, symbol: str, requested: float, filled: float) -> float:
+        """What a close left unfilled, rounded to szDecimals; 0.0 when it
+        filled everything it sent.
+
+        Measured against the request rounded the way the exchange wrapper
+        rounds it before sending (to nearest), not against the raw DB
+        size: rounding in either direction — up to half a step, e.g. a
+        legacy unrounded row, or a float-noise remainder like
+        0.3 - 0.1 — is not a remainder. A close that fills MORE than the
+        row asked is not one either. What is left is a whole number of
+        steps the order did not fill, and it stays on the row so the
+        strategy's next exit closes it instead of reconcile (or a
+        reconcile hold) finding it without a row.
+        """
+        if filled >= requested:
+            return 0.0
+        p = self.exchange.get_size_precision(symbol)
+        return max(0.0, round(round(requested, p) - filled, p))
 
     async def _open_refusal(
         self,

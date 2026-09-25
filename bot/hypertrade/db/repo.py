@@ -1097,11 +1097,13 @@ class Repository:
                 for sym, _ in orphans
             }
             # A close rests on one read that can miss a position; closing
-            # needs a second read with the same orphans (NU-2). Without it
-            # the close waits for the next pass — deferred, not held, so a
-            # read blip does not set the hold.
+            # needs a second read with the same orphans, each on the same
+            # side and size — the order uses them, and a human may have
+            # cut or reversed one in between (NU-2). Without it the close
+            # waits for the next pass — deferred, not held, so a read blip
+            # does not set the hold.
             confirmed = None not in reasons.values() or await self._same_orphans(
-                exchange, db_symbols, set(reasons), confirm_delay_seconds,
+                exchange, db_symbols, dict(orphans), confirm_delay_seconds,
             )
             for sym, ex_pos in orphans:
                 why = reasons[sym] or (
@@ -1203,6 +1205,9 @@ class Repository:
 
     @staticmethod
     async def _same_orphans(exchange, db_symbols, orphans, delay) -> bool:
+        """True when a re-read after `delay` shows exactly `orphans`
+        (symbol -> Position), each on the same side and, within dust, the
+        same size."""
         if delay > 0:
             await asyncio.sleep(delay)
         try:
@@ -1210,9 +1215,14 @@ class Repository:
         except Exception:
             logger.warning("Reconcile: orphan re-read failed", exc_info=True)
             return False
-        return orphans == {
-            p.symbol for p in again if p.symbol not in db_symbols and p.size >= 1e-6
+        now = {
+            p.symbol: p for p in again
+            if p.symbol not in db_symbols and p.size >= 1e-6
         }
+        return now.keys() == orphans.keys() and all(
+            now[sym].side == p.side and abs(now[sym].size - p.size) < 1e-6
+            for sym, p in orphans.items()
+        )
 
     async def _insert_reconcile_trade(
         self,

@@ -175,3 +175,23 @@ async def test_a_close_needs_a_re_read_with_the_same_orphans(repo, second):
     result = await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
     assert ex.orders == []  # the next pass sees both
     assert sorted(result.held_orphans) == ["ETH", "SOL"]
+
+
+@pytest.mark.parametrize("now", [
+    Position(symbol="ETH", side="long", size=1.0, entry_price=2000.0),
+    Position(symbol="ETH", side="short", size=2.0, entry_price=2000.0),
+])
+async def test_a_close_needs_the_re_read_to_show_the_same_side_and_size(repo, now):
+    """The close is sized and sided from the first read. A human who cut
+    or reversed the position between the reads defers it — closing the
+    old size would over-close or double it — and the next pass closes
+    what is there."""
+    ex = FakeExchange([now], reads=[[ETH], [now]])
+    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
+    assert ex.orders == []
+    assert "re-read did not confirm" in _held(result, "ETH")[0]
+    assert result.held_orphans == []
+
+    await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
+    close = "buy" if now.side == "short" else "sell"
+    assert ex.orders == [("ETH", close, now.size)]

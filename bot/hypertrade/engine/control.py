@@ -58,6 +58,10 @@ class BotControl:
         # A hold whose write failed: the runner enforces and retries it,
         # GET reports it and a human clear ends it.
         self.hold_unwritten = False
+        # The runner saw the sentinel missing and has not written it back
+        # yet: a lost state it already acted on, which a human clear
+        # acknowledges (`set_reconcile_hold`).
+        self.sentinel_unwritten = False
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -256,12 +260,15 @@ class BotControl:
         no Redis state to lose, so that counts as present."""
         if self._redis is None:
             return True
-        return await self._redis.get(self._key_sentinel) is not None
+        present = await self._redis.get(self._key_sentinel) is not None
+        self.sentinel_unwritten = not present
+        return present
 
     async def write_sentinel(self) -> None:
         if self._redis is None:
             return
         await self._redis.set(self._key_sentinel, str(int(time.time())))
+        self.sentinel_unwritten = False
 
     async def is_reconcile_hold_active(self) -> bool:
         """Any value counts as held; only deleting the key clears it. A
@@ -272,9 +279,14 @@ class BotControl:
         return await self._redis.get(self.reconcile_hold_key) is not None
 
     async def set_reconcile_hold(self, active: bool) -> None:
-        """A set holds in memory until its write lands. A clear writes the
-        sentinel too — a human clear acknowledges a lost state, so a hold
-        whose write never landed cannot come straight back."""
+        """A set holds in memory until its write lands.
+
+        A clear that ends a lost state the runner already acted on — a
+        hold or a sentinel whose write never landed — writes the sentinel
+        too, so that hold cannot come straight back: the clear
+        acknowledges it. Any other clear leaves the sentinel alone. A
+        Redis emptied since the runner's last check must still read as
+        lost there, or guard 1 never fires."""
         if active:
             self.hold_unwritten = True
         if self._redis is not None:
@@ -282,7 +294,9 @@ class BotControl:
             if active:
                 await self._redis.set(self.reconcile_hold_key, now)
             else:
-                await self._redis.set(self._key_sentinel, now)
+                if self.hold_unwritten or self.sentinel_unwritten:
+                    await self._redis.set(self._key_sentinel, now)
+                    self.sentinel_unwritten = False
                 await self._redis.delete(self.reconcile_hold_key)
         self.hold_unwritten = False
         logger.warning("Reconcile hold %s", "SET" if active else "cleared")
