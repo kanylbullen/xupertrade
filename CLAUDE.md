@@ -332,7 +332,7 @@ through the dashboard `/options` page or
 - **Export_state / restore_from_json:** SL/TP/trail/entry saved to `positions.state_json` and restored verbatim on restart (17 of 22 strategies).
 - **PUBLIC_URL / CADDY_HOST:** the dashboard's user-facing URL with scheme, the base of every redirect; the host Caddy's bootstrap cert is issued for.
 - **vvv_hedge:** in-house, mainnet-only VVV hedge: mandatory EMA-bearish filter plus 2 of 3 other indicators, fixed `holding_vvv` size, hard 10% SL.
-- **Backtest CLI:** `cd bot && uv run python -m hypertrade.backtest --strategy <name> --days N` (`--all`; `--no-save` skips `backtest_runs`).
+- **Backtest CLI:** `cd bot && uv run python -m hypertrade.backtest --strategy <name>`/`--all` needs `--tenant-id`/`TENANT_ID` or `--no-save`.
 
 ---
 
