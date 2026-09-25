@@ -40,7 +40,7 @@ from hypertrade.db.repo import Repository
 from hypertrade.engine.runner import EngineRunner
 from hypertrade.engine.signals import Signal, SignalAction
 from hypertrade.events.types import ErrorOccurred
-from hypertrade.exchange.base import Order, OrderStatus, OrderType
+from hypertrade.exchange.base import Order, OrderStatus, OrderType, Position
 
 BAR_1 = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
 BAR_2 = BAR_1 + timedelta(hours=1)
@@ -120,9 +120,19 @@ def _runner(own_row, others, *, allow_multi, fills=None, strategy=None):
 
     exchange = MagicMock()
     exchange.update_leverage = AsyncMock(return_value=True)
-    exchange.get_position = AsyncMock(return_value=None)
 
-    async def _place(symbol, side, size, order_type=OrderType.MARKET):
+    async def _get_position(symbol):
+        # The exchange holds what the DB says: a close against a flat
+        # exchange is an external close (NU-5a), not what these test.
+        own = state["own"]
+        return own and Position(
+            symbol=symbol, side=own.side, size=own.size,
+            entry_price=own.entry_price,
+        )
+
+    exchange.get_position = AsyncMock(side_effect=_get_position)
+
+    async def _place(symbol, side, size, order_type=OrderType.MARKET, **kw):
         status = statuses.pop(0) if statuses else OrderStatus.FILLED
         return Order(
             id=f"o{exchange.place_order.await_count}", symbol=symbol,
@@ -461,10 +471,13 @@ async def test_flip_close_not_filled_resyncs_and_alerts_once():
         assert ok is False
 
     assert exchange.place_order.await_count == 3, "one close attempt per tick"
+    assert all(c.kwargs["reduce_only"] for c in exchange.place_order.await_args_list)
     repo.record_trade_and_open_position.assert_not_awaited()
-    assert strat.restored == [("short", 50_000.0)] * 3
+    assert strat.restored == [("short", 50_000.0)] * 3, "once per attempt"
+    # One alert for the (strategy, coin) until a close fills (NU-5a): the
+    # rejected close's, which the flip does not repeat.
     errors = _errors(bus)
-    assert len(errors) == 1 and "Flip-close failed" in errors[0].message
+    assert len(errors) == 1 and "still open" in errors[0].message
 
 
 @pytest.mark.asyncio
@@ -490,10 +503,10 @@ async def test_open_raising_after_flip_close_resets_flat_and_reraises():
     runner, strat, exchange, repo, bus = _runner(own, [], allow_multi=False)
     real_place = exchange.place_order.side_effect
 
-    async def _place(symbol, side, size, order_type=OrderType.MARKET):
+    async def _place(symbol, side, size, order_type=OrderType.MARKET, **kw):
         if exchange.place_order.await_count == 2:
             raise TimeoutError("open timed out")
-        return await real_place(symbol, side, size, order_type)
+        return await real_place(symbol, side, size, order_type, **kw)
 
     exchange.place_order.side_effect = _place
 

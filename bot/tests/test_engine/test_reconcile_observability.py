@@ -541,7 +541,7 @@ async def test_close_size_without_db_returns_the_exchange_size():
     )
     runner = _close_size_runner(exchange)
 
-    assert await runner._resolve_close_size("strat", "BTC", "long") == 1.5
+    assert await runner._resolve_close_size("strat", "BTC", "long") == (1.5, None)
 
 
 @pytest.mark.asyncio
@@ -557,4 +557,4 @@ async def test_close_size_clamp_falls_back_to_db_size_on_a_read_failure():
     exchange.get_position = AsyncMock(side_effect=ExchangeReadError("502"))
     runner = _close_size_runner(exchange, repo=repo)
 
-    assert await runner._resolve_close_size("strat", "BTC", "long") == 2.0
+    assert await runner._resolve_close_size("strat", "BTC", "long") == (2.0, db_pos)

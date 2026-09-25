@@ -141,7 +141,7 @@ class FakeExchange:
     async def get_current_price(self, symbol):
         return 2100.0
 
-    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET):
+    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET, **kw):
         self.orders.append((symbol, side, size))
         filled = min(size, self.fill_cap) if self.fill_cap else size
         self._net(symbol, filled if side == "buy" else -filled)
@@ -156,8 +156,8 @@ class RoundingExchange(FakeExchange):
     """Rounds every order to 4 dp, to nearest, as the HL wrapper rounds
     to szDecimals — so a close can fill more than its row asked."""
 
-    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET):
-        return await super().place_order(symbol, side, round(size, 4), order_type)
+    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET, **kw):
+        return await super().place_order(symbol, side, round(size, 4), order_type, **kw)
 
 
 class Strat:

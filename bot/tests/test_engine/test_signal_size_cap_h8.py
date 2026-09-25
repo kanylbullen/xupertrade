@@ -127,7 +127,7 @@ async def test_close_signals_unaffected_by_cap(monkeypatch):
     monkeypatch.setattr(settings, "signal_size_max_multiplier", 10.0)
     runner = _runner()
     # _resolve_close_size would normally be called; stub it.
-    runner._resolve_close_size = AsyncMock(return_value=None)  # short-circuit AFTER cap
+    runner._resolve_close_size = AsyncMock(return_value=(None, None))  # short-circuit AFTER cap
     sig = Signal(
         action=SignalAction.CLOSE_LONG, symbol="VVV",
         strategy_name="vvv_hedge", size=99999.0,

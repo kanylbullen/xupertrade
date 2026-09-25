@@ -62,6 +62,7 @@ class FakeExchange:
         self.fills_calls: list[int | None] = []
         self.mid = mid
         self.orders: list[tuple] = []
+        self.reduce_only: list[bool] = []
         self._order_status = order_status
         self._order_raises = order_raises
 
@@ -80,8 +81,9 @@ class FakeExchange:
     async def get_current_price(self, symbol):
         return self.mid
 
-    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET):
+    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET, **kw):
         self.orders.append((symbol, side, size, order_type))
+        self.reduce_only.append(kw.get("reduce_only", False))
         if self._order_raises is not None:
             raise self._order_raises
         return Order(
@@ -485,6 +487,8 @@ async def test_exchange_orphan_filled_is_an_action_with_a_trade_row(repo):
     assert "exchange-orphan" in result.actions[0]
     assert result.failures == []
     assert ex.orders == [("ETH", "sell", 2.0, OrderType.MARKET)]
+    # NU-5a: a position that changed since the read can only shrink.
+    assert ex.reduce_only == [True]
 
     trades = await _rows(repo, models.Trade)
     assert len(trades) == 1
