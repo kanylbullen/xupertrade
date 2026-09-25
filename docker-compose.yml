@@ -15,7 +15,21 @@ services:
   #   docker compose --profile build build --no-cache --pull bot-image dashboard
   bot-image:
     profiles: [build]
-    build: ./bot
+    build:
+      context: ./bot
+      args:
+        # Version stamp (GET /api/version, OCI label
+        # org.opencontainers.image.revision). Pass the commit being
+        # built, evaluated on the build host after its checkout, e.g.
+        #   GIT_SHA=$(git rev-parse HEAD) phase run -- docker compose \
+        #     --profile build build --no-cache --pull bot-image dashboard
+        # Inside `ssh host "..."` write `GIT_SHA=\$(git rev-parse HEAD)`.
+        # Unescaped, your local shell expands it to whatever your own
+        # clone has checked out, and the image reports that commit:
+        # nothing checks the value beyond "looks like hex".
+        # Unset → "unknown": the build still succeeds, the endpoint just
+        # can't say which commit it is.
+        GIT_SHA: "${GIT_SHA:-unknown}"
     image: xupertrade-bot:latest
     # No-op command + restart=no — this entry exists only so compose
     # knows how to build the image; running it just exits cleanly.
@@ -114,7 +128,11 @@ services:
       retries: 5
 
   dashboard:
-    build: ./dashboard
+    build:
+      context: ./dashboard
+      args:
+        # Same version stamp as bot-image above; see the comment there.
+        GIT_SHA: "${GIT_SHA:-unknown}"
     ports:
       # Loopback-only. Neither real ingress path uses this — public
       # traffic arrives Cloudflare tunnel -> dashboard:3000 and LAN
