@@ -8,19 +8,40 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { StrategyPnl, DailyPnl } from "@/lib/queries";
+import { formatSignedUsd, moneySign } from "@/lib/money";
 
-export function StrategyPnlTable({ rows }: { rows: StrategyPnl[] }) {
+// Every amount below goes through formatSignedUsd, so a loss always
+// shows its minus. Fees are shown as what they did to P&L: paid fees
+// are negative, a net maker rebate positive.
+
+// With the database unreachable the page holds empty defaults. "$0.00"
+// or "no trades" would present those as facts, so each card says why it
+// has nothing instead, as the headline cards do.
+const DB_OFFLINE = "DB offline — no figures to show.";
+
+function MessageCard({ title, message }: { title: string; message: string }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{message}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function StrategyPnlTable({
+  rows,
+  dbConnected,
+}: {
+  rows: StrategyPnl[];
+  dbConnected: boolean;
+}) {
+  if (!dbConnected) return <MessageCard title="Per-strategy P&L" message={DB_OFFLINE} />;
   if (rows.length === 0) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Per-strategy P&L</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">No closed trades yet.</p>
-        </CardContent>
-      </Card>
-    );
+    return <MessageCard title="Per-strategy P&L" message="No closed trades yet." />;
   }
   const sorted = [...rows].sort((a, b) => b.realizedPnl - a.realizedPnl);
   return (
@@ -57,14 +78,14 @@ export function StrategyPnlTable({ rows }: { rows: StrategyPnl[] }) {
                     {winRate !== null ? `${winRate.toFixed(0)}%` : "—"}
                   </TableCell>
                   <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                    ${r.fees.toFixed(2)}
+                    {formatSignedUsd(-r.fees)}
                   </TableCell>
                   <TableCell
                     className={`text-right font-mono text-sm font-semibold ${
-                      r.realizedPnl >= 0 ? "text-green-500" : "text-red-500"
+                      moneySign(r.realizedPnl) >= 0 ? "text-green-500" : "text-red-500"
                     }`}
                   >
-                    {r.realizedPnl >= 0 ? "+" : ""}${r.realizedPnl.toFixed(2)}
+                    {formatSignedUsd(r.realizedPnl)}
                   </TableCell>
                 </TableRow>
               );
@@ -76,17 +97,22 @@ export function StrategyPnlTable({ rows }: { rows: StrategyPnl[] }) {
   );
 }
 
-export function DailyPnlTable({ rows }: { rows: DailyPnl[] }) {
+export function DailyPnlTable({
+  rows,
+  windowDays,
+  dbConnected,
+}: {
+  rows: DailyPnl[];
+  windowDays: number;
+  dbConnected: boolean;
+}) {
+  if (!dbConnected) return <MessageCard title="Daily P&L (UTC)" message={DB_OFFLINE} />;
   if (rows.length === 0) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Daily P&L</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">No trades in the last 30 days.</p>
-        </CardContent>
-      </Card>
+      <MessageCard
+        title="Daily P&L (UTC)"
+        message={`No trades or funding in the last ${windowDays} days.`}
+      />
     );
   }
   // Display newest first
@@ -95,15 +121,22 @@ export function DailyPnlTable({ rows }: { rows: DailyPnl[] }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Daily P&L (last {rows.length} day{rows.length === 1 ? "" : "s"})</CardTitle>
-        <p className="text-xs text-muted-foreground">Net = realized + funding</p>
+        {/* Rows are only the days with activity, so their count is not
+            the window: "last 3 days" used to mean "3 active days". */}
+        <CardTitle>Daily P&L (UTC)</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          {rows.length} day{rows.length === 1 ? "" : "s"} with activity in the
+          last {windowDays} days. Net = realized − entry fees + funding
+        </p>
       </CardHeader>
       <CardContent className="space-y-1">
         {sorted.map((r) => {
           const pct = (Math.abs(r.net) / max) * 100;
-          const fundingTip = r.funding !== 0
-            ? ` (incl. ${r.funding >= 0 ? "+" : ""}$${r.funding.toFixed(2)} funding)`
-            : "";
+          const parts = [
+            ...(r.entryFees !== 0 ? [`${formatSignedUsd(-r.entryFees)} entry fees`] : []),
+            ...(r.funding !== 0 ? [`${formatSignedUsd(r.funding)} funding`] : []),
+          ];
+          const tip = parts.length > 0 ? ` (incl. ${parts.join(", ")})` : "";
           return (
             <div key={r.date} className="flex items-center gap-3 text-sm">
               <span className="font-mono text-xs text-muted-foreground w-24 shrink-0">
@@ -115,7 +148,7 @@ export function DailyPnlTable({ rows }: { rows: DailyPnl[] }) {
               <div className="flex-1 h-5 relative bg-muted/30 rounded overflow-hidden">
                 <div
                   className={`absolute top-0 bottom-0 ${
-                    r.net >= 0 ? "left-1/2 bg-green-500/40" : "right-1/2 bg-red-500/40"
+                    moneySign(r.net) >= 0 ? "left-1/2 bg-green-500/40" : "right-1/2 bg-red-500/40"
                   }`}
                   style={{ width: `${pct / 2}%` }}
                 />
@@ -123,11 +156,11 @@ export function DailyPnlTable({ rows }: { rows: DailyPnl[] }) {
               </div>
               <span
                 className={`font-mono text-xs w-24 text-right shrink-0 ${
-                  r.net >= 0 ? "text-green-500" : "text-red-500"
+                  moneySign(r.net) >= 0 ? "text-green-500" : "text-red-500"
                 }`}
-                title={fundingTip}
+                title={tip}
               >
-                {r.net >= 0 ? "+" : ""}${r.net.toFixed(2)}
+                {formatSignedUsd(r.net)}
               </span>
             </div>
           );
@@ -139,17 +172,21 @@ export function DailyPnlTable({ rows }: { rows: DailyPnl[] }) {
 
 export function PnlSummary({
   realized,
-  fees,
+  entryFees,
   funding,
   unrealized,
+  dbConnected,
 }: {
   realized: number;
-  fees: number;
+  entryFees: number;
   funding: number;
   unrealized: number;
+  dbConnected: boolean;
 }) {
-  // Net = realized + funding (fees already in realized via trade.pnl)
-  const net = realized + funding;
+  if (!dbConnected) return <MessageCard title="P&L breakdown (all-time)" message={DB_OFFLINE} />;
+  // A trade's pnl is net of its close fee only; entry fees sit on the
+  // opening rows, which have no pnl (lib/queries.ts entryFeesSum).
+  const net = realized - entryFees + funding;
   const totalWithUnrealized = net + unrealized;
   return (
     <Card>
@@ -157,10 +194,10 @@ export function PnlSummary({
         <CardTitle>P&L breakdown (all-time)</CardTitle>
       </CardHeader>
       <CardContent className="grid gap-3 sm:grid-cols-2">
-        <Row label="Realized (after fees)" value={realized} />
+        <Row label="Realized (after close fees)" value={realized} />
         <Row label="Unrealized (open positions)" value={unrealized} muted />
         <Row label="Funding (cumulative)" value={funding} />
-        <Row label="Fees paid" value={-Math.abs(fees)} muted />
+        <Row label="Entry fees (not in realized)" value={-entryFees} />
         <Row label="Net P&L" value={net} bold />
         <Row label="Total inc. unrealized" value={totalWithUnrealized} bold />
       </CardContent>
@@ -179,11 +216,10 @@ function Row({
   bold?: boolean;
   muted?: boolean;
 }) {
-  const sign = value >= 0 ? "+" : "";
   const color =
     muted
       ? "text-muted-foreground"
-      : value >= 0
+      : moneySign(value) >= 0
       ? "text-green-500"
       : "text-red-500";
   return (
@@ -192,7 +228,7 @@ function Row({
         {label}
       </span>
       <span className={`font-mono ${bold ? "text-base font-semibold" : "text-sm"} ${color}`}>
-        {sign}${Math.abs(value).toFixed(2)}
+        {formatSignedUsd(value)}
       </span>
     </div>
   );

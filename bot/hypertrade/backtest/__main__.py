@@ -6,6 +6,17 @@ Usage:
     cd bot && uv run python -m hypertrade.backtest \\
         --strategy keltner_breakout --symbol ETH --timeframe 4h --days 365
     cd bot && uv run python -m hypertrade.backtest --all --days 180
+
+Every run is saved to `backtest_runs` under a tenant — `--tenant-id`, else
+`TENANT_ID` from the environment — unless `--no-save` is given. With
+`--all`, a strategy the data source has no candles for (VVV on the Binance
+dump, say) is skipped with a note rather than counted as a failure.
+
+Exit codes: 0 when every requested strategy ran (and was saved); 1 when a
+save failed; 2 on a usage error such as saving with no tenant; 3 when a
+requested strategy produced no result (unknown name, no candles, or
+nothing left to run). A save failure keeps its own code so that it can't
+be mistaken for a missing candle series.
 """
 
 from __future__ import annotations
@@ -14,9 +25,11 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime, timedelta, timezone
+import uuid
+from typing import TYPE_CHECKING
 
 from hypertrade.backtest.runner import BacktestResult, run_backtest
+from hypertrade.config import settings
 from hypertrade.data.feed import fetch_candles
 from hypertrade.strategies.registry import (
     list_strategies,
@@ -24,7 +37,14 @@ from hypertrade.strategies.registry import (
     get_strategy,
 )
 
+if TYPE_CHECKING:
+    from hypertrade.db.repo import Repository
+
 logger = logging.getLogger(__name__)
+
+
+class _SourceLacksData(Exception):
+    """The data source has no series for this symbol and timeframe."""
 
 
 # HyperLiquid candleSnapshot caps each request — pull in chunks for long
@@ -32,8 +52,6 @@ logger = logging.getLogger(__name__)
 async def _fetch_long_window(
     symbol: str, timeframe: str, days: int
 ) -> "object":  # pd.DataFrame, but avoid pandas import at module top for speed
-    import pandas as pd
-
     bars_per_day = {
         "15m": 96, "15": 96,
         "1h": 24, "4h": 6, "1d": 1,
@@ -83,9 +101,13 @@ async def _run_one(
     position_size: float,
     fee_rate: float,
     slippage_bps: float,
-    save_to_db: bool = True,
     source: str = "hyperliquid",
-) -> BacktestResult | None:
+) -> tuple[BacktestResult, int] | None:
+    """Run one strategy. Returns the result and the strategy's leverage
+    (saved with the run), or None when there is nothing to run — an
+    unknown strategy or no candles; the reason is printed. Raises
+    `_SourceLacksData` before fetching when the source has no series for
+    the strategy's symbol or timeframe at all."""
     try:
         strategy = get_strategy(strategy_name)
     except ValueError as e:
@@ -95,6 +117,11 @@ async def _run_one(
         strategy.symbol = symbol
     if timeframe:
         strategy.timeframe = timeframe
+    if source == "binance":
+        from hypertrade.data.binance_dump import unsupported
+        reason = unsupported(strategy.symbol, strategy.timeframe)
+        if reason is not None:
+            raise _SourceLacksData(reason)
 
     print(
         f"Fetching {strategy.symbol} {strategy.timeframe} candles ({days}d) from {source}...",
@@ -121,46 +148,51 @@ async def _run_one(
         fee_rate=fee_rate,
         slippage_bps=slippage_bps,
     )
-
-    if save_to_db:
-        try:
-            from hypertrade.db.repo import Repository
-            repo = Repository()
-            try:
-                rid = await repo.save_backtest_run(
-                    strategy_name=result.strategy,
-                    symbol=result.symbol,
-                    timeframe=result.timeframe,
-                    leverage=int(getattr(strategy, "leverage", 1) or 1),
-                    period_start=result.start,
-                    period_end=result.end,
-                    days=result.days,
-                    initial_equity=result.initial_equity,
-                    final_equity=result.final_equity,
-                    total_return_pct=result.total_return_pct,
-                    apr=result.apr,
-                    sharpe=result.sharpe,
-                    max_drawdown_pct=result.max_drawdown_pct,
-                    num_trades=result.num_trades,
-                    num_round_trips=result.num_round_trips,
-                    wins=result.wins,
-                    losses=result.losses,
-                    win_rate=result.win_rate,
-                    fees_paid=result.fees_paid,
-                    position_size_usd=position_size,
-                    fee_rate=fee_rate,
-                    slippage_bps=slippage_bps,
-                )
-                print(f"  → saved as backtest_run #{rid}", file=sys.stderr)
-            finally:
-                await repo.close()
-        except Exception as e:
-            print(f"  → DB save failed: {e}", file=sys.stderr)
-
-    return result
+    return result, int(getattr(strategy, "leverage", 1) or 1)
 
 
-async def main() -> int:
+async def _save(
+    repo: Repository,
+    result: BacktestResult,
+    leverage: int,
+    position_size: float,
+    fee_rate: float,
+    slippage_bps: float,
+) -> int:
+    return await repo.save_backtest_run(
+        strategy_name=result.strategy,
+        symbol=result.symbol,
+        timeframe=result.timeframe,
+        leverage=leverage,
+        period_start=result.start,
+        period_end=result.end,
+        days=result.days,
+        initial_equity=result.initial_equity,
+        final_equity=result.final_equity,
+        total_return_pct=result.total_return_pct,
+        apr=result.apr,
+        sharpe=result.sharpe,
+        max_drawdown_pct=result.max_drawdown_pct,
+        num_trades=result.num_trades,
+        num_round_trips=result.num_round_trips,
+        wins=result.wins,
+        losses=result.losses,
+        win_rate=result.win_rate,
+        fees_paid=result.fees_paid,
+        position_size_usd=position_size,
+        fee_rate=fee_rate,
+        slippage_bps=slippage_bps,
+    )
+
+
+def _tenant_uuid(value: str) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a UUID: {value!r}") from None
+
+
+async def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Strategy backtester")
     parser.add_argument("--strategy", help="Strategy name (omit with --all)")
     parser.add_argument("--all", action="store_true", help="Run every registered strategy")
@@ -173,44 +205,116 @@ async def main() -> int:
     parser.add_argument("--slippage-bps", type=float, default=5.0)
     parser.add_argument("--no-save", action="store_true",
                         help="Skip persisting result to backtest_runs table")
+    parser.add_argument("--tenant-id", type=_tenant_uuid, default=None,
+                        help="Tenant the saved runs belong to (default: TENANT_ID). "
+                             "The dashboard's /backtests page shows only the "
+                             "signed-in tenant's runs.")
     parser.add_argument("--source", default="hyperliquid",
                         choices=["hyperliquid", "binance"],
                         help="Data source: hyperliquid (default, ~1y) or binance (5+y dump)")
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    load_all()
 
     if args.all:
-        names = list_strategies()
+        names = None
     elif args.strategy:
         names = [args.strategy]
     else:
         parser.print_usage()
         return 2
 
+    # Settle where results go before spending minutes on backtests. A run
+    # with no tenant used to be printed as "DB save failed" and exit 0 on
+    # Postgres (tenant_id is NOT NULL there); a schema without that
+    # constraint saved it where the dashboard never shows it.
+    repo: Repository | None = None
+    if not args.no_save:
+        tenant_id = args.tenant_id or settings.tenant_id
+        if not tenant_id:
+            print(
+                "error: saving to backtest_runs needs a tenant — pass "
+                "--tenant-id <uuid>, set TENANT_ID, or use --no-save",
+                file=sys.stderr,
+            )
+            return 2
+        from hypertrade.db.repo import Repository
+        try:
+            repo = Repository(tenant_id=tenant_id)
+        except ValueError:
+            print(f"error: TENANT_ID is not a UUID: {tenant_id!r}", file=sys.stderr)
+            return 2
+
+    load_all()
+    if names is None:
+        names = list_strategies()
+
     results: list[BacktestResult] = []
-    for name in names:
-        r = await _run_one(
-            name, args.symbol, args.timeframe, args.days,
-            args.initial_equity, args.position_size,
-            args.fee_rate, args.slippage_bps,
-            save_to_db=not args.no_save,
-            source=args.source,
-        )
-        if r is None:
-            continue
-        results.append(r)
-        if not args.all:
-            print(r.format_summary())
+    no_result: list[str] = []
+    skipped: list[str] = []
+    save_failed = False
+    try:
+        for name in names:
+            try:
+                run = await _run_one(
+                    name, args.symbol, args.timeframe, args.days,
+                    args.initial_equity, args.position_size,
+                    args.fee_rate, args.slippage_bps,
+                    source=args.source,
+                )
+            except _SourceLacksData as e:
+                # Expected under --all (the Binance dump has no VVV, so
+                # vvv_hedge); a failure when that strategy was asked for.
+                print(f"{name}: {e}", file=sys.stderr)
+                (skipped if args.all else no_result).append(name)
+                continue
+            if run is None:
+                no_result.append(name)
+                continue
+            result, leverage = run
+            results.append(result)
+            if not args.all:
+                print(result.format_summary())
+            if repo is None:
+                continue
+            try:
+                rid = await _save(
+                    repo, result, leverage,
+                    args.position_size, args.fee_rate, args.slippage_bps,
+                )
+            except Exception as e:  # noqa: BLE001 — any failure must end non-zero
+                # Stop here: whatever broke this save (DB down, schema,
+                # tenant FK) breaks the next one too.
+                print(f"  → DB save failed for {name}: {e}", file=sys.stderr)
+                save_failed = True
+                break
+            print(f"  → saved as backtest_run #{rid}", file=sys.stderr)
+    finally:
+        if repo is not None:
+            await repo.close()
 
     if args.all and results:
         print(_format_apr_table(results))
+    if skipped:
+        print(f"skipped, no {args.source} data: {', '.join(skipped)}", file=sys.stderr)
 
+    if save_failed:
+        print(
+            "error: not every run was saved (use --no-save to run without "
+            "the database)",
+            file=sys.stderr,
+        )
+        return 1
+    if no_result:
+        print(f"error: no result for: {', '.join(no_result)}", file=sys.stderr)
+        return 3
+    if not results:
+        print("error: nothing ran — every strategy was skipped", file=sys.stderr)
+        return 3
     return 0
 
 

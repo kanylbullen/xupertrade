@@ -22,7 +22,9 @@ export default defineConfig({
     setupFiles: ["./src/test/redis-stub.ts"],
     // Default: unit tests only. Integration tests (`*.integration.test.ts`)
     // need Docker for testcontainers — opt in via `npm run test:integration`.
-    include: ["src/**/__tests__/**/*.test.ts"],
+    // `.tsx` for component tests, which render with react-dom/server
+    // (no DOM needed, so the environment stays `node`).
+    include: ["src/**/__tests__/**/*.test.{ts,tsx}"],
     exclude: ["**/*.integration.test.ts", "node_modules/**"],
   },
 });

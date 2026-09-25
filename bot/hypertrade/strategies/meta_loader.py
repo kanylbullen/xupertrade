@@ -2,7 +2,13 @@
 
 Each registered strategy may have a `meta/<name>.json` file holding the
 prose that describes it: a summary, the trading logic, strengths and
-weaknesses, tuned parameters and headline backtest stats.
+weaknesses, and tuned parameters.
+
+No performance figures. The files used to carry a hand-written `stats`
+block and prose quoting APR, Sharpe and win rates from one-off backtests
+or articles; nothing refreshed them, so the dashboard showed stale
+numbers as if current (roadmap NU-6). Measured results live in
+`backtest_runs`, and validated ones come from the research track (NA-2).
 
 This lived as a 945-line hardcoded array inside the dashboard's
 `/strategies` React page, which meant the docs drifted from the code
@@ -37,8 +43,11 @@ _META_DIR = Path(__file__).parent / "meta"
 # live values owned by the registered strategy object. Letting a JSON
 # file supply them would let stale documentation rename or re-symbol a
 # running strategy in the UI.
+#
+# `stats` is absent too, so a file that still has one can't put
+# hand-written performance figures back on the page.
 _ALLOWED_KEYS = frozenset(
-    {"tvUrl", "summary", "logic", "strengths", "weaknesses", "params", "stats"}
+    {"tvUrl", "summary", "logic", "strengths", "weaknesses", "params"}
 )
 
 

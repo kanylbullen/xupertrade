@@ -22,22 +22,11 @@ import { requireTenantServer } from "@/lib/tenant-server";
  * live name/symbol/timeframe from the strategy registry, merged with
  * prose from `bot/hypertrade/strategies/meta/<name>.json` colocated
  * with each module.
+ *
+ * No APR / Sharpe / drawdown cells: those came from a hand-written
+ * `stats` block in the meta files that nothing kept current, and are
+ * gone (roadmap NU-6). Measured runs are on /backtests.
  */
-
-function StatCell({ label, value, tone }: {
-  label: string;
-  value?: string;
-  tone?: "good" | "bad";
-}) {
-  const color =
-    tone === "good" ? "text-green-400" : tone === "bad" ? "text-red-400" : "";
-  return (
-    <div>
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`text-lg font-bold ${color}`}>{value ?? "—"}</p>
-    </div>
-  );
-}
 
 function StrategyDetail({ s }: { s: CatalogStrategy }) {
   const hasChart = Boolean(s.symbol && s.timeframe);
@@ -55,16 +44,6 @@ function StrategyDetail({ s }: { s: CatalogStrategy }) {
         {s.summary && <p className="text-muted-foreground">{s.summary}</p>}
       </CardHeader>
       <CardContent className="space-y-6">
-        {s.stats && (
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
-            <StatCell label="APR" value={s.stats.apr} tone="good" />
-            <StatCell label="Sharpe" value={s.stats.sharpe} />
-            <StatCell label="Max Drawdown" value={s.stats.maxDrawdown} tone="bad" />
-            <StatCell label="Win Rate" value={s.stats.winRate} />
-            <StatCell label="Trades" value={s.stats.trades} />
-          </div>
-        )}
-
         {s.logic && s.logic.length > 0 && (
           <>
             <Separator />
@@ -225,20 +204,6 @@ export default async function StrategiesPage() {
                   <p className="mt-2 line-clamp-3 text-xs text-muted-foreground">
                     {s.summary}
                   </p>
-                )}
-                {s.stats && (
-                  <div className="mt-3 flex items-center gap-3 text-[11px]">
-                    <span className="text-muted-foreground">APR</span>
-                    <span className="font-mono text-green-400">
-                      {s.stats.apr ?? "—"}
-                    </span>
-                    <span className="text-muted-foreground">Sharpe</span>
-                    <span className="font-mono">{s.stats.sharpe ?? "—"}</span>
-                    <span className="text-muted-foreground">DD</span>
-                    <span className="font-mono text-red-400">
-                      {s.stats.maxDrawdown ?? "—"}
-                    </span>
-                  </div>
                 )}
               </a>
             ))}

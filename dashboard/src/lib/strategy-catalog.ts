@@ -24,13 +24,6 @@ export type CatalogStrategy = {
   strengths?: string[];
   weaknesses?: string[];
   params?: Record<string, string | number | boolean>;
-  stats?: {
-    apr?: string;
-    sharpe?: string;
-    maxDrawdown?: string;
-    winRate?: string;
-    trades?: string;
-  };
 };
 
 /**
