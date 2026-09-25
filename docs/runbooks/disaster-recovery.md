@@ -45,13 +45,13 @@ En position som öppnades efter backupen finns på börsen men inte i den
 - Samma sak gäller en position som har bytt sida efter backupen. Pass 1 stänger
   DB-raden som `wrong-side`, och pass 2 marknadsstänger sedan börspositionen.
 - En DB-rad för en position som stängdes efter backupen stängs av pass 1 och
-  bokförs från HL:s fill-historik. Det läggs ingen order, men PnL-raden behöver
-  kontrolleras efteråt.
+  bokförs från HL:s fill-historik. Reconcile lägger ingen order för den, men
+  radens strategi kan hinna före och lägga en (avsnitt 1.4).
 
-**Det enda som skyddar är paus.** En pausad bot kör reconcile som en
+**Mot reconcile skyddar bara paus.** En pausad bot kör reconcile som en
 torrkörning (`_run_reconcile` i `runner.py`). Den skriver ingenting och lägger
 inga order. **Kill switch skyddar inte här.** Den blockerar bara nya öppningar,
-och reconcile går förbi den.
+och reconcile går förbi den. Paus stoppar inte allt (avsnitt 1.5).
 
 Torrkörningen rapporterar bara pass 1, alltså raderna `PAUSED — not closed
 (orphan)` och `PAUSED — not closed (wrong-side)`. Pass 2 hoppas över helt
@@ -76,30 +76,33 @@ databasen måste jämföras för hand (steg 1 och 7).
 En återställd Redis är inte tom, men den saknar allt som ändrats efter
 backupen. Kontrollera flaggorna mot det operatören vill ha (steg 4).
 
-### 1.4 Paus fryser även exits
+### 1.4 Paus fryser exits, och kill switch släpper igenom dem
 
 En pausad bot kör inga strategier. Då körs inte heller några SL- eller
 TP-exits, och före SE-1 finns inga stopp på börsen. Därför får pausen vara
 högst 30 minuter. Efter pausen tar kill switch över. Den blockerar öppningar
-men låter exits gå.
+men släpper igenom varje stängning (`check_risk_limits` i `portfolio.py`).
 
-### 1.5 Vad kodvakterna ändrar (PR #180)
+En stängning är en vanlig marknadsorder, inte reduce-only (`place_order` i
+`hyperliquid.py`). Om HL saknar positionen, eller har den på andra sidan,
+skickas DB-radens storlek ändå (`_resolve_close_size` i `runner.py`).
+Strategierna återställs från de öppna DB-raderna när boten startar och körs
+från första tick efter unpause, men det första riktiga reconcile-passet kan
+dröja flera minuter. En strategi vars rad HL inte backar kan därför öppna en
+ny position, eller förstora en position på motsatt sida, trots kill switch.
+Steg 7 stänger av de strategierna före unpause.
 
-Kodvakterna var inte mergade när detta skrevs. Tills de är deployade är stegen
-nedan det enda skyddet.
+### 1.5 Två saker går förbi pausen
 
-- **Redis-sentinel** (`hypertrade:<mode>:control:sentinel`). Om nyckeln saknas
-  startar boten med kill switch på och larmar med de öppna positionerna. Om
-  databasen dessutom ser inaktuell ut startar boten pausad och larmar igen med
-  jämna mellanrum. En återställd Redis som redan hade sentinel ser normal ut
-  för vakten. Vakten fångar alltså en tom Redis, inte en gammal.
-- **Reconcile pass 2** larmar i stället för att stänga när ett pass hittar mer
-  än en orphan, när symbolen inte handlas av någon strategi i boten, eller när
-  den nyaste trade-raden är äldre än `RECONCILE_ORPHAN_MAX_DB_AGE_HOURS`.
-  Larmet måste kvitteras manuellt.
-- **Stegen nedan gäller även efter vakterna.** Vakterna är ett skyddsnät för
-  den som glömmer ett steg. En enstaka orphan mot en färsk databas stängs
-  fortfarande.
+- **En väntande flat-all.** `tick()` utför den innan den läser paus
+  (`runner.py`), och den marknadsstänger alla positioner i moden. En begäran
+  som inte har kvitterats kommer tillbaka med Redis. Det gäller till exempel en
+  flat-all som misslyckades under ett HL-avbrott, eftersom den då försöks igen
+  varje tick.
+- **Hävstången.** När boten startar skickar `main.py` hävstången per symbol
+  till HL, med overrides ur Redis, oavsett paus.
+
+Steg 4 går igenom båda innan någon bot startar.
 
 ## 2. Återställ hela containern
 
@@ -131,6 +134,8 @@ curl -s https://api.hyperliquid.xyz/info -H 'Content-Type: application/json' \
 # testnet: https://api.hyperliquid-testnet.xyz/info
 ```
 
+Anteckna symbol, sida, storlek, `entryPx` och `leverage` för varje position.
+
 Paper har ingen riktig börs. Dess simulerade börs ligger i Redis och kommer
 tillbaka med backupen.
 
@@ -139,10 +144,12 @@ tillbaka med backupen.
 ```sh
 pvesm list <pbs-lagring> --vmid <ctid>     # välj backup, normalt den senaste
 pct restore <nytt-ctid> <pbs-lagring>:backup/ct/<ctid>/<tidpunkt> --storage <lagring>
+pct set <nytt-ctid> --onboot 0             # restore tar med backupens onboot
 ```
 
 - `pct restore` startar inte containern. Om du använder GUI:t: bocka ur
-  "Start after restore".
+  "Start after restore". Men backupens `onboot` följer med, och utan raden
+  ovan startar containern med nät om noden bootar före steg 3.
 - Återställ helst till ett nytt CTID och låt den gamla containern stå
   avstängd tills den nya är kontrollerad. Den gamla kan innehålla rader som är
   nyare än backupen.
@@ -171,7 +178,7 @@ pct enter <ctid>                    # SSH fungerar inte utan nät
   även utan nät. Det gäller bara låtsaspengar, men kontrollera paper i steg 7
   som de andra.
 
-### Steg 4: stoppa bottarna och sätt kill switch och paus
+### Steg 4: stoppa bottarna och gå igenom Redis
 
 Kör detta inne i containern:
 
@@ -183,37 +190,49 @@ docker stop hypertrade-dashboard-1   # så att ingen startar en bot mitt i åter
 Skriv sedan ner vad backupen hade, så att steg 10 kan återställa det:
 
 ```sh
+r() { docker exec hypertrade-redis-1 redis-cli "$@"; }
 for m in paper testnet mainnet; do
-  echo "$m paused=[$(docker exec hypertrade-redis-1 redis-cli GET hypertrade:$m:control:paused)]" \
-       "kill_switch=[$(docker exec hypertrade-redis-1 redis-cli GET hypertrade:$m:control:kill_switch)]"
+  k=hypertrade:$m:control
+  echo "$m paused=[$(r GET $k:paused)] kill_switch=[$(r GET $k:kill_switch)]"
+  echo "  flat_request_id=[$(r GET $k:flat_request_id)] flat_request_done=[$(r GET $k:flat_request_done)]"
+  echo "  disabled: $(r SMEMBERS $k:disabled | xargs)"
+  echo "  leverage: $(r HGETALL $k:leverage | xargs)"
 done
 ```
 
 Tomma hakparenteser betyder att nyckeln saknas och att env-standarden gäller.
-Sätt sedan båda flaggorna för alla tre moder och spara:
+Rätta sedan det här innan någon bot startar:
+
+- **Flat-all.** Om `flat_request_id` har ett värde som skiljer sig från
+  `flat_request_done` väntar en flat-all. Boten stänger då alla positioner i
+  moden vid första tick, pausad eller inte (avsnitt 1.5). Ska den inte köras,
+  avbryt den:
+  `r SET hypertrade:<mode>:control:flat_request_done '<värdet i flat_request_id>'`.
+- **`disabled` och hävstång.** Jämför med det operatören vill ha. Redis-kopian
+  kan sakna ändringar från den sista timmen före backupen. Hävstången måste
+  stämma redan nu, eftersom bot-starten i steg 7 skickar den till HL. Rätta med
+  `SADD`/`SREM hypertrade:<mode>:control:disabled <strategi>` och
+  `HSET`/`HDEL hypertrade:<mode>:control:leverage <strategi> <hävstång>`.
+
+Sätt sist kill switch och paus för alla tre moder och spara:
 
 ```sh
 for m in paper testnet mainnet; do
-  docker exec hypertrade-redis-1 redis-cli SET hypertrade:$m:control:kill_switch 1
-  docker exec hypertrade-redis-1 redis-cli SET hypertrade:$m:control:paused 1
+  r SET hypertrade:$m:control:kill_switch 1
+  r SET hypertrade:$m:control:paused 1
 done
-docker exec hypertrade-redis-1 redis-cli BGSAVE
-docker exec hypertrade-redis-1 redis-cli INFO persistence | grep rdb_last_bgsave_status   # ok
+r SAVE     # svarar OK först när allt ovan ligger på disk
 ```
 
-`BGSAVE` behövs eftersom standardpolicyn sparar sex ändringar först efter en
-timme. Om Redis startar om innan dess försvinner flaggorna.
-
-Kontrollera också `SMEMBERS hypertrade:<mode>:control:disabled` mot det som ska
-vara avstängt. Redis-kopian kan sakna ändringar från den sista timmen före
-backupen.
+`SAVE` behövs eftersom standardpolicyn sparar färre än 100 ändringar först
+efter en timme. Om Redis startar om innan dess försvinner ändringarna.
 
 ### Steg 5: koppla in nätet igen
 
-På Proxmox-noden:
+På Proxmox-noden, med det som stod efter `net0: ` i raden från steg 3:
 
 ```sh
-pct set <ctid> --net0 '<raden från steg 3>'     # och varje annan netN
+pct set <ctid> --net0 'name=eth0,bridge=…,hwaddr=…,ip=…'     # och varje annan netN
 ```
 
 Inne i containern ska `docker ps --format '{{.Names}}' | grep '^xupertrade-bot-'`
@@ -236,12 +255,17 @@ docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
   då tillbaka till steg 2 och välj en äldre backup.
 - `nyaste_trade` visar hur gammal datan faktiskt är. Det som hänt efter den
   tidpunkten finns bara på börsen.
-- Om master har fler migrationer än backupen: kör dem först när återställningen
-  är kontrollerad. Se `bot/scripts/migrate.sh`.
+- Om master har en nyare migration än `version_num` (filerna i
+  `bot/alembic/versions/` börjar med sitt nummer): vänta tills
+  återställningen är kontrollerad. Bygg sedan om imagen som i steg 1 av
+  "Standard deploy command" i CLAUDE.md § 3, och kör först därefter kommandot
+  i `bot/scripts/migrate.sh`. Det kör alembic ur `xupertrade-bot:latest`, och
+  före ombygget är det backupens image, som bara känner till sina egna
+  migrationer och ändå avslutar med 0. Kontrollera `version_num` igen efteråt.
 - Om `docker logs` fallerar: läs containerns loggfil direkt, enligt CLAUDE.md
   § 3.
 
-### Steg 7: kontrollera pariteten och starta bottarna
+### Steg 7: kontrollera pariteten, stäng av strategier och starta bottarna
 
 Starta dashboarden med `docker start hypertrade-dashboard-1` och logga in. Om
 `/login` säger "Authentication is locked" kom Redis inte tillbaka. Stanna då
@@ -255,15 +279,24 @@ docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
      FROM positions WHERE is_open = true ORDER BY mode, symbol;"
 ```
 
-| Börsen | Databasen | Vad som händer vid unpause | Vad du gör |
+| Börsen | Databasen | Vad som händer efter unpause | Vad du gör, innan bottarna startar |
 |---|---|---|---|
-| Position | Ingen rad | Pass 2 marknadsstänger positionen | Bestäm nu. Stäng den själv på HL (reduce-only), eller låt reconcile stänga den vid unpause. Att skapa en DB-rad för hand avråds från, eftersom strategin saknar SL-state för positionen. |
-| Position | Rad med motsatt sida | Pass 1 stänger raden (`wrong-side`), och sedan marknadsstänger pass 2 positionen | Bestäm nu, som för en position utan rad. |
-| Ingen position | Öppen rad | Pass 1 stänger raden och bokför den från fill-historiken | Notera raden och kontrollera PnL efteråt. |
+| Position | Ingen rad | Pass 2 marknadsstänger positionen | Bestäm nu. Stäng den själv på HL (reduce-only), eller låt reconcile stänga den. Att skapa en DB-rad för hand avråds från, eftersom strategin saknar SL-state för positionen. |
+| Position | Rad med motsatt sida | Radens strategi kan skicka en exit som förstorar positionen (avsnitt 1.4). Pass 1 stänger raden (`wrong-side`), och pass 2 marknadsstänger sedan positionen | Stäng av strategin (nedan). Bestäm om positionen som för en position utan rad. |
+| Ingen position | Öppen rad | Radens strategi kan skicka en exit som öppnar en ny position (avsnitt 1.4). Pass 1 stänger raden och bokför den från fill-historiken | Stäng av strategin (nedan). Kontrollera PnL efteråt. |
+| Position | Rad med samma sida, men `entry_price` klart skilt från HL:s `entryPx` (flera rader på symbolen: jämför det storleksviktade snittet) | Ingenting. Reconcile ser paritet, men positionen öppnades efter backupen och styrs av en strategi som inte öppnade den | Stäng positionen själv på HL (reduce-only). Då är raden en "Ingen position / Öppen rad". |
 | Position | Rad med samma sida och annan storlek | Avvikelsen loggas bara | Notera den. |
 
-Med PR #180 deployad kan pass 2 larma i stället för att stänga (avsnitt 1.5).
-Planera ändå som om positionen stängs.
+Stäng av strategin för varje rad som HL inte backar, alltså för raderna
+"motsatt sida" och "Ingen position / Öppen rad". En avstängd strategi körs
+inte alls (`filter_strategies_for_tick`), så den kan inte lägga någon order:
+
+```sh
+docker exec hypertrade-redis-1 redis-cli SADD hypertrade:<mode>:control:disabled <strategy_name>
+docker exec hypertrade-redis-1 redis-cli SAVE
+```
+
+Skriv ner vilka du lade till. Steg 8 slår på dem igen.
 
 Bottarna som ska startas är de som databasen markerar som körande:
 
@@ -287,9 +320,8 @@ torrkörning:
 docker logs --since 10m <container_name> 2>&1 | grep -i reconcile
 ```
 
-- Raderna med `PAUSED — not closed (orphan)` ska vara exakt tabellens
-  "Ingen position / Öppen rad". Raderna med `(wrong-side)` ska vara exakt
-  "Rad med motsatt sida".
+- Raderna med `PAUSED — not closed (orphan)` och `(wrong-side)` ska vara
+  exakt tabellens rader "Ingen position / Öppen rad" och "motsatt sida".
 - `… db rows, … exchange positions` ska stämma med antalen i facit och i
   tabellen.
 - Börspositioner utan DB-rad syns inte här (avsnitt 1.2). För dem är tabellen
@@ -308,9 +340,15 @@ docker exec hypertrade-redis-1 redis-cli SET hypertrade:<mode>:control:paused 0
 
 - En mode som var pausad i backupen (steg 4) förblir pausad. Det beslutet är
   operatörens.
-- Det första riktiga reconcile-passet körs inom fem minuter. Följ loggen tills
-  det har gått. Det ska göra exakt det som tabellen i steg 7 förutsade.
-- Kill switch är fortfarande på. Inga nya positioner öppnas, men exits körs.
+- Det första riktiga reconcile-passet körs inom ungefär sex minuter. Följ
+  loggen tills det har gått. Det ska göra exakt det som tabellen i steg 7
+  förutsade, med en rad `Reconcile: closed orphan` eller `closed wrong-side`
+  för varje sådan rad.
+- Slå på en strategi från steg 7 igen först när dess rad är stängd, och bara de
+  du själv lade till:
+  `docker exec hypertrade-redis-1 redis-cli SREM hypertrade:<mode>:control:disabled <strategy_name>`.
+- Kill switch är fortfarande på. Den blockerar öppningar men inte exits, och
+  en exit är en riktig order (avsnitt 1.4).
 - Om besluten inte hinner fattas inom 30 minuter: stäng hellre de oklara
   positionerna för hand på HL än att låta dem ligga pausade utan stopp.
 
@@ -320,8 +358,11 @@ docker exec hypertrade-redis-1 redis-cli SET hypertrade:<mode>:control:paused 0
   för varje mode. Börsen och databasen ska stämma överens.
 - Heartbeat ska vara färsk, equity-snapshots ska skrivas och loggen ska vara
   fri från fel.
-- `disabled`-mängderna och hävstångsoverrides ska vara som avsett.
-- `onboot` ska vara 1 på den återställda containern och 0 på den gamla.
+- `disabled`-mängderna ska vara som avsett, och `leverage` per position på HL
+  (kommandot i steg 1) ska vara den avsedda. En override som rättas nu når HL
+  först vid nästa öppning på den symbolen.
+- Sätt `pct set <ctid> --onboot 1` på den återställda containern. Den gamla ska
+  ha 0.
 
 ### Steg 10: slå av kill switch sist
 
@@ -375,7 +416,8 @@ exempel efter `FLUSHALL` eller en borttagen volym.
 5. Fortsätt med steg 4 i avsnitt 2 (från "Skriv sedan ner vad backupen hade")
    och därefter steg 7 till 10. Steg 5 och 6 behövs inte, eftersom nätet och
    databasen inte har rörts. En återställd Redis är upp till ett dygn gammal,
-   så gå igenom `disabled`-mängderna och hävstången extra noga.
+   så gå igenom flat-all, `disabled`-mängderna och hävstången i steg 4 extra
+   noga.
 6. Kör `rm -rf /root/restore` när allt är klart. Filerna innehåller session
    secret, OIDC-klienthemligheten och CF-token.
 
