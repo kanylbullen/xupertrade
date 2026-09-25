@@ -14,18 +14,34 @@ import { formatSignedUsd, moneySign } from "@/lib/money";
 // shows its minus. Fees are shown as what they did to P&L: paid fees
 // are negative, a net maker rebate positive.
 
-export function StrategyPnlTable({ rows }: { rows: StrategyPnl[] }) {
+// With the database unreachable the page holds empty defaults. "$0.00"
+// or "no trades" would present those as facts, so each card says why it
+// has nothing instead, as the headline cards do.
+const DB_OFFLINE = "DB offline — no figures to show.";
+
+function MessageCard({ title, message }: { title: string; message: string }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{message}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function StrategyPnlTable({
+  rows,
+  dbConnected,
+}: {
+  rows: StrategyPnl[];
+  dbConnected: boolean;
+}) {
+  if (!dbConnected) return <MessageCard title="Per-strategy P&L" message={DB_OFFLINE} />;
   if (rows.length === 0) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Per-strategy P&L</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">No closed trades yet.</p>
-        </CardContent>
-      </Card>
-    );
+    return <MessageCard title="Per-strategy P&L" message="No closed trades yet." />;
   }
   const sorted = [...rows].sort((a, b) => b.realizedPnl - a.realizedPnl);
   return (
@@ -84,22 +100,19 @@ export function StrategyPnlTable({ rows }: { rows: StrategyPnl[] }) {
 export function DailyPnlTable({
   rows,
   windowDays,
+  dbConnected,
 }: {
   rows: DailyPnl[];
   windowDays: number;
+  dbConnected: boolean;
 }) {
+  if (!dbConnected) return <MessageCard title="Daily P&L (UTC)" message={DB_OFFLINE} />;
   if (rows.length === 0) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Daily P&L (UTC)</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            No trades or funding in the last {windowDays} days.
-          </p>
-        </CardContent>
-      </Card>
+      <MessageCard
+        title="Daily P&L (UTC)"
+        message={`No trades or funding in the last ${windowDays} days.`}
+      />
     );
   }
   // Display newest first
@@ -113,15 +126,17 @@ export function DailyPnlTable({
         <CardTitle>Daily P&L (UTC)</CardTitle>
         <p className="text-xs text-muted-foreground">
           {rows.length} day{rows.length === 1 ? "" : "s"} with activity in the
-          last {windowDays} days. Net = realized + funding
+          last {windowDays} days. Net = realized − entry fees + funding
         </p>
       </CardHeader>
       <CardContent className="space-y-1">
         {sorted.map((r) => {
           const pct = (Math.abs(r.net) / max) * 100;
-          const fundingTip = r.funding !== 0
-            ? ` (incl. ${formatSignedUsd(r.funding)} funding)`
-            : "";
+          const parts = [
+            ...(r.entryFees !== 0 ? [`${formatSignedUsd(-r.entryFees)} entry fees`] : []),
+            ...(r.funding !== 0 ? [`${formatSignedUsd(r.funding)} funding`] : []),
+          ];
+          const tip = parts.length > 0 ? ` (incl. ${parts.join(", ")})` : "";
           return (
             <div key={r.date} className="flex items-center gap-3 text-sm">
               <span className="font-mono text-xs text-muted-foreground w-24 shrink-0">
@@ -143,7 +158,7 @@ export function DailyPnlTable({
                 className={`font-mono text-xs w-24 text-right shrink-0 ${
                   moneySign(r.net) >= 0 ? "text-green-500" : "text-red-500"
                 }`}
-                title={fundingTip}
+                title={tip}
               >
                 {formatSignedUsd(r.net)}
               </span>
@@ -157,17 +172,21 @@ export function DailyPnlTable({
 
 export function PnlSummary({
   realized,
-  fees,
+  entryFees,
   funding,
   unrealized,
+  dbConnected,
 }: {
   realized: number;
-  fees: number;
+  entryFees: number;
   funding: number;
   unrealized: number;
+  dbConnected: boolean;
 }) {
-  // Net = realized + funding (fees already in realized via trade.pnl)
-  const net = realized + funding;
+  if (!dbConnected) return <MessageCard title="P&L breakdown (all-time)" message={DB_OFFLINE} />;
+  // A trade's pnl is net of its close fee only; entry fees sit on the
+  // opening rows, which have no pnl (lib/queries.ts entryFeesSum).
+  const net = realized - entryFees + funding;
   const totalWithUnrealized = net + unrealized;
   return (
     <Card>
@@ -175,10 +194,10 @@ export function PnlSummary({
         <CardTitle>P&L breakdown (all-time)</CardTitle>
       </CardHeader>
       <CardContent className="grid gap-3 sm:grid-cols-2">
-        <Row label="Realized (after fees)" value={realized} />
+        <Row label="Realized (after close fees)" value={realized} />
         <Row label="Unrealized (open positions)" value={unrealized} muted />
         <Row label="Funding (cumulative)" value={funding} />
-        <Row label="Fees (in realized)" value={-fees} muted />
+        <Row label="Entry fees (not in realized)" value={-entryFees} />
         <Row label="Net P&L" value={net} bold />
         <Row label="Total inc. unrealized" value={totalWithUnrealized} bold />
       </CardContent>

@@ -20,7 +20,8 @@ export type OverviewStatsProps = {
   latestEquity: EquityPoint | null;
   /** One per fixed window, shortest first (lib/overview-numbers.ts). */
   equityChanges: EquityChange[];
-  realized: { realizedPnl: number; fees: number; trades: number };
+  /** getRealizedPnlTotal: realized is net of close fees only. */
+  realized: { realizedPnl: number; entryFees: number; trades: number };
   /** Today's UTC row from getDailyPnl, null when there was nothing today. */
   today: DailyPnl | null;
   nowMs: number;
@@ -73,7 +74,7 @@ export function OverviewStats({
         value={dbConnected ? formatSignedUsd(realized.realizedPnl) : "—"}
         subtitle={
           dbConnected
-            ? `${realized.trades} trades · fees ${formatSignedUsd(-realized.fees)}`
+            ? `${realized.trades} trades · excl. entry fees ${formatSignedUsd(-realized.entryFees)}`
             : "DB offline"
         }
         trend={dbConnected ? trendOf(realized.realizedPnl) : "neutral"}
@@ -85,13 +86,23 @@ export function OverviewStats({
           !dbConnected
             ? "DB offline"
             : today
-              ? `Realized ${formatSignedUsd(today.realizedPnl)} · funding ${formatSignedUsd(today.funding)} · ${today.trades} trades`
+              ? `Realized ${formatSignedUsd(today.realizedPnl)} · entry fees ${formatSignedUsd(-today.entryFees)} · funding ${formatSignedUsd(today.funding)} · ${today.trades} trades`
               : "No trades or funding yet today"
         }
         trend={dbConnected ? trendOf(today?.net ?? 0) : "neutral"}
       />
     </div>
   );
+}
+
+/** What a change row covers: its nominal window when it spans that,
+ * else its real start and, once the bot stopped writing snapshots, its
+ * real end. */
+function windowText(c: EquityChange): string {
+  if (c.since && c.until) {
+    return `${formatDateTime(c.since)} → ${formatDateTime(c.until)}`;
+  }
+  return c.since ? `since ${formatDateTime(c.since)}` : c.label;
 }
 
 function EquityChangeCard({
@@ -128,11 +139,9 @@ function EquityChangeCard({
               {rows.map((c) => (
                 <div
                   key={c.label}
-                  className="flex items-baseline justify-between gap-2 text-sm"
+                  className="flex flex-wrap items-baseline justify-between gap-x-2 text-sm"
                 >
-                  <dt className="text-muted-foreground">
-                    {c.since ? `since ${formatDateTime(c.since)}` : c.label}
-                  </dt>
+                  <dt className="text-muted-foreground">{windowText(c)}</dt>
                   <dd
                     className={`font-mono ${
                       c.change === null

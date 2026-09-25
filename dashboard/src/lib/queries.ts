@@ -7,7 +7,7 @@ import {
   fundingPayments,
   backtestRuns,
 } from "./db";
-import { desc, eq, and, gte, lt, sql, count } from "drizzle-orm";
+import { desc, eq, and, gt, gte, lt, sql, count } from "drizzle-orm";
 
 import { type Mode } from "./mode";
 
@@ -177,6 +177,15 @@ export async function getEquityHistory(
 }
 
 /**
+ * A snapshot with a total of zero is a failed balance read, not an
+ * empty account: bots before #167 answered an HL 502 with total=0 and
+ * wrote it (431 such rows on testnet). The overview's reads skip them,
+ * as NU-6.2's equity_clean view will; a real $0 then shows as the last
+ * non-zero figure with its age, rather than a made-up gain or loss.
+ */
+const readableEquity = () => gt(equitySnapshots.totalEquity, 0);
+
+/**
  * The first equity snapshot at or after `since`: the baseline for a
  * fixed-window equity change (24h / 7d / 30d) on the overview. Null
  * when no snapshot falls in the window. The caller compares its
@@ -198,6 +207,7 @@ export async function getFirstEquitySince(
         eq(equitySnapshots.tenantId, tenantId),
         eq(equitySnapshots.mode, mode),
         gte(equitySnapshots.timestamp, since),
+        readableEquity(),
       ),
     )
     .orderBy(equitySnapshots.timestamp)
@@ -262,10 +272,24 @@ export type DailyPnl = {
   date: string;
   realizedPnl: number;
   fees: number;
+  /** The part of `fees` that no `pnl` includes (see entryFeesSum). */
+  entryFees: number;
   trades: number;
   funding: number; // signed: positive = received, negative = paid
-  net: number; // realizedPnl + funding
+  net: number; // realizedPnl - entryFees + funding
 };
+
+/**
+ * Fees on trade rows with no `pnl`. A close's pnl is net of that
+ * close's own fee only (runner.py `_execute_signal`, `realized_pnl(fee=)`);
+ * an open is written with pnl NULL and just its fee (repo.py
+ * `record_trade_and_open_position`). So sum(pnl) leaves out every
+ * entry fee, and net P&L has to subtract them. The one other NULL-pnl
+ * row, a reconcile close of an exchange orphan with no entry price to
+ * price it against, is a fee no pnl includes either, and counts here.
+ */
+const entryFeesSum = () =>
+  sql<number>`coalesce(sum(${trades.fee}) filter (where ${trades.pnl} is null), 0)`;
 
 export async function getDailyPnl(
   tenantId: string,
@@ -280,6 +304,7 @@ export async function getDailyPnl(
       date: sql<string>`to_char(${trades.timestamp} at time zone 'UTC', 'YYYY-MM-DD')`,
       realizedPnl: sql<number>`coalesce(sum(${trades.pnl}), 0)`,
       fees: sql<number>`coalesce(sum(${trades.fee}), 0)`,
+      entryFees: entryFeesSum(),
       trades: count(trades.id),
     })
     .from(trades)
@@ -311,13 +336,15 @@ export async function getDailyPnl(
   // Merge by date — union of both date sets
   const byDate = new Map<string, DailyPnl>();
   for (const t of tradeRows) {
+    const entryFees = Number(t.entryFees);
     byDate.set(t.date, {
       date: t.date,
       realizedPnl: Number(t.realizedPnl),
       fees: Number(t.fees),
+      entryFees,
       trades: Number(t.trades),
       funding: 0,
-      net: Number(t.realizedPnl),
+      net: Number(t.realizedPnl) - entryFees,
     });
   }
   for (const f of fundingRows) {
@@ -325,12 +352,13 @@ export async function getDailyPnl(
     const existing = byDate.get(f.date);
     if (existing) {
       existing.funding = fundingNum;
-      existing.net = existing.realizedPnl + fundingNum;
+      existing.net = existing.realizedPnl - existing.entryFees + fundingNum;
     } else {
       byDate.set(f.date, {
         date: f.date,
         realizedPnl: 0,
         fees: 0,
+        entryFees: 0,
         trades: 0,
         funding: fundingNum,
         net: fundingNum,
@@ -347,20 +375,23 @@ export async function getRealizedPnlTotal(
 ): Promise<{
   realizedPnl: number;
   fees: number;
+  entryFees: number;
   trades: number;
 }> {
   const rows = await db
     .select({
       realizedPnl: sql<number>`coalesce(sum(${trades.pnl}), 0)`,
       fees: sql<number>`coalesce(sum(${trades.fee}), 0)`,
+      entryFees: entryFeesSum(),
       trades: count(trades.id),
     })
     .from(trades)
     .where(and(eq(trades.tenantId, tenantId), eq(trades.mode, mode)));
-  const r = rows[0] ?? { realizedPnl: 0, fees: 0, trades: 0 };
+  const r = rows[0] ?? { realizedPnl: 0, fees: 0, entryFees: 0, trades: 0 };
   return {
     realizedPnl: Number(r.realizedPnl),
     fees: Number(r.fees),
+    entryFees: Number(r.entryFees),
     trades: Number(r.trades),
   };
 }
@@ -397,6 +428,7 @@ export async function getLatestEquity(tenantId: string, mode: Mode = "paper") {
       and(
         eq(equitySnapshots.tenantId, tenantId),
         eq(equitySnapshots.mode, mode),
+        readableEquity(),
       ),
     )
     .orderBy(desc(equitySnapshots.timestamp))

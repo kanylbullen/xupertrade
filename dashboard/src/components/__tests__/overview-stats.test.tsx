@@ -32,7 +32,7 @@ function props(over: Partial<OverviewStatsProps> = {}): OverviewStatsProps {
     dbConnected: true,
     latestEquity: null,
     equityChanges: noChanges(),
-    realized: { realizedPnl: 0, fees: 0, trades: 0 },
+    realized: { realizedPnl: 0, entryFees: 0, trades: 0 },
     today: null,
     nowMs: NOW,
     ...over,
@@ -78,14 +78,15 @@ describe("OverviewStats amounts", () => {
         {...props({
           latestEquity: latest,
           equityChanges: changes,
-          realized: { realizedPnl: -123.456, fees: 7.5, trades: 12 },
+          realized: { realizedPnl: -123.456, entryFees: 3.7, trades: 12 },
           today: {
             date: "2026-09-25",
             realizedPnl: -20,
             fees: 1,
+            entryFees: 0.5,
             trades: 2,
             funding: -0.75,
-            net: -20.75,
+            net: -21.25,
           },
         })}
       />,
@@ -94,9 +95,13 @@ describe("OverviewStats amounts", () => {
     expect(out).toContain("24h -$487.66 (-4.88%)");
     expect(out).toContain("7d +$512.34 (+5.69%)");
     expect(out).toContain("30d -$2,487.66 (-20.73%)");
-    expect(out).toContain("Realized P&L (all-time) -$123.46 12 trades · fees -$7.50");
+    // Realized is net of close fees only; the card says which fees it
+    // leaves out rather than listing all fees beside it.
     expect(out).toContain(
-      "Today's P&L (UTC) -$20.75 Realized -$20.00 · funding -$0.75 · 2 trades",
+      "Realized P&L (all-time) -$123.46 12 trades · excl. entry fees -$3.70",
+    );
+    expect(out).toContain(
+      "Today's P&L (UTC) -$21.25 Realized -$20.00 · entry fees -$0.50 · funding -$0.75 · 2 trades",
     );
     expect(out).not.toMatch(/\$-/);
   });
@@ -123,5 +128,20 @@ describe("OverviewStats amounts", () => {
     const out = text(<OverviewStats {...props({ latestEquity: stale })} />);
     expect(out).toContain("Testnet (live) · last snapshot 2026-09-25 11:00:00");
     expect(out).toContain("24h no snapshot");
+  });
+
+  it("labels each change with its real end once the bot stopped", () => {
+    // Stopped 20h ago: "24h" would be a 4h change.
+    const stopped = { equity: 9_512.34, at: new Date(NOW - 20 * 60 * 60 * 1000) };
+    const stoppedChanges = EQUITY_WINDOWS.map((w, i) =>
+      equityChange(w.label, w.ms, stopped, baselines[i], NOW),
+    );
+    const out = text(
+      <OverviewStats {...props({ latestEquity: stopped, equityChanges: stoppedChanges })} />,
+    );
+    // Europe/Stockholm: 2026-09-24 12:01 and 16:00 UTC.
+    expect(out).toContain("2026-09-24 14:01:00 → 2026-09-24 18:00:00 -$487.66 (-4.88%)");
+    expect(out).not.toMatch(/\b24h\b/);
+    expect(out).not.toMatch(/\b7d\b/);
   });
 });

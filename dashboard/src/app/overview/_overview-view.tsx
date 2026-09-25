@@ -74,7 +74,7 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
   let latestEquityRow: Awaited<ReturnType<typeof getLatestEquity>> | null = null;
   let strategyPnl: Awaited<ReturnType<typeof getStrategyPnlBreakdown>> = [];
   let dailyPnl: Awaited<ReturnType<typeof getDailyPnl>> = [];
-  let realizedTotal = { realizedPnl: 0, fees: 0, trades: 0 };
+  let realizedTotal = { realizedPnl: 0, fees: 0, entryFees: 0, trades: 0 };
   let fundingTotal = { totalUsdc: 0, count: 0 };
   let equityBaselines: Array<Awaited<ReturnType<typeof getFirstEquitySince>>> = [];
   let dbConnected = false;
@@ -224,14 +224,19 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
 
       <PnlSummary
         realized={realizedTotal.realizedPnl}
-        fees={realizedTotal.fees}
+        entryFees={realizedTotal.entryFees}
         funding={fundingTotal.totalUsdc}
         unrealized={unrealizedPnl}
+        dbConnected={dbConnected}
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <StrategyPnlTable rows={strategyPnl} />
-        <DailyPnlTable rows={dailyPnl} windowDays={DAILY_WINDOW_DAYS} />
+        <StrategyPnlTable rows={strategyPnl} dbConnected={dbConnected} />
+        <DailyPnlTable
+          rows={dailyPnl}
+          windowDays={DAILY_WINDOW_DAYS}
+          dbConnected={dbConnected}
+        />
       </div>
 
       <div className="space-y-3">

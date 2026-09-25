@@ -32,12 +32,18 @@ export type EquityPoint = { equity: number; at: Date };
 
 export type EquityChange = {
   label: string;
-  /** latest − baseline; null when no snapshot falls inside the window. */
+  /** latest − baseline; null when no usable snapshot falls inside the
+   * window. */
   change: number | null;
   pct: number | null;
-  /** Set when the baseline starts later than the nominal window, i.e.
-   * the change covers less than `label` says: it runs since this time. */
+  /** Set when the change covers less than `label` says, with `until`:
+   * it runs from `since` (the baseline) … */
   since: Date | null;
+  /** … to `until`, the latest snapshot, when that is older than now:
+   * a stopped bot's "24h" is the few hours it ran in that window.
+   * Null when the latest snapshot is current, i.e. the change runs to
+   * now. */
+  until: Date | null;
 };
 
 export function equityChange(
@@ -47,13 +53,22 @@ export function equityChange(
   baseline: EquityPoint | null,
   nowMs: number,
 ): EquityChange {
-  if (!latest || !baseline) {
-    return { label, change: null, pct: null, since: null };
+  // A zero baseline is a failed read (queries.ts skips those too), and
+  // a change measured from it would be the whole equity.
+  if (!latest || !baseline || baseline.equity <= 0) {
+    return { label, change: null, pct: null, since: null, until: null };
   }
   const change = latest.equity - baseline.equity;
-  const pct = baseline.equity > 0 ? (change / baseline.equity) * 100 : null;
+  const pct = (change / baseline.equity) * 100;
   const late = baseline.at.getTime() - (nowMs - windowMs) > SNAPSHOT_SLACK_MS;
-  return { label, change, pct, since: late ? baseline.at : null };
+  const stale = nowMs - latest.at.getTime() > SNAPSHOT_SLACK_MS;
+  return {
+    label,
+    change,
+    pct,
+    since: late || stale ? baseline.at : null,
+    until: stale ? latest.at : null,
+  };
 }
 
 /** The UTC calendar day of `nowMs`, as "YYYY-MM-DD". */

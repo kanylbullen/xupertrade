@@ -17,6 +17,7 @@ function day(date: string, realizedPnl: number, funding = 0): DailyPnl {
     date,
     realizedPnl,
     fees: 0,
+    entryFees: 0,
     trades: realizedPnl === 0 ? 0 : 1,
     funding,
     net: realizedPnl + funding,
@@ -51,7 +52,7 @@ describe("equityChange", () => {
   it("is latest minus the baseline, signed, with a percentage", () => {
     const baseline = { equity: 10_000, at: new Date(NOW - DAY + 30_000) };
     const c = equityChange("24h", DAY, latest, baseline, NOW);
-    expect(c).toEqual({ label: "24h", change: -500, pct: -5, since: null });
+    expect(c).toEqual({ label: "24h", change: -500, pct: -5, since: null, until: null });
   });
 
   it("states the real start when the window is only partly covered", () => {
@@ -71,10 +72,30 @@ describe("equityChange", () => {
     expect(equityChange("24h", DAY, null, null, NOW).change).toBeNull();
   });
 
-  it("has no percentage against a zero baseline", () => {
+  it("has no number against a zero baseline", () => {
+    // A $0 snapshot is a failed balance read (pre-#167 bots wrote one
+    // on every HL 502): measured from it, the whole equity would show
+    // as the window's gain.
     const c = equityChange("24h", DAY, latest, { equity: 0, at: new Date(NOW - DAY) }, NOW);
-    expect(c.change).toBe(9_500);
+    expect(c.change).toBeNull();
     expect(c.pct).toBeNull();
+  });
+
+  it("ends the window at a stale latest snapshot, not now", () => {
+    // The bot stopped 20h ago. The 24h baseline is on time, but the
+    // change only covers the 4h the bot ran inside the window.
+    const stopped = { equity: 9_500, at: new Date(NOW - 20 * 60 * 60 * 1000) };
+    const baseline = { equity: 10_000, at: new Date(NOW - DAY + 30_000) };
+    const c = equityChange("24h", DAY, stopped, baseline, NOW);
+    expect(c.change).toBe(-500);
+    expect(c.since).toEqual(baseline.at);
+    expect(c.until).toEqual(stopped.at);
+  });
+
+  it("has no end date while the latest snapshot is current", () => {
+    const at = new Date(NOW - SNAPSHOT_SLACK_MS + 1);
+    const baseline = { equity: 10_000, at: new Date(NOW - DAY) };
+    expect(equityChange("24h", DAY, { equity: 1, at }, baseline, NOW).until).toBeNull();
   });
 
   it("covers 24h, 7d and 30d", () => {
