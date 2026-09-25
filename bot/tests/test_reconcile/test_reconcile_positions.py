@@ -464,6 +464,11 @@ async def test_on_strategy_close_not_called_for_unpriceable_rows(repo):
 # 4. Pass 2 — exchange orphans
 # ----------------------------------------------------------------------
 
+# What the runner passes: the coins its strategies trade. A lone orphan
+# on one of them is the case the NU-2 guard lets pass 2 close
+# (tests/test_reconcile/test_orphan_guard.py covers the holds).
+CLOSEABLE = {"traded_symbols": {"ETH", "BTC"}}
+
 
 @pytest.mark.asyncio
 async def test_exchange_orphan_filled_is_an_action_with_a_trade_row(repo):
@@ -472,7 +477,9 @@ async def test_exchange_orphan_filled_is_an_action_with_a_trade_row(repo):
         mid=2100.0,
     )
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, **CLOSEABLE,
+    )
 
     assert len(result.actions) == 1
     assert "exchange-orphan" in result.actions[0]
@@ -498,7 +505,9 @@ async def test_rejected_exchange_orphan_is_a_failure_not_an_action(repo):
         order_status=OrderStatus.REJECTED,
     )
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, **CLOSEABLE,
+    )
 
     assert result.actions == []
     assert len(result.failures) == 1
@@ -513,10 +522,13 @@ async def test_place_order_raising_is_a_failure(repo):
         order_raises=RuntimeError("HL rejected the close"),
     )
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, **CLOSEABLE,
+    )
 
     assert result.actions == []
     assert len(result.failures) == 1
+    assert "FAILED to close" in result.failures[0]
 
 
 @pytest.mark.asyncio
@@ -745,7 +757,9 @@ async def test_unbookkept_exchange_orphan_close_is_reported(repo, monkeypatch):
         raise RuntimeError("db gone")
 
     monkeypatch.setattr(repo, "record_trade", boom)
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, **CLOSEABLE,
+    )
 
     assert len(result.actions) == 1
     assert len(result.failures) == 1
@@ -757,12 +771,16 @@ async def test_unbookkept_exchange_orphan_close_is_reported(repo, monkeypatch):
 async def test_pass_two_sees_a_symbol_freed_by_a_wrong_side_close(repo):
     """After pass 1 wrong-side-closes the only BTC row, the exchange's
     BTC position is untracked and must be closed NOW — not one cycle
-    later, after a strategy OPEN has already netted against it."""
+    later, after a strategy OPEN has already netted against it. The
+    NU-2 guard leaves this alone: one orphan, on a coin a strategy here
+    trades, and nothing the runner has to confirm first."""
     await _open_row(repo, side="long", size=1.0, entry=100.0)
     ex_short = Position(symbol="BTC", side="short", size=1.0, entry_price=108.0)
     ex = FakeExchange([[ex_short], [ex_short]], fills=[_sell_fill()], mid=108.0)
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    result = await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, **CLOSEABLE,
+    )
 
     assert any("wrong-side" in a for a in result.actions)
     assert any("exchange-orphan" in a for a in result.actions)

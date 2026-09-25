@@ -381,6 +381,25 @@ class TelegramNotifier:
     # ----- event forwarding -----
 
     async def _event_loop(self) -> None:
+        """Forward events for as long as the notifier runs. A dropped Redis
+        connection ends `listen()` with an error; re-subscribe after a
+        pause instead of letting the task die unnoticed — the NU-2
+        restore-guard alert is sent right after Redis came back."""
+        while True:
+            try:
+                await self._forward_events()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Telegram event subscription lost — re-subscribing",
+                    exc_info=True,
+                )
+            await asyncio.sleep(self._resubscribe_delay)
+
+    _resubscribe_delay = 5.0
+
+    async def _forward_events(self) -> None:
         assert self._redis is not None
         pubsub = self._redis.pubsub()
         # Subscribe to all 3 modes' event channels so a single Telegram bot
@@ -402,8 +421,11 @@ class TelegramNotifier:
                 if text:
                     await self.send(text)
         finally:
-            await pubsub.unsubscribe()
-            await pubsub.close()
+            try:  # on a dead connection this raises too; never mask a cancel
+                await pubsub.unsubscribe()
+                await pubsub.close()
+            except Exception:
+                logger.debug("Telegram pubsub cleanup failed", exc_info=True)
 
     # ----- command polling -----
 

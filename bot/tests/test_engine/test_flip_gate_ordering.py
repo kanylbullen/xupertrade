@@ -141,6 +141,7 @@ def _runner(own_row, others, *, allow_multi, fills=None, strategy=None):
     runner.portfolio = MagicMock()
     runner.portfolio.check_risk_limits = AsyncMock(return_value=True)
     runner.portfolio.record_pnl = AsyncMock()
+    runner.portfolio.opens_held = None  # no reconcile hold (NU-2)
     runner._check_parity_after_trade = AsyncMock(return_value=True)
     return runner, strat, exchange, repo, bus
 

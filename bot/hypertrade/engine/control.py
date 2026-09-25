@@ -10,9 +10,24 @@ State keys:
                                         new value, then writes the same
                                         token to flat_request_done
 - hypertrade:control:flat_request_done
+- hypertrade:<mode>[:t:<tenant_id>]:control:sentinel -> written once this
+                                        bot has booted against this Redis.
+                                        MISSING means the control state was
+                                        lost (NU-2 guard 1, see
+                                        `EngineRunner._check_control_state`).
+- hypertrade:<mode>[:t:<tenant_id>]:control:reconcile_hold -> present while
+                                        this bot opens nothing and
+                                        reconcile market-closes no exchange
+                                        position (NU-2). Only a human
+                                        clears it.
+The two NU-2 keys carry the tenant id whenever the bot has one, so one
+tenant's bot never reads or clears another's. The dashboard seeds the
+sentinel when it creates a bot (`dashboard/src/lib/restore-sentinel.ts`
+builds the same key).
 """
 
 import logging
+import time
 
 import redis.asyncio as redis
 
@@ -20,7 +35,9 @@ from hypertrade.config import settings
 
 logger = logging.getLogger(__name__)
 
-def _key(mode: str, suffix: str) -> str:
+def _key(mode: str, suffix: str, tenant_id: str | None = None) -> str:
+    if tenant_id:
+        return f"hypertrade:{mode}:t:{tenant_id}:control:{suffix}"
     return f"hypertrade:{mode}:control:{suffix}"
 
 
@@ -36,6 +53,15 @@ class BotControl:
         self._key_allow_multi = _key(self._mode, "allow_multi_coin")
         self._key_heartbeat = _key(self._mode, "heartbeat")
         self._key_kill_switch = _key(self._mode, "kill_switch")
+        self._key_sentinel = _key(self._mode, "sentinel", settings.tenant_id)
+        self.reconcile_hold_key = _key(self._mode, "reconcile_hold", settings.tenant_id)
+        # A hold whose write failed: the runner enforces and retries it,
+        # GET reports it and a human clear ends it.
+        self.hold_unwritten = False
+        # The runner saw the sentinel missing and has not written it back
+        # yet: a lost state it already acted on, which a human clear
+        # acknowledges (`set_reconcile_hold`).
+        self.sentinel_unwritten = False
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -224,6 +250,56 @@ class BotControl:
         if self._redis is None:
             return
         await self._redis.delete(self._key_kill_switch)
+
+    # --- NU-2 restore guards. Unlike most setters above, these let a
+    # Redis error propagate: the runner has to know whether a read or a
+    # write landed, and fails closed when it did not.
+
+    async def sentinel_present(self) -> bool:
+        """False when this bot's sentinel is gone. No Redis client means
+        no Redis state to lose, so that counts as present."""
+        if self._redis is None:
+            return True
+        present = await self._redis.get(self._key_sentinel) is not None
+        self.sentinel_unwritten = not present
+        return present
+
+    async def write_sentinel(self) -> None:
+        if self._redis is None:
+            return
+        await self._redis.set(self._key_sentinel, str(int(time.time())))
+        self.sentinel_unwritten = False
+
+    async def is_reconcile_hold_active(self) -> bool:
+        """Any value counts as held; only deleting the key clears it. A
+        hold whose write failed counts, and so does no Redis client (the
+        hold cannot be read)."""
+        if self.hold_unwritten or self._redis is None:
+            return True
+        return await self._redis.get(self.reconcile_hold_key) is not None
+
+    async def set_reconcile_hold(self, active: bool) -> None:
+        """A set holds in memory until its write lands.
+
+        A clear that ends a lost state the runner already acted on — a
+        hold or a sentinel whose write never landed — writes the sentinel
+        too, so that hold cannot come straight back: the clear
+        acknowledges it. Any other clear leaves the sentinel alone. A
+        Redis emptied since the runner's last check must still read as
+        lost there, or guard 1 never fires."""
+        if active:
+            self.hold_unwritten = True
+        if self._redis is not None:
+            now = str(int(time.time()))
+            if active:
+                await self._redis.set(self.reconcile_hold_key, now)
+            else:
+                if self.hold_unwritten or self.sentinel_unwritten:
+                    await self._redis.set(self._key_sentinel, now)
+                    self.sentinel_unwritten = False
+                await self._redis.delete(self.reconcile_hold_key)
+        self.hold_unwritten = False
+        logger.warning("Reconcile hold %s", "SET" if active else "cleared")
 
     async def beat_heartbeat(self) -> None:
         """Write current timestamp + TTL of 5 minutes. A watchdog reads this
