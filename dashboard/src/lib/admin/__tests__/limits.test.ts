@@ -142,6 +142,18 @@ describe("reserveBotStart", () => {
     expect(db.running()).toBe(3);
   });
 
+  it("a cap of 0 — every new tenant's default (NU-8) — refuses the first start", async () => {
+    // 0 must mean "no bots", not "falsy, so no cap": the NULL check in
+    // reserveBotStart is `!== null`, and this pins that it stays so.
+    const db = installDbModel(0);
+    const reserve = vi.fn();
+    await expect(
+      reserveBotStart({ id: "x", maxActiveBots: 0 }, reserve),
+    ).rejects.toMatchObject({ kind: "bots_over_cap", current: 0, limit: 0 });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(db.running()).toBe(0);
+  });
+
   it("lets exactly one of two concurrent starts through a cap of 1", async () => {
     // The finding: the lock used to be released at commit BEFORE
     // anything countable was written (create-and-start set is_running
