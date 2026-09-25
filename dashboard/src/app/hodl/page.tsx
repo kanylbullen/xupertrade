@@ -8,6 +8,7 @@ import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
 import { requestNow } from "@/lib/now";
+import { servicesOwnerMode } from "@/lib/services-owner";
 import { and, eq } from "drizzle-orm";
 
 type Check = {
@@ -60,11 +61,12 @@ type Purchase = {
 };
 
 export default async function HodlPage() {
-  // HODL signals are mainnet-only by design (Decision 2 of the
-  // sidebar nav refactor — long-term holding signals only make sense
-  // against the real-money chain). No mode picker here. The existing
-  // "bot offline" empty state renders when no mainnet bot is running.
-  const mode = "mainnet" as const;
+  // HODL signals come from the services-owner bot (roadmap NU-7;
+  // HYPERTRADE_SERVICES_OWNER_MODE, paper by default) — the one bot that
+  // evaluates them. Their inputs are mode-agnostic market data, so no
+  // mode picker. The existing "bot offline" empty state renders when
+  // that bot isn't running.
+  const mode = servicesOwnerMode();
 
   // Read the clock once here, at the top of the request, and pass it
   // down — see lib/now.ts for why this isn't an inline Date.now().

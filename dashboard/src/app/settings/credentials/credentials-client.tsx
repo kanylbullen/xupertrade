@@ -73,7 +73,7 @@ const SLOTS: ReadonlyArray<{
   {
     key: "VAULT_TRACKING_ADDRESS",
     label: "Vault tracking address (optional)",
-    hint: "0x + 40 hex. Defaults to your mainnet account address. Override only if you want to monitor a different wallet's vault holdings.",
+    hint: "0x + 40 hex. The wallet whose vault holdings /vaults lists. Set it explicitly: the vault scanner runs on the paper bot by default, which has no mainnet account to fall back on.",
   },
 ];
 

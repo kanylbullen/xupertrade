@@ -15,6 +15,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db, tenantBots } from "@/lib/db";
 import { stopBot } from "@/lib/bot-orchestrator";
 import { clearBotApiKey } from "@/lib/bot-api-key";
+import { warnIfServicesOwnerNotRunning } from "@/lib/services-owner-check";
 import { requireTenant } from "@/lib/tenant";
 
 export const dynamic = "force-dynamic";
@@ -102,6 +103,10 @@ export async function POST(req: Request, ctx: Params): Promise<Response> {
       and(eq(tenantBots.id, botId), eq(tenantBots.tenantId, tenant.id)),
     )
     .returning();
+
+  // NU-7: stopping the services owner silences Telegram, HODL, the vault
+  // scanner and the key reminders. Say so in the log. Never throws.
+  await warnIfServicesOwnerNotRunning(tenant.id, `after stopping the ${bot.mode} bot`);
 
   return Response.json({ bot: updated[0] });
 }

@@ -4,7 +4,8 @@
  * Mocks tenant resolver, db, mintUnlockToken, and global fetch
  * (for the bot proxy call). Covers:
  *   - 412 when Telegram not linked
- *   - 503 when no running bot
+ *   - 503 when the services-owner bot isn't running
+ *   - the sender lookup asks for the services-owner mode only (NU-7)
  *   - 500 when PUBLIC_URL not set
  *   - 502 when bot proxy returns non-ok
  *   - happy path forwards to bot's internal endpoint
@@ -31,6 +32,11 @@ vi.mock("@/lib/rate-limit", () => ({
 vi.mock("@/lib/audit-log", () => ({
   appendAuditLog: vi.fn().mockResolvedValue(undefined),
 }));
+// Inspectable conditions, so a test can see which bot the route asks for.
+vi.mock("drizzle-orm", () => ({
+  eq: (col: unknown, val: unknown) => ({ kind: "eq", col, val }),
+  and: (...conds: unknown[]) => ({ kind: "and", conds }),
+}));
 
 const selectChain = {
   from: vi.fn().mockReturnThis(),
@@ -47,6 +53,7 @@ vi.mock("@/lib/db", () => ({
   },
   tenantBots: {
     tenantId: "tenantId",
+    mode: "mode",
     isRunning: "isRunning",
   },
 }));
@@ -113,15 +120,42 @@ describe("POST /api/tenant/me/telegram/send-unlock-link", () => {
     expect(body.error).toContain("telegram");
   });
 
-  it("returns 503 when no running bot exists", async () => {
+  it("returns 503 naming the owner mode when that bot isn't running", async () => {
     selectChain.limit
       .mockResolvedValueOnce([
         { chatId: BigInt(1234567890) },
       ]) // linked
-      .mockResolvedValueOnce([]); // no running bot
+      .mockResolvedValueOnce([]); // no running owner bot
     const res = await POST(req());
     expect(res.status).toBe(503);
+    expect((await res.json()).error).toContain("no running paper bot");
   });
+
+  it.each([
+    [undefined, "paper"],
+    ["mainnet", "mainnet"],
+  ])(
+    "asks only for the running services-owner bot (owner env %s → %s)",
+    async (env, expected) => {
+      if (env) process.env.HYPERTRADE_SERVICES_OWNER_MODE = env;
+      else delete process.env.HYPERTRADE_SERVICES_OWNER_MODE;
+      selectChain.limit
+        .mockResolvedValueOnce([{ chatId: BigInt(1234567890) }])
+        .mockResolvedValueOnce([]);
+      await POST(req());
+      // Second where() is the sender lookup (the first is the link).
+      const cond = selectChain.where.mock.calls[1][0] as {
+        conds: { col: string; val: unknown }[];
+      };
+      expect(cond.conds).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ col: "tenantId", val: TENANT_ID }),
+          expect.objectContaining({ col: "mode", val: expected }),
+          expect.objectContaining({ col: "isRunning", val: true }),
+        ]),
+      );
+    },
+  );
 
   it("returns 500 when PUBLIC_URL not set", async () => {
     delete process.env.PUBLIC_URL;

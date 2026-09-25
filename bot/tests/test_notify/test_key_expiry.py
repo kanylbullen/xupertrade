@@ -43,6 +43,8 @@ def _notifier(rows: list[tuple[str, datetime]]):
 @pytest.fixture(autouse=True)
 def _set_tenant(monkeypatch):
     monkeypatch.setattr(settings, "tenant_id", TENANT_ID)
+    # Reminders run on the services-owner bot only (roadmap NU-7).
+    monkeypatch.setattr(settings, "services_owner", True)
     # Registers the pre-test value so _notifier's direct assignment is
     # rolled back after each test.
     monkeypatch.setattr(settings, "tenant_key_expiries", "")
@@ -58,6 +60,17 @@ async def test_in_window_sends_warning():
     assert "expires in" in msg
     assert "HYPERLIQUID_PRIVATE_KEY" in msg
     n._redis.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_not_services_owner_is_silent(monkeypatch):
+    """A bot that isn't the services owner sends no reminder, even with
+    Telegram configured and a key inside the window — the owner does."""
+    monkeypatch.setattr(settings, "services_owner", False)
+    expires = datetime.now(timezone.utc) + timedelta(days=10)
+    n = _notifier([("HYPERLIQUID_PRIVATE_KEY", expires)])
+    await n._check_key_expiries()
+    n.send.assert_not_called()
 
 
 @pytest.mark.asyncio

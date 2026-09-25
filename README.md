@@ -225,7 +225,8 @@ Per-bot env (injected per-container by the orchestrator at spawn time, or set di
 | `MAX_DAILY_LOSS_USD` | `100` | Trading halts when daily PnL drops below this. |
 | `POLL_INTERVAL_SECONDS` | `60` | How often the runner ticks. |
 | `KILL_SWITCH` | `false` | Emergency stop (set without restart via dashboard). |
-| `TELEGRAM_ENABLED` | `true` (mainnet), `false` (paper/testnet) | Only one bot should run the Telegram poller. |
+| `TELEGRAM_ENABLED` | `true` on the services owner, `false` elsewhere | Only one bot should run the Telegram poller. |
+| `SERVICES_OWNER` | `true` on the services owner, `false` elsewhere | Runs HODL, the vault scanner and key-expiry reminders. The owner is the bot whose mode is the dashboard's `HYPERTRADE_SERVICES_OWNER_MODE` (default `paper`). |
 
 ## Setting up HyperLiquid testnet
 
@@ -275,13 +276,14 @@ The bot pushes notifications **and** accepts interactive commands.
    TELEGRAM_CHAT_ID=<your-numeric-chat-id>
    ```
 4. Telegram is env-driven per bot instance (`TELEGRAM_ENABLED`), and the
-   orchestrator currently sets it `true` only for the **mainnet** bot
-   (`false` on paper/testnet) — only one bot instance should ever run the
-   Telegram poller. Restart the mainnet bot to pick up new
+   orchestrator sets it `true` only on the services-owner bot: the mode in
+   the dashboard's `HYPERTRADE_SERVICES_OWNER_MODE`, **paper** by default
+   (`false` on the others) — only one bot instance should ever run the
+   Telegram poller. Restart that bot to pick up new
    `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` values: **Settings → Bots →
    restart** in the dashboard, or `POST /api/tenant/me/bots/<id>/stop` then
    `/start`. You should receive a startup ping within ~10 seconds:
-   `🟢 MAINNET 🚀 xupertrade started`.
+   `🟡 PAPER 🚀 xupertrade started`.
 
 ### Notifications
 
@@ -315,7 +317,7 @@ All commands are restricted to the configured `TELEGRAM_CHAT_ID` — nobody else
 | `/flat` | Show how many positions would close (asks for confirmation) |
 | `/flat confirm` | Actually close every open position with market orders |
 
-Currently commands operate on the bot instance that runs Telegram (the mainnet bot, per the orchestrator's `TELEGRAM_ENABLED` rule above). Cross-mode commands like `/status mainnet` are a planned future addition.
+Currently commands operate on the bot instance that runs Telegram (the services owner, paper by default, per the orchestrator's `TELEGRAM_ENABLED` rule above); `/status_mainnet`, `/pause_mainnet`, `/resume_mainnet` and `/flat_mainnet` reach the mainnet bot. A mode argument for the other commands is planned (roadmap NU-7.2).
 
 ## Bot architecture
 

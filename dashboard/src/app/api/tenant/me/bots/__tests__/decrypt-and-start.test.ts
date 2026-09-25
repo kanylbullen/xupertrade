@@ -43,6 +43,12 @@ vi.mock("@/lib/bot-api-key", () => ({
   clearBotApiKey: vi.fn().mockResolvedValue(undefined),
 }));
 
+// NU-7: the post-start owner check queries the DB; stub it so these
+// tests keep their own select chain and can assert the call.
+vi.mock("@/lib/services-owner-check", () => ({
+  warnIfServicesOwnerNotRunning: vi.fn().mockResolvedValue(undefined),
+}));
+
 const selectChain = {
   from: vi.fn().mockReturnThis(),
   where: vi.fn().mockResolvedValue([]),  // no secrets to decrypt
@@ -62,6 +68,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { startBot } from "@/lib/bot-orchestrator";
+import { warnIfServicesOwnerNotRunning } from "@/lib/services-owner-check";
 import { requireUnlockedKey } from "@/lib/tenant";
 
 import { decryptAndStart } from "../_decrypt-and-start";
@@ -74,7 +81,10 @@ const BOT_ID = "11111111-2222-3333-4444-555566667777";
 const CONTAINER_ID = "deadbeefcafebabe1234";
 const CONTAINER_NAME = "xupertrade-bot-3a2f1e4caaaabbbb-paper";
 
+const ORIG_ENV = { ...process.env };
+
 afterEach(() => {
+  process.env = { ...ORIG_ENV };
   vi.clearAllMocks();
   // Reset the secrets-fetch chain to its default (no secrets) — some
   // tests may have replaced .where with a custom resolved value.
@@ -220,5 +230,61 @@ describe("decryptAndStart", () => {
     expect(result.kind).toBe("response");
     if (result.kind === "response") expect(result.response.status).toBe(409);
     expect(mockedStopBot).toHaveBeenCalledWith(CONTAINER_ID);
+  });
+  describe("services owner (NU-7)", () => {
+    // Placeholder, never a real wallet (CLAUDE.md § 0).
+    const PHASE_ADDR = "0x1111111111111111111111111111111111111111";
+
+    function startOk() {
+      mockedRequireUnlockedKey.mockResolvedValueOnce(Buffer.alloc(32));
+      mockedStartBot.mockResolvedValueOnce({
+        id: CONTAINER_ID,
+        name: CONTAINER_NAME,
+        image: "xupertrade-bot:latest",
+        state: "running",
+        status: "Up 1 second",
+        labels: {},
+      });
+      updateChain.returning.mockResolvedValueOnce([
+        { id: BOT_ID, tenantId: TENANT_ID, mode: "paper", isRunning: true },
+      ]);
+    }
+
+    it("passes the operator's Phase vault address for the operator tenant", async () => {
+      process.env.VAULT_TRACKING_ADDRESS = PHASE_ADDR;
+      startOk();
+      const args = makeArgs();
+      args.tenant = { ...args.tenant, isOperator: true };
+
+      await decryptAndStart(args);
+
+      expect(mockedStartBot).toHaveBeenCalledWith(
+        expect.objectContaining({ vaultTrackingAddress: PHASE_ADDR }),
+      );
+    });
+
+    it("never passes it for another tenant", async () => {
+      process.env.VAULT_TRACKING_ADDRESS = PHASE_ADDR;
+      startOk();
+      const args = makeArgs();
+      args.tenant = { ...args.tenant, isOperator: false };
+
+      await decryptAndStart(args);
+
+      expect(mockedStartBot).toHaveBeenCalledWith(
+        expect.objectContaining({ vaultTrackingAddress: null }),
+      );
+    });
+
+    it("checks for a running owner after a successful start", async () => {
+      startOk();
+
+      await decryptAndStart(makeArgs());
+
+      expect(warnIfServicesOwnerNotRunning).toHaveBeenCalledWith(
+        TENANT_ID,
+        "after starting the paper bot",
+      );
+    });
   });
 });

@@ -37,6 +37,8 @@ import {
   provisionRole,
   tenantDatabaseUrl,
 } from "@/lib/tenant-pg-role";
+import { operatorVaultTrackingAddress } from "@/lib/services-owner";
+import { warnIfServicesOwnerNotRunning } from "@/lib/services-owner-check";
 import { requireUnlockedKey, type Tenant } from "@/lib/tenant";
 
 type Args = {
@@ -155,6 +157,11 @@ export async function decryptAndStart(args: Args): Promise<Result> {
           .filter((r) => r.expiresAt != null)
           .map((r) => [r.key, r.expiresAt!.toISOString()]),
       ),
+      // The operator's vault wallet lives in Phase; buildSpec injects it
+      // on the services-owner bot only. Operator tenant only, so no other
+      // tenant's /vaults lists the operator's holdings.
+      vaultTrackingAddress:
+        tenant.isOperator === true ? operatorVaultTrackingAddress() : null,
       systemEnv: {
         ...getOrchestratorSystemEnv(),
         DATABASE_URL: tenantDbUrl,
@@ -223,6 +230,9 @@ export async function decryptAndStart(args: Args): Promise<Result> {
         ),
       };
     }
+    // NU-7: say so when this tenant still has no running services owner
+    // (e.g. testnet started while paper is down). Never throws.
+    await warnIfServicesOwnerNotRunning(tenant.id, `after starting the ${mode} bot`);
     return { kind: "ok", bot: updated[0] };
   } catch (err) {
     try {

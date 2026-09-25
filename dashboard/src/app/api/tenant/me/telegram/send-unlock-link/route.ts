@@ -10,16 +10,18 @@
 
  *   2. Look up the tenant's linked Telegram chat (PR 3a/3b).
  *      412 if none — the tenant must run /link first.
- *   3. Find a running tenant-bot to act as the Telegram sender.
- *      We don't need a particular mode; any running tenant-bot
- *      has the same Telegram token (per `tenant_secrets`) and
- *      can DM the chat.
+ *   3. Find the tenant's running services-owner bot (roadmap NU-7;
+ *      the mode in HYPERTRADE_SERVICES_OWNER_MODE, paper by
+ *      default). Only that bot runs a Telegram notifier: every other
+ *      bot starts with TELEGRAM_ENABLED=false and answers 503, so
+ *      picking "any running bot" failed whenever the pick was not
+ *      the owner.
  *   4. Mint a short-lived signed unlock token + build the
  *      `/unlock?token=...` URL on PUBLIC_URL.
  *   5. POST it to the bot's `/api/internal/send-unlock-link`
  *      endpoint (API_KEY-gated), which calls TelegramNotifier.send.
  *
- * 503 if no running bot exists (can't DM without a sender).
+ * 503 if the owner bot isn't running (can't DM without a sender).
  * 412 if Telegram is not linked.
  */
 
@@ -30,6 +32,7 @@ import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
 import { db, tenantBots, tenantTelegramLinks } from "@/lib/db";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { servicesOwnerMode } from "@/lib/services-owner";
 import { requireTenant } from "@/lib/tenant";
 import { mintUnlockToken } from "@/lib/unlock-token";
 
@@ -96,13 +99,15 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // 2. Find a running tenant-bot to act as Telegram sender.
+  // 2. The services-owner bot is the only Telegram sender.
+  const ownerMode = servicesOwnerMode();
   const runningBots = await db
     .select()
     .from(tenantBots)
     .where(
       and(
         eq(tenantBots.tenantId, tenant.id),
+        eq(tenantBots.mode, ownerMode),
         eq(tenantBots.isRunning, true),
       ),
     )
@@ -112,7 +117,7 @@ export async function POST(req: Request): Promise<Response> {
     return Response.json(
       {
         error:
-          "no running bot — start one (paper / testnet / mainnet) so it can deliver the Telegram DM",
+          `no running ${ownerMode} bot — it owns Telegram, so start it to deliver the DM`,
       },
       { status: 503 },
     );

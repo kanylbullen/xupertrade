@@ -32,7 +32,11 @@ vi.mock("../bot-api-key", () => ({
   loadBotApiKey: vi.fn().mockResolvedValue("bot-key"),
 }));
 
-import { runHeartbeatSweep } from "../heartbeat-watchdog";
+import {
+  _resetWatchdogStartedForTests,
+  runHeartbeatSweep,
+  runServicesOwnerSweep,
+} from "../heartbeat-watchdog";
 import { db } from "../db";
 import { getBotApiUrl } from "../bot-api";
 import { loadBotApiKey } from "../bot-api-key";
@@ -293,5 +297,104 @@ describe("runHeartbeatSweep", () => {
     expect(sendAlert.mock.calls[0][0]).toContain("recovered");
     expect(redis.del).not.toHaveBeenCalled();
     expect(redis.store.get("dashboard:heartbeat-alert:b1")).toBe("alerted");
+  });
+});
+
+describe("runServicesOwnerSweep (NU-7)", () => {
+  // A tenant whose services owner (paper by default) is stopped while
+  // other bots run has Telegram, HODL, vaults and key reminders off.
+  // After a 600 s grace: one log line + one operator alert per episode.
+  const ORIG_ENV = { ...process.env };
+  const T0 = 1_000_000;
+  const ALERT_KEY = "dashboard:services-owner-alert:t1";
+
+  function rows(...modes: string[]) {
+    chainSelect(modes.map((mode, i) => ({ id: `b${i}`, mode, tenantId: "t1" })));
+  }
+
+  beforeEach(() => {
+    delete process.env.HYPERTRADE_SERVICES_OWNER_MODE;
+    _resetWatchdogStartedForTests();
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIG_ENV };
+  });
+
+  it("stays quiet during the grace period, then alerts once", async () => {
+    const redis = makeRedis();
+    const sendAlert = vi.fn().mockResolvedValue(true);
+
+    rows("testnet", "mainnet");
+    await runServicesOwnerSweep(redis, sendAlert, T0);
+    rows("testnet", "mainnet");
+    await runServicesOwnerSweep(redis, sendAlert, T0 + 599);
+    expect(sendAlert).not.toHaveBeenCalled();
+
+    rows("testnet", "mainnet");
+    await runServicesOwnerSweep(redis, sendAlert, T0 + 600);
+    expect(sendAlert).toHaveBeenCalledOnce();
+    const text = sendAlert.mock.calls[0][0] as string;
+    expect(text).toContain("<b>paper</b>");
+    expect(text).toContain("t1");
+    expect(redis.store.get(ALERT_KEY)).toBe("alerted");
+    const [, , , ttl] = redis.set.mock.calls[0];
+    expect(ttl).toBe(24 * 60 * 60);
+
+    // Dedup: still missing, no second alert.
+    rows("testnet", "mainnet");
+    await runServicesOwnerSweep(redis, sendAlert, T0 + 1200);
+    expect(sendAlert).toHaveBeenCalledOnce();
+  });
+
+  it("a Stop→Start of the owner inside the grace period never alerts", async () => {
+    const redis = makeRedis();
+    const sendAlert = vi.fn().mockResolvedValue(true);
+
+    rows("testnet");
+    await runServicesOwnerSweep(redis, sendAlert, T0);
+    rows("testnet", "paper");
+    await runServicesOwnerSweep(redis, sendAlert, T0 + 300);
+    rows("testnet");
+    await runServicesOwnerSweep(redis, sendAlert, T0 + 700);
+
+    // The owner came back at T0+300, so the second outage starts fresh.
+    expect(sendAlert).not.toHaveBeenCalled();
+  });
+
+  it("re-arms once the owner runs again", async () => {
+    const redis = makeRedis({ [ALERT_KEY]: "alerted" });
+    const sendAlert = vi.fn().mockResolvedValue(true);
+
+    rows("paper", "testnet");
+    await runServicesOwnerSweep(redis, sendAlert, T0);
+
+    expect(redis.del).toHaveBeenCalledWith(ALERT_KEY);
+    expect(sendAlert).not.toHaveBeenCalled();
+  });
+
+  it("follows HYPERTRADE_SERVICES_OWNER_MODE", async () => {
+    process.env.HYPERTRADE_SERVICES_OWNER_MODE = "mainnet";
+    const redis = makeRedis();
+    const sendAlert = vi.fn().mockResolvedValue(true);
+
+    rows("paper");
+    await runServicesOwnerSweep(redis, sendAlert, T0);
+    rows("paper");
+    await runServicesOwnerSweep(redis, sendAlert, T0 + 600);
+
+    expect(sendAlert).toHaveBeenCalledOnce();
+    expect(sendAlert.mock.calls[0][0]).toContain("<b>mainnet</b>");
+  });
+
+  it("ignores tenants with no running bot at all", async () => {
+    const redis = makeRedis();
+    const sendAlert = vi.fn().mockResolvedValue(true);
+
+    chainSelect([]);
+    await runServicesOwnerSweep(redis, sendAlert, T0 + 10_000);
+
+    expect(sendAlert).not.toHaveBeenCalled();
+    expect(redis.get).not.toHaveBeenCalled();
   });
 });

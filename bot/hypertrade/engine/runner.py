@@ -943,22 +943,8 @@ class EngineRunner:
                 logger.exception("Funding poll failed")
             self._last_funding_poll = time.time()
 
-        # HODL signal evaluation every 6h, owned by the mainnet bot only.
-        # Same rationale as the vault scanner gate below: HODL inputs
-        # (price, RSI, on-chain levels) are mode-agnostic, so running in
-        # every container produced 3× duplicate Telegram notifications
-        # ("MAINNET / PAPER / TESTNET ... HODL hype_accumulation") on each
-        # verdict change. Mainnet is the canonical owner — co-located with
-        # Telegram (PR #114) and vault scanner (PR #113).
-        if (
-            settings.exchange_mode == "mainnet"
-            and (time.time() - self._last_hodl_check) > 6 * 3600
-        ):
-            try:
-                await self._evaluate_hodl_signals()
-            except Exception:
-                logger.exception("HODL signal evaluation failed")
-            self._last_hodl_check = time.time()
+        # HODL + vault scanner, on the services-owner bot only.
+        await self._run_side_services()
 
         # Trade-rate anomaly alarm. Catches strategies that start
         # spam-trading vs their normal baseline (e.g. the 2026-05-09
@@ -977,31 +963,6 @@ class EngineRunner:
             except Exception:
                 logger.exception("Trade-rate alarm check failed")
             self._last_rate_check = time.time()
-
-        # Vault scanner: daily poll, owned by the mainnet bot only. All
-        # bot containers share the same Postgres, so running it in every
-        # container would duplicate the 14 MB catalogue fetch and risk
-        # emitting two `vault.qualified` alerts for the same state
-        # change. Vaults are an on-chain mainnet concept (testnet/paper
-        # have no real vaults) and the /vaults dashboard is pinned to
-        # mainnet, so mainnet is the natural single owner. The published
-        # event's `mode` field tags Telegram messages as MAINNET via
-        # EventBus.publish. The /vaults dashboard reads from the shared
-        # DB so the row is visible from any mode the user browses.
-        # On failure we DON'T advance _last_vault_poll, so a transient HL
-        # outage retries on the next tick instead of waiting a full day.
-        if (
-            self.repo
-            and settings.exchange_mode == "mainnet"
-            and (time.time() - self._last_vault_poll) > 24 * 3600
-        ):
-            try:
-                await self._poll_vaults()
-                self._last_vault_poll = time.time()
-            except Exception:
-                logger.exception(
-                    "Vault scan failed — will retry on next tick"
-                )
 
         # Honor flat-all request before everything else. The request is
         # acknowledged ONLY on full success: acknowledging a flat-all
@@ -2606,6 +2567,38 @@ class EngineRunner:
                     )
                 except Exception:
                     logger.exception("rate-alarm: event publish failed")
+
+    async def _run_side_services(self) -> None:
+        """HODL evaluation (every 6h) and the vault scanner (daily), on the
+        services-owner bot only (`SERVICES_OWNER`, roadmap NU-7).
+
+        Exactly one bot per tenant runs them. HODL inputs (price, RSI,
+        on-chain levels) are mode-agnostic, so running them in every
+        container sent three identical verdict-change messages; every bot
+        shares one Postgres, so a second vault scanner would repeat the
+        14 MB catalogue fetch and send `vault.qualified` twice for one
+        state change. Vault data is HL mainnet data whichever bot fetches
+        it. The owner used to be mainnet; it is now whichever mode the
+        dashboard names (default paper), so stopping the real-money bot no
+        longer silences them.
+        """
+        if not settings.services_owner:
+            return
+        now = time.time()
+        if (now - self._last_hodl_check) > 6 * 3600:
+            try:
+                await self._evaluate_hodl_signals()
+            except Exception:
+                logger.exception("HODL signal evaluation failed")
+            self._last_hodl_check = time.time()
+        # On failure we DON'T advance _last_vault_poll, so a transient HL
+        # outage retries on the next tick instead of waiting a full day.
+        if self.repo and (now - self._last_vault_poll) > 24 * 3600:
+            try:
+                await self._poll_vaults()
+                self._last_vault_poll = time.time()
+            except Exception:
+                logger.exception("Vault scan failed — will retry on next tick")
 
     async def _evaluate_hodl_signals(self) -> None:
         """Run all HODL signals; on verdict change vs last tick, push a Telegram

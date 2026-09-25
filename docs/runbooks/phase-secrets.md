@@ -39,3 +39,32 @@ Bootstrap on a new host (one-time):
 The Phase instance URL itself (operator's hostname for their Phase web
 UI) is treated as private operator info — see `CLAUDE.md` § 0. Use `$PHASE_URL`
 as a placeholder if a doc example needs to refer to it.
+
+## Side-services owner and the vault address (roadmap NU-7)
+
+Two dashboard-side keys decide where Telegram, HODL, the vault scanner and
+the key-expiry reminders run:
+
+| Key | Default | What it does |
+|---|---|---|
+| `HYPERTRADE_SERVICES_OWNER_MODE` | `paper` | The mode whose bot is the services owner. The orchestrator sets `TELEGRAM_ENABLED` and `SERVICES_OWNER` on that bot only and gives it the 1 GiB memory cap; `/hodl`, `/vaults` and the unlock DM read it. |
+| `VAULT_TRACKING_ADDRESS` | empty | The operator's vault wallet (a public address, but private operator info — never in the repo). Injected on the operator tenant's owner bot, where it wins over the Credentials-page slot. The paper owner has no mainnet account to fall back on, so `/vaults` lists no holdings without it. |
+
+Both reach the dashboard container through `docker-compose.yml`, so a
+change needs the dashboard recreated and then the affected bots
+restarted (Stop, then Start), because a bot reads its env once at spawn.
+
+**Changing the owner, or rolling this out the first time:**
+
+1. Set `VAULT_TRACKING_ADDRESS` (and the owner mode, if not paper) in Phase.
+2. Deploy the dashboard ([deploy.md](deploy.md)).
+3. Restart the **old** owner first, so it comes back with Telegram and the
+   side services off, then the new owner, then the rest. Only one bot may
+   poll Telegram `getUpdates` with a token at a time; two collide.
+4. Check the new owner's log for `Services owner: this PAPER bot runs …`
+   and no `has no VAULT_TRACKING_ADDRESS` warning, and that `/vaults`
+   lists the holdings.
+
+Decision 5.12: stop or move the owner only once a new owner runs. If it
+is missing for 10 minutes while another bot of the tenant runs, the
+dashboard's heartbeat watchdog sends one operator alert per day.

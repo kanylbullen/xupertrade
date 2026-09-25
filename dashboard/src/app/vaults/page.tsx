@@ -7,6 +7,7 @@ import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
 import { loadBotApiKey } from "@/lib/bot-api-key";
 import { requestNow } from "@/lib/now";
+import { servicesOwnerMode } from "@/lib/services-owner";
 import { and, eq } from "drizzle-orm";
 
 type Vault = {
@@ -65,11 +66,12 @@ type MyPositionsResponse = {
 };
 
 export default async function VaultsPage() {
-  // Vaults are an on-chain mainnet concept — testnet/paper bots have
-  // nothing to scan (Decision 2 of the sidebar nav refactor). Page is
-  // pinned to mainnet; the existing "bot offline" empty state renders
-  // when no mainnet bot is running.
-  const mode = "mainnet" as const;
+  // The services-owner bot (roadmap NU-7; HYPERTRADE_SERVICES_OWNER_MODE,
+  // paper by default) runs the vault scanner and holds the tracking
+  // address. Vaults are HL mainnet data whichever bot fetches them. The
+  // existing "bot offline" empty state renders when that bot isn't
+  // running.
+  const mode = servicesOwnerMode();
 
   // Read the clock once here, at the top of the request, and pass it
   // down, so every position card judges its lockup against the same
@@ -123,8 +125,9 @@ export default async function VaultsPage() {
         </h1>
         <p className="mt-1 text-sm text-muted-foreground">
           HyperLiquid vaults that pass our quality filter (age, AUM, ROI,
-          Sharpe, drawdown, manager equity, fee). Mainnet-only — vaults don&apos;t
-          exist on testnet. Read-only research; no auto-deposit. Polled daily.
+          Sharpe, drawdown, manager equity, fee). HyperLiquid mainnet data —
+          vaults don&apos;t exist on testnet. Read-only research; no auto-deposit.
+          Polled daily by the {mode} bot.
         </p>
       </div>
 

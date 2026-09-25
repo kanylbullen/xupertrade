@@ -103,3 +103,33 @@ def test_normalizes_whitespace_and_case():
         s.effective_vault_tracking_address
         == "0xdddd000000000000000000000000000000000004"
     )
+
+
+def test_explicit_vault_tracking_address_wins_on_paper():
+    """Paper is the default services owner (roadmap NU-7): the vault
+    scanner and /vaults read the address from there, so an explicit
+    value must be honored on paper too."""
+    s = _settings(
+        exchange_mode="paper",
+        vault_tracking_address="0xAAAA000000000000000000000000000000000001",
+        hyperliquid_account_address="0xBBBB000000000000000000000000000000000002",
+    )
+    assert (
+        s.effective_vault_tracking_address
+        == "0xaaaa000000000000000000000000000000000001"
+    )
+
+
+def test_services_owner_defaults_off(monkeypatch):
+    """A bot nobody named the owner runs no HODL, vault scan or key
+    reminders — so a hand-started bot can't double them up."""
+    monkeypatch.delenv("SERVICES_OWNER", raising=False)
+    assert Settings(_env_file=None).services_owner is False
+
+
+def test_services_owner_read_from_env(monkeypatch):
+    """The orchestrator injects SERVICES_OWNER=true|false as a string."""
+    monkeypatch.setenv("SERVICES_OWNER", "true")
+    assert Settings(_env_file=None).services_owner is True
+    monkeypatch.setenv("SERVICES_OWNER", "false")
+    assert Settings(_env_file=None).services_owner is False
