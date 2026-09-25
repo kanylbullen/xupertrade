@@ -36,12 +36,5 @@
     "trail_start_pct": 0.03,
     "trail_offset_pct": 0.01,
     "cooldown_hours": 4
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1h KC breakouts, long & short)"
   }
 }

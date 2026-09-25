@@ -16,18 +16,10 @@
     "Long & short with hard risk control."
   ],
   "weaknesses": [
-    "180d backtest: -6.9% APR, 23% win rate — over-trades in this regime.",
     "Scale-out partial close not emitted (engine doesn't support fractional close yet).",
     "Strict (Daily) preset not ported — only Loose (Intraday)."
   ],
   "params": {
     "preset": "Loose (Intraday)"
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1h breakout, long & short)"
   }
 }

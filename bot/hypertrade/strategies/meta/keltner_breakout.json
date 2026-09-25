@@ -29,12 +29,5 @@
     "kc_mult": 2.0,
     "sl_atr_mult": 4.0,
     "tp_pct": 0.20
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (4h KC breakout, long only)"
   }
 }

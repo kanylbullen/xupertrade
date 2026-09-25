@@ -29,12 +29,5 @@
     "stop_loss_pct": 2.2,
     "risk_reward": 2.5,
     "cooldown_bars": 6
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (4h momentum, long & short)"
   }
 }

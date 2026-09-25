@@ -31,12 +31,5 @@
     "stoch_overbought": 75,
     "stop_loss_pct": 0.04,
     "take_profit_pct": 0.06
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (15m mean reversion, long & short)"
   }
 }

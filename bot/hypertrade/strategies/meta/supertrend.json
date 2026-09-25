@@ -36,12 +36,5 @@
     "tp_rr": 2.5,
     "use_trail": false,
     "cooldown_bars": 5
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1d adaptive ST flips, long & short)"
   }
 }
