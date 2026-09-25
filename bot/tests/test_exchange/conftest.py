@@ -69,6 +69,7 @@ class HLHttp:
     def __init__(self) -> None:
         self.routes: dict[str, list] = {}
         self.calls: list[str] = []
+        self.bodies: list[dict] = []  # every request's JSON, in order
 
     def route(self, kind: str, *answers) -> None:
         self.routes[kind] = list(answers)
@@ -81,6 +82,7 @@ class HLHttp:
     def _post(self, url, json=None, timeout=None, **_kw):
         kind = (json or {}).get("type") or (json or {}).get("action", {}).get("type")
         self.calls.append(kind)
+        self.bodies.append(json or {})
         if kind not in self.routes:
             raise AssertionError(f"unexpected HL POST {url} type={kind!r}")
         answers = self.routes[kind]

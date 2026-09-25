@@ -137,18 +137,36 @@ class PaperExchange(Exchange):
         size: float,
         order_type: OrderType = OrderType.MARKET,
         price: float | None = None,
+        *,
+        reduce_only: bool = False,
+        slippage: float | None = None,  # paper fills at the price: no band
     ) -> Order:
+        rejected = Order(
+            id=str(uuid.uuid4()),
+            symbol=symbol,
+            side=side,
+            size=size,
+            order_type=order_type,
+            price=price,
+            status=OrderStatus.REJECTED,
+        )
         fill_price = price if price else self._prices.get(symbol, 0.0)
         if fill_price <= 0:
-            return Order(
-                id=str(uuid.uuid4()),
-                symbol=symbol,
-                side=side,
-                size=size,
-                order_type=order_type,
-                price=price,
-                status=OrderStatus.REJECTED,
-            )
+            return rejected
+        if reduce_only:
+            # HyperLiquid's rule: a reduce-only order only shrinks the
+            # position — clipped to it, rejected against a flat position
+            # or one on the order's own side. Never opens, never flips.
+            existing = self._positions.get(symbol)
+            reduces = "short" if side == "buy" else "long"
+            if existing is None or existing.side != reduces:
+                logger.warning(
+                    "PaperExchange: reduce-only %s %s %s REJECTED — would "
+                    "increase position (holding %s)", side, size, symbol,
+                    f"{existing.side} {existing.size}" if existing else "none",
+                )
+                return rejected
+            size = min(size, existing.size)
 
         order = Order(
             id=str(uuid.uuid4()),

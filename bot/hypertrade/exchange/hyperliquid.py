@@ -488,8 +488,17 @@ class HyperLiquidExchange(Exchange):
         size: float,
         order_type: OrderType = OrderType.MARKET,
         price: float | None = None,
+        *,
+        reduce_only: bool = False,
+        slippage: float | None = None,
     ) -> Order:
         """Submit one order. Never retried (a retried write can fill twice).
+
+        `reduce_only` goes to HL as the order's `r` flag: HL fills at most
+        the position it reduces and rejects one that would increase or
+        open a position ("Reduce only order would increase position.",
+        an `error` status → REJECTED). `slippage` widens or narrows the
+        IOC band of a MARKET order (default 0.5 %).
 
         `Order.size` is what HL actually took, not what was asked for: the
         filled `totalSz` when HL reports it, else the szDecimals-rounded
@@ -518,7 +527,8 @@ class HyperLiquidExchange(Exchange):
                     symbol, side, size,
                 )
                 return self._rejected(symbol, side, size, order_type, price)
-            slippage = 0.005  # 0.5% aggressive limit for IOC fill
+            if slippage is None:
+                slippage = 0.005  # 0.5% aggressive limit for IOC fill
             limit_px = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
             limit_px = self._round_price(symbol, limit_px)
             tif = "Ioc"
@@ -555,6 +565,7 @@ class HyperLiquidExchange(Exchange):
                 rounded_size,
                 float(limit_px),
                 {"limit": {"tif": tif}},
+                reduce_only=reduce_only,
                 timeout=settings.hl_order_timeout_seconds,
             )
         except Exception as e:
@@ -589,6 +600,7 @@ class HyperLiquidExchange(Exchange):
                 price=price,
                 pre_signed=pre_signed,
                 limit_px=limit_px,
+                reduce_only=reduce_only,
             )
 
         status_str = result.get("status", "")
@@ -765,6 +777,7 @@ class HyperLiquidExchange(Exchange):
         price: float | None,
         pre_signed: float | None,
         limit_px: float,
+        reduce_only: bool = False,
     ) -> Order:
         """Audit H2: poll the exchange for a delayed fill after a
         place_order timeout.
@@ -780,6 +793,10 @@ class HyperLiquidExchange(Exchange):
         If `pre_signed` is None (the pre-order baseline read failed),
         we degrade to REJECTED — better to surface the timeout than
         misclassify an unrelated existing position as a fresh fill.
+
+        A reduce-only order fills at most the position it reduces, so the
+        poll waits for that clamped amount; with nothing to reduce it
+        cannot have filled at all.
         """
         if pre_signed is None:
             logger.warning(
@@ -791,12 +808,25 @@ class HyperLiquidExchange(Exchange):
                 symbol, side, requested_rounded, order_type, price,
             )
 
-        expected_delta = requested_rounded if side == "buy" else -requested_rounded
-        target = pre_signed + expected_delta
         # Tolerance: one min step at szDecimals precision, matching the
         # parity-check rule in runner.py:_check_parity_after_trade.
         sz_dec = self._sz_decimals[symbol]
         tolerance = max(10 ** (-sz_dec), 1e-9)
+        expected = requested_rounded
+        if reduce_only:
+            reducible = -pre_signed if side == "buy" else pre_signed
+            expected = min(requested_rounded, max(reducible, 0.0))
+            if expected < tolerance:
+                logger.warning(
+                    "Timeout-poll skipped — reduce-only %s %s %s had no "
+                    "position to reduce (pre-order %s); returning REJECTED",
+                    symbol, side, requested_rounded, pre_signed,
+                )
+                return self._rejected(
+                    symbol, side, requested_rounded, order_type, price,
+                )
+        expected_delta = expected if side == "buy" else -expected
+        target = pre_signed + expected_delta
 
         # Poll up to ~30s. Bursty at first to catch quick fills, then
         # backs off so we don't hammer HL during a wider outage.
@@ -831,7 +861,7 @@ class HyperLiquidExchange(Exchange):
                 )
                 return Order(
                     id=str(uuid.uuid4()), symbol=symbol, side=side,
-                    size=requested_rounded, order_type=order_type,
+                    size=expected, order_type=order_type,
                     price=price, filled_price=fill_px,
                     status=OrderStatus.FILLED,
                 )
