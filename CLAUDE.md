@@ -105,7 +105,7 @@ bot/hypertrade/
 ├── notify/telegram.py  # notifier + command bot
 ├── reports/, backtest/ # weekly_eval.py (/eval, /kelly); backtest CLI + metrics
 └── db/                 # models.py, repo.py (all SQL, reconcile_positions)
-bot/tests/, bot/alembic/versions/ (0001_initial_schema → 0016_tenant_admin_limits)
+bot/tests/, bot/alembic/versions/ (0001 → 0017)
 dashboard/src/          # Next.js 16: app/ (pages + /api), proxy.ts (auth gate), components/, lib/
   lib/bot-orchestrator.ts, docker.ts  # spawn bot containers via the host Docker socket
   lib/bot-api.ts, bot-api-key.ts      # proxy to a bot with its per-bot X-Api-Key

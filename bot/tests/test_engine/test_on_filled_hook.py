@@ -53,7 +53,6 @@ def _runner(strategy):
     repo = MagicMock()
     repo.get_open_positions = AsyncMock(return_value=[])
     repo.get_open_position = AsyncMock(return_value=None)
-    repo.get_open_position_any = AsyncMock(return_value=None)
     repo.record_trade_and_open_position = AsyncMock()
 
     portfolio = MagicMock()

@@ -11,6 +11,7 @@ import aiohttp
 from hypertrade.config import settings
 from hypertrade.data.feed import fetch_candles
 from hypertrade.db.repo import ReconcileResult, Repository
+from hypertrade.engine import funding
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.portfolio import PortfolioManager
 from hypertrade.engine.signals import Signal, SignalAction
@@ -2684,65 +2685,36 @@ class EngineRunner:
         logger.info("vault scan result: %s", result)
 
     async def _poll_funding(self) -> None:
-        """Pull HL funding events since the latest stored timestamp and
-        upsert them into the funding_payments table. Best-effort attribution
-        to the strategy that holds the coin at funding time."""
+        """Store HL funding events since the newest stored one in
+        funding_payments. Paging, attribution and the event key are
+        `engine/funding.py`'s, shared with the backfill CLI."""
         from datetime import datetime, timedelta, timezone
         if self.repo is None:
             return
         latest = await self.repo.get_latest_funding_timestamp()
         # On first run, look back 24h. Otherwise from the latest stored ts
-        # minus 1 minute (overlap window — dedup by hash handles duplicates).
+        # minus 1 minute (overlap window — the event key dedupes it).
         if latest is None:
-            start_ms = int(
-                (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000
-            )
+            start = datetime.now(timezone.utc) - timedelta(hours=24)
         else:
-            start_ms = int((latest - timedelta(minutes=1)).timestamp() * 1000)
+            start = funding.as_utc(latest) - timedelta(minutes=1)
 
-        try:
-            events = await self.exchange.get_user_funding_history(start_ms)
-        except Exception:
-            logger.exception("Funding fetch failed")
-            return
-
-        if not events:
-            return
-
-        inserted = 0
-        for ev in events:
-            try:
-                ts_ms = int(ev.get("time", 0))
-                h = str(ev.get("hash", ""))
-                delta = ev.get("delta", {})
-                coin = str(delta.get("coin", ""))
-                usdc = float(delta.get("usdc", 0))
-                szi = delta.get("szi")
-                szi_f = float(szi) if szi is not None else None
-                fr = delta.get("fundingRate")
-                fr_f = float(fr) if fr is not None else None
-                if not h or not coin:
-                    continue
-
-                ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-
-                # Best-effort strategy attribution: open position on this coin
-                strat_name = None
-                pos = await self.repo.get_open_position_any(coin)
-                if pos is not None:
-                    strat_name = pos.strategy_name
-
-                ok = await self.repo.upsert_funding_payment(
-                    ts=ts, h=h, coin=coin, usdc=usdc,
-                    szi=szi_f, funding_rate=fr_f, strategy_name=strat_name,
-                )
-                if ok:
-                    inserted += 1
-            except Exception:
-                logger.exception("Failed to record funding event %s", ev)
-
-        if inserted:
-            logger.info("Funding poll: %d new payment(s) recorded", inserted)
+        result = await funding.ingest_funding(
+            self.repo,
+            self.exchange.get_user_funding_history,
+            funding.to_ms(start),
+            max_pages=funding.POLL_MAX_PAGES,
+        )
+        if result.new:
+            logger.info(
+                "Funding poll: %d new payment(s) recorded (%+.4f USDC, %d unattributed)",
+                result.new, result.new_usdc, result.unattributed_new,
+            )
+        if not result.complete:
+            logger.info(
+                "Funding poll: stopped after %d page(s) at %s; the next poll continues",
+                result.pages, result.newest,
+            )
 
     async def _resolve_close_size(
         self, strategy_name: str, symbol: str, expected_side: str

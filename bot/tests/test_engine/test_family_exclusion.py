@@ -54,7 +54,6 @@ def _runner(open_positions: list) -> tuple[EngineRunner, MagicMock]:
     repo = MagicMock()
     repo.get_open_positions = AsyncMock(return_value=open_positions)
     repo.get_open_position = AsyncMock(return_value=None)
-    repo.get_open_position_any = AsyncMock(return_value=None)
 
     portfolio = MagicMock()
     portfolio.check_risk_limits = AsyncMock(return_value=True)
@@ -119,8 +118,6 @@ async def test_same_family_on_same_coin_blocks_open(monkeypatch):
     monkeypatch.setattr(settings, "max_total_exposure_usd", 0)
     held = _db_pos("macd_zero", "SOL")
     runner, _ = _runner([held])
-    # Legacy limit-1 coin query sees the row.
-    runner.repo.get_open_position_any = AsyncMock(return_value=held)
 
     sig = Signal(
         action=SignalAction.OPEN_LONG, symbol="SOL", strategy_name="cdc_macd"
