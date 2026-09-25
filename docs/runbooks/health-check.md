@@ -84,8 +84,11 @@ no exchange position without a DB row. Exits keep running and the bot is
 not paused. The bot sets the hold itself when its Redis sentinel is
 missing, or when a reconcile pass holds such a position on a coin it
 trades (the first pass after every start holds all of them). Only a
-human clears it. What it means around a restore:
-[disaster-recovery.md](disaster-recovery.md) § 1.6 (Swedish).
+human clears it. A bot whose container was created from an image older
+than #186 has none of this, whatever the tag says now: a container keeps
+the image it was created on, through `docker start` and restarts. What
+it means around a restore:
+[disaster-recovery.md](disaster-recovery.md) § 1.6 and step 7 (Swedish).
 
 On the host (`ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST`), define
 `hold`. It takes the bot's API key and port from the container's own env,
@@ -110,14 +113,25 @@ done
 | `{"reconcile_hold": false}` | Not held. After a start or a clear, opens still wait for one reconcile pass: the log says `New opens disabled — waiting for …`, and the bot alerts if that lasts 10 minutes. A position on a coin the bot does not trade is logged `HELD exchange-orphan` without a hold; reconcile never closes it. |
 | `{"reconcile_hold": true}` | Held. The log says why: `Restore guard`, `Reconcile hold SET`, `HELD exchange-orphan`. The alert repeats every 30 minutes. |
 | `HTTP Error 503` | The bot cannot read Redis, and holds as well. |
+| `HTTP Error 404` | The bot runs code from before #186: no sentinel, no hold, and no first pass that holds. Every unpaused reconcile pass, the first one after a start included, market-closes every exchange position without a DB row, on every coin. Move it to a current image through the [bot-deploy window](deploy.md#bot-deploy-window); around a restore, see disaster-recovery.md step 7. |
 
 **Clearing.** First run the parity check above and decide on every held
 position: close it on HyperLiquid yourself (reduce-only), or leave a lone
-one to reconcile. Then `hold <bot-container> false`. The clear runs a
-reconcile pass before any open: it market-closes a lone exchange position
+one to reconcile. Then `hold <bot-container> false`, or
+`redis-cli DEL hypertrade:<mode>:t:<tenant_id>:control:reconcile_hold`
+(`tenant_id` from `tenant_bots`). Both need Redis to accept writes: while
+it refuses them the API answers `HTTP Error 503` and the hold stays.
+Prefer the API. It also ends a hold the bot has only in memory because
+its Redis write failed, and it writes the sentinel when the bot saw it
+missing; after a `DEL` the bot sets the hold again on its next tick in
+both cases.
+
+The bot notices a clear at the start of its next tick, within about a
+minute (`POLL_INTERVAL_SECONDS`, 60 by default), and runs a reconcile
+pass there before any open: it market-closes a lone exchange position
 without a DB row on a coin the bot trades, sets the hold again while
 several remain, and never closes one on a coin the bot does not trade.
-`redis-cli DEL hypertrade:<mode>:t:<tenant_id>:control:reconcile_hold`
-(`tenant_id` from `tenant_bots`) works too, but only while Redis accepts
-writes; the API also ends a hold that lives only in the bot's memory
-because its Redis write failed.
+Read the hold again only after that pass: wait at least two minutes, and
+until the log shows a new `Reconcile: … db rows, … exchange positions`
+line. The pass logs `closed exchange-orphan` for a position it closed and
+`Reconcile hold SET` when it set the hold again.
