@@ -10,6 +10,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const whereSpy = vi.fn();
+const orderBySpy = vi.fn();
 
 vi.mock("../db", () => {
   const tradesTable = {
@@ -24,7 +25,10 @@ vi.mock("../db", () => {
           where: (cond: unknown) => {
             whereSpy(cond);
             return {
-              orderBy: () => ({ limit: async () => [] }),
+              orderBy: (...cols: unknown[]) => {
+                orderBySpy(...cols);
+                return { limit: async () => [] };
+              },
             };
           },
         }),
@@ -32,7 +36,12 @@ vi.mock("../db", () => {
     },
     trades: tradesTable,
     positions: {},
-    equitySnapshots: {},
+    equitySnapshots: {
+      tenantId: { name: "tenant_id", _: "tenantId" },
+      mode: { name: "mode", _: "mode" },
+      timestamp: { name: "timestamp", _: "timestamp" },
+      totalEquity: { name: "total_equity", _: "totalEquity" },
+    },
     strategyConfigs: {},
     fundingPayments: {},
   };
@@ -51,11 +60,12 @@ vi.mock("drizzle-orm", () => ({
   count: (col: unknown) => ({ kind: "count", col }),
 }));
 
-import { getRecentTrades } from "../queries";
-import { trades as tradesTable } from "../db";
+import { getFirstEquitySince, getRecentTrades } from "../queries";
+import { equitySnapshots, trades as tradesTable } from "../db";
 
 beforeEach(() => {
   whereSpy.mockClear();
+  orderBySpy.mockClear();
 });
 
 type AndCond = { kind: "and"; conds: Array<{ kind: string; col: unknown; val: unknown }> };
@@ -86,5 +96,23 @@ describe("getRecentTrades", () => {
     await getRecentTrades("tenant-1", 10, undefined);
     const cond = whereSpy.mock.calls[0][0] as AndCond;
     expect(cond.conds).toHaveLength(1);
+  });
+});
+
+describe("getFirstEquitySince", () => {
+  it("takes the earliest of this tenant's snapshots in the mode at or after `since`", async () => {
+    const since = new Date("2026-09-24T12:00:00Z");
+    await getFirstEquitySince("tenant-1", "testnet", since);
+    const cond = whereSpy.mock.calls[0][0] as AndCond;
+    const byCol = (col: unknown) => cond.conds.find((c) => c.col === col);
+    expect(byCol(equitySnapshots.tenantId)).toMatchObject({ kind: "eq", val: "tenant-1" });
+    expect(byCol(equitySnapshots.mode)).toMatchObject({ kind: "eq", val: "testnet" });
+    expect(byCol(equitySnapshots.timestamp)).toMatchObject({ kind: "gte", val: since });
+    // A bare column is ascending in Drizzle: the first snapshot, not the latest.
+    expect(orderBySpy).toHaveBeenCalledWith(equitySnapshots.timestamp);
+  });
+
+  it("is null when the window has no snapshot", async () => {
+    expect(await getFirstEquitySince("tenant-1", "paper", new Date())).toBeNull();
   });
 });

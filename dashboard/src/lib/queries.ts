@@ -176,6 +176,35 @@ export async function getEquityHistory(
     .limit(limit);
 }
 
+/**
+ * The first equity snapshot at or after `since`: the baseline for a
+ * fixed-window equity change (24h / 7d / 30d) on the overview. Null
+ * when no snapshot falls in the window. The caller compares its
+ * timestamp with `since` to tell a full window from a partial one.
+ */
+export async function getFirstEquitySince(
+  tenantId: string,
+  mode: Mode,
+  since: Date,
+) {
+  const rows = await db
+    .select({
+      totalEquity: equitySnapshots.totalEquity,
+      timestamp: equitySnapshots.timestamp,
+    })
+    .from(equitySnapshots)
+    .where(
+      and(
+        eq(equitySnapshots.tenantId, tenantId),
+        eq(equitySnapshots.mode, mode),
+        gte(equitySnapshots.timestamp, since),
+      ),
+    )
+    .orderBy(equitySnapshots.timestamp)
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 export async function getStrategyConfigs(tenantId: string) {
   return db
     .select()
@@ -226,7 +255,11 @@ export async function getStrategyPnlBreakdown(
 }
 
 export type DailyPnl = {
-  date: string; // YYYY-MM-DD
+  // YYYY-MM-DD, a UTC calendar day. Explicit `at time zone 'UTC'`
+  // rather than to_char's session time zone, so "today" on the
+  // overview (lib/overview-numbers.ts:todayRow) matches this grouping
+  // whatever time zone the connection happens to run in.
+  date: string;
   realizedPnl: number;
   fees: number;
   trades: number;
@@ -244,7 +277,7 @@ export async function getDailyPnl(
   // Trades aggregated by date
   const tradeRows = await db
     .select({
-      date: sql<string>`to_char(${trades.timestamp}, 'YYYY-MM-DD')`,
+      date: sql<string>`to_char(${trades.timestamp} at time zone 'UTC', 'YYYY-MM-DD')`,
       realizedPnl: sql<number>`coalesce(sum(${trades.pnl}), 0)`,
       fees: sql<number>`coalesce(sum(${trades.fee}), 0)`,
       trades: count(trades.id),
@@ -257,12 +290,12 @@ export async function getDailyPnl(
         gte(trades.timestamp, since),
       ),
     )
-    .groupBy(sql`to_char(${trades.timestamp}, 'YYYY-MM-DD')`);
+    .groupBy(sql`to_char(${trades.timestamp} at time zone 'UTC', 'YYYY-MM-DD')`);
 
   // Funding aggregated by date (separate query — different table)
   const fundingRows = await db
     .select({
-      date: sql<string>`to_char(${fundingPayments.timestamp}, 'YYYY-MM-DD')`,
+      date: sql<string>`to_char(${fundingPayments.timestamp} at time zone 'UTC', 'YYYY-MM-DD')`,
       funding: sql<number>`coalesce(sum(${fundingPayments.usdc}), 0)`,
     })
     .from(fundingPayments)
@@ -273,7 +306,7 @@ export async function getDailyPnl(
         gte(fundingPayments.timestamp, since),
       ),
     )
-    .groupBy(sql`to_char(${fundingPayments.timestamp}, 'YYYY-MM-DD')`);
+    .groupBy(sql`to_char(${fundingPayments.timestamp} at time zone 'UTC', 'YYYY-MM-DD')`);
 
   // Merge by date — union of both date sets
   const byDate = new Map<string, DailyPnl>();
