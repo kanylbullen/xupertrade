@@ -24,6 +24,10 @@ vi.mock("@/lib/bot-orchestrator", async () => {
 vi.mock("@/lib/bot-api-key", () => ({
   clearBotApiKey: vi.fn().mockResolvedValue(undefined),
 }));
+// NU-7: the post-stop owner check has its own DB query; stub it.
+vi.mock("@/lib/services-owner-check", () => ({
+  warnIfServicesOwnerNotRunning: vi.fn().mockResolvedValue(undefined),
+}));
 
 // Capture the chain DB calls; route uses .select().from().where().limit()
 // for the load and .update().set().where().returning() for the persist.
@@ -46,6 +50,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 import { stopBot } from "@/lib/bot-orchestrator";
+import { warnIfServicesOwnerNotRunning } from "@/lib/services-owner-check";
 import { requireTenant } from "@/lib/tenant";
 
 import { POST } from "../[id]/stop/route";
@@ -249,5 +254,26 @@ describe("POST /api/tenant/me/bots/[id]/stop", () => {
 
     const res = await POST(makeReq(), makeCtx());
     expect(res.status).toBe(401);
+  });
+  it("checks for a running services owner after stopping (NU-7)", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant());
+    selectChain.limit.mockResolvedValueOnce([
+      {
+        id: BOT_ID,
+        tenantId: TENANT_ID,
+        mode: "paper",
+        isRunning: true,
+        containerId: "deadbeef",
+      },
+    ]);
+    mockedStopBot.mockResolvedValueOnce(undefined);
+    updateChain.returning.mockResolvedValueOnce([{ id: BOT_ID }]);
+
+    const res = await POST(makeReq(), makeCtx());
+    expect(res.status).toBe(200);
+    expect(warnIfServicesOwnerNotRunning).toHaveBeenCalledWith(
+      expect.objectContaining({ id: TENANT_ID }),
+      "after stopping the paper bot",
+    );
   });
 });

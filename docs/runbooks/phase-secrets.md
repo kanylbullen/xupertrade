@@ -39,3 +39,47 @@ Bootstrap on a new host (one-time):
 The Phase instance URL itself (operator's hostname for their Phase web
 UI) is treated as private operator info — see `CLAUDE.md` § 0. Use `$PHASE_URL`
 as a placeholder if a doc example needs to refer to it.
+
+## Side-services owner and the vault address (roadmap NU-7)
+
+Two dashboard-side keys decide where Telegram, HODL, the vault scanner and
+the key-expiry reminders run:
+
+| Key | Default | What it does |
+|---|---|---|
+| `HYPERTRADE_SERVICES_OWNER_MODE` | `paper` | The mode whose bot is the operator tenant's services owner. The orchestrator sets `TELEGRAM_ENABLED` and `SERVICES_OWNER` on that bot only and gives it the 1 GiB memory cap; `/hodl`, `/vaults` and the unlock DM read it. Every other tenant's owner stays their mainnet bot until event channels and control keys are tenant-scoped. |
+| `VAULT_TRACKING_ADDRESS` | empty | The operator's vault wallet (a public address, but private operator info — never in the repo). Injected on the operator tenant's owner bot, where it wins over the Credentials-page slot. The paper owner has no mainnet account to fall back on, so `/vaults` lists no holdings without it. |
+
+Both reach the dashboard container through `docker-compose.yml`, so a
+change needs the dashboard recreated and then the affected bots
+restarted (Stop, then Start), because a bot reads its env once at spawn.
+
+**Changing the owner, or rolling this out the first time:**
+
+1. Set `VAULT_TRACKING_ADDRESS` (and the owner mode, if not paper) in
+   Phase, and check that `phase secrets list` shows it.
+2. Deploy the dashboard, and the first time also the bot image, in the
+   bot-deploy window ([deploy.md](deploy.md)): an older image runs HODL
+   and vaults on mainnet whatever its env says.
+3. Restart the **old** owner first, so it comes back with Telegram and the
+   side services off, then the new owner, then the rest. Only one bot may
+   poll Telegram `getUpdates` with a token at a time; two collide. After
+   each Stop and Start the dashboard log has a `[services-owner]` line
+   when the tenant has no owner, two, or still the old one; it reads the
+   running containers, so it also catches a bot started with old env.
+   Send no Telegram commands until the new owner runs: commands sent
+   while nothing polls wait at Telegram and run on the next owner.
+4. Check the new owner's log for `Services owner: this PAPER bot runs …`
+   and no `has no VAULT_TRACKING_ADDRESS` warning, and that `/vaults`
+   lists the holdings.
+
+**What moves with the owner.** The commands without a suffix (`/status`,
+`/positions`, `/pause`, `/resume`, `/flat`, `/today`, `/eval`) and the
+daily 23:00 and Sunday digests act on and report the owner's mode, so
+paper after the first rollout. Mainnet stays reachable through
+`/status_mainnet`, `/pause_mainnet`, `/resume_mainnet` and
+`/flat_mainnet`; digests per mode and a mode argument come with NU-7.2.
+
+Decision 5.12: stop or move the owner only once a new owner runs.
+Nothing alerts on a missing owner yet beyond that log line; a periodic
+check belongs with the alarm work in NU-7.4.

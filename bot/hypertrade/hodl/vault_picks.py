@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 
-from hypertrade.config import settings
 from hypertrade.db.repo import Repository
 from hypertrade.hodl.base import Check, Signal, SignalState
 from hypertrade.hodl.registry import register
@@ -110,16 +109,10 @@ class VaultPicksSignal(Signal):
                 threshold=">= 1",
             ))
 
-        # Override the verdict to use our count-aware version.
-        notes = ""
-        if settings.exchange_mode != "mainnet":
-            notes = (
-                f"Vaults are mainnet-only on HL; the scanner runs the same "
-                f"in {settings.exchange_mode} mode but can't be deposited "
-                f"into from this account."
-            )
-
-        state = self._build_state(checks, notes=notes)
+        # Override the verdict to use our count-aware version. No
+        # per-mode note: the scanner reads HL mainnet data whichever bot
+        # owns it, and the owner is the paper bot by default (NU-7).
+        state = self._build_state(checks)
         # Replace the verdict with the count-aware one.
         return SignalState(
             name=state.name,

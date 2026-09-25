@@ -151,10 +151,11 @@ class TelegramNotifier:
         self._strategies = strategies or []
         self._strategy_by_name = {s.name: s for s in self._strategies}
         self._repo = repo
-        # Audit C4: Telegram lives on the testnet bot but its `_control` is
-        # the testnet's BotControl. Mainnet's Redis keys are namespaced
-        # separately (`hypertrade:mainnet:control:*`) — without an explicit
-        # second handle, /pause/etc would write to testnet keys and never
+        # Audit C4: Telegram lives on the services-owner bot (paper by
+        # default) and its `_control` is that bot's BotControl. Mainnet's
+        # Redis keys are namespaced separately
+        # (`hypertrade:mainnet:control:*`) — without an explicit second
+        # handle, /pause/etc would write to the owner's keys and never
         # reach mainnet. `mainnet_control` is wired in `main.py` when
         # telegram_enabled AND a mainnet bot exists in the deployment;
         # commands suffixed `-mainnet` route here.
@@ -182,7 +183,6 @@ class TelegramNotifier:
             "/flat": (self._cmd_flat, "Close ALL open positions (with confirmation)"),
             "/today": (self._cmd_today, "Today's PnL summary (per-strategy, current mode)"),
             "/eval": (self._cmd_eval, "Weekly per-strategy evaluation (7d)"),
-            "/kelly": (self._cmd_kelly, "Half-Kelly sizing report (30d, advisory only)"),
             "/link": (self._cmd_link, "Link this Telegram chat to your tenant account"),
         }
         # Mainnet variants (audit C4). Registered only when wiring is
@@ -239,7 +239,9 @@ class TelegramNotifier:
         if self._repo is not None:
             self._daily_task = asyncio.create_task(self._daily_loop())
             self._weekly_task = asyncio.create_task(self._weekly_loop())
-            if settings.tenant_id:
+            # Key reminders belong to the services owner (roadmap NU-7),
+            # like HODL and the vault scanner.
+            if settings.tenant_id and settings.services_owner:
                 self._key_expiry_task = asyncio.create_task(
                     self._key_expiry_loop()
                 )
@@ -690,6 +692,7 @@ class TelegramNotifier:
         if (
             self._redis is None
             or not settings.tenant_id
+            or not settings.services_owner
             or not self.configured
         ):
             return
@@ -882,17 +885,6 @@ class TelegramNotifier:
         names = [s.name for s in self._strategies]
         stats = await evaluate(self._repo, names, days=days)
         return format_summary_text(stats, days=days, html=True)
-
-    async def _cmd_kelly(self, args: list[str]) -> str:
-        if self._repo is None:
-            return "Kelly report unavailable (DB not configured)"
-        days = 30  # Kelly needs more data than the 7d default
-        if args and args[0].isdigit():
-            days = max(7, min(180, int(args[0])))
-        from hypertrade.reports.weekly_eval import evaluate, format_kelly_report
-        names = [s.name for s in self._strategies]
-        stats = await evaluate(self._repo, names, days=days)
-        return format_kelly_report(stats, days=days, html=True)
 
     async def _cmd_link(
         self,

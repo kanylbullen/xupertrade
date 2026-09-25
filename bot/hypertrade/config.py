@@ -52,7 +52,25 @@ class Settings(BaseSettings):
     # hyperliquid_account_address because that's the trading account on
     # whichever network this bot runs on (often a testnet wallet), but
     # vaults only exist on mainnet.
+    #
+    # Only the services-owner bot uses it (see `services_owner`), and that
+    # is the paper bot by default, which has no mainnet account to fall
+    # back on — so it must be set explicitly. For the operator it lives in
+    # Phase and the dashboard injects it on the owner bot; it is a wallet
+    # address and never goes in the repo.
     vault_tracking_address: str = ""
+
+    # Side-services owner (roadmap NU-7, operator decision 5.12). Exactly
+    # one bot per tenant runs HODL signal evaluation, the daily vault
+    # scanner and the HL key-expiry reminders. The dashboard orchestrator
+    # sets this — together with TELEGRAM_ENABLED — on the operator's bot
+    # whose mode equals HYPERTRADE_SERVICES_OWNER_MODE (default paper) and
+    # on every other tenant's mainnet bot, and false on every other bot.
+    # Default False: a bot started by hand runs none of
+    # them unless told to, so two bots never both scan vaults or send
+    # the same HODL verdict. These jobs used to be gated on mainnet,
+    # which meant stopping the real-money bot silenced them.
+    services_owner: bool = False
 
     @property
     def effective_vault_tracking_address(self) -> str:
@@ -64,7 +82,8 @@ class Settings(BaseSettings):
         the one whose vault holdings the operator typically wants to
         monitor. On testnet/paper there is no fallback because testnet
         wallets aren't on mainnet — the lookup would just return
-        nothing useful.
+        nothing useful. The services owner is the paper bot by default,
+        so there the explicit value is the only source.
 
         Background: PR 4c retired the compose-bot model and per-tenant
         bots are spawned by the dashboard orchestrator. Before this PR
@@ -234,7 +253,9 @@ class Settings(BaseSettings):
 
     # Telegram notifications (optional). Only enable on ONE bot instance
     # in multi-mode setups — that single notifier subscribes to all 3 modes'
-    # event channels and routes commands per-mode internally.
+    # event channels and routes commands per-mode internally. The
+    # orchestrator enables it on the services owner only (see
+    # `services_owner`): two bots polling getUpdates with one token collide.
     telegram_enabled: bool = True
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""

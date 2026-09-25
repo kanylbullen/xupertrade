@@ -1,10 +1,12 @@
 /**
  * Tests for /api/tenant/me/telegram/send-unlock-link (PR 3c).
  *
- * Mocks tenant resolver, db, mintUnlockToken, and global fetch
- * (for the bot proxy call). Covers:
+ * Mocks tenant resolver, db, the running-owner lookup, mintUnlockToken,
+ * and global fetch (for the bot proxy call). Covers:
  *   - 412 when Telegram not linked
- *   - 503 when no running bot
+ *   - 503 when no running bot was started as the services owner
+ *   - the sender is a running owner container, preferring the tenant's
+ *     owner mode during a handover (NU-7)
  *   - 500 when PUBLIC_URL not set
  *   - 502 when bot proxy returns non-ok
  *   - happy path forwards to bot's internal endpoint
@@ -31,6 +33,10 @@ vi.mock("@/lib/rate-limit", () => ({
 vi.mock("@/lib/audit-log", () => ({
   appendAuditLog: vi.fn().mockResolvedValue(undefined),
 }));
+// NU-7: which bots own Telegram is read from the running containers.
+vi.mock("@/lib/services-owner-check", () => ({
+  runningServicesOwners: vi.fn(),
+}));
 
 const selectChain = {
   from: vi.fn().mockReturnThis(),
@@ -45,14 +51,12 @@ vi.mock("@/lib/db", () => ({
     tenantId: "tenantId",
     telegramChatId: "telegramChatId",
   },
-  tenantBots: {
-    tenantId: "tenantId",
-    isRunning: "isRunning",
-  },
 }));
 
 import { getBotApiUrl } from "@/lib/bot-api";
+import { loadBotApiKey } from "@/lib/bot-api-key";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { runningServicesOwners } from "@/lib/services-owner-check";
 import { requireTenant } from "@/lib/tenant";
 import { mintUnlockToken } from "@/lib/unlock-token";
 
@@ -62,19 +66,30 @@ const mockedRequireTenant = vi.mocked(requireTenant);
 const mockedGetBotApiUrl = vi.mocked(getBotApiUrl);
 const mockedMintToken = vi.mocked(mintUnlockToken);
 const mockedRateLimit = vi.mocked(checkRateLimit);
+const mockedOwners = vi.mocked(runningServicesOwners);
 
 const TENANT_ID = "11111111-2222-3333-4444-555555555555";
 const ORIG_ENV = { ...process.env };
 
-function tenant() {
+function tenant(isOperator = false) {
   return {
     id: TENANT_ID,
     email: "test@example.com",
     displayName: "Test",
-    isOperator: false,
+    isOperator,
     passphraseSalt: null,
     passphraseVerifier: null,
   } as Awaited<ReturnType<typeof requireTenant>>;
+}
+
+function botRow(id: string, mode: string) {
+  return {
+    id,
+    tenantId: TENANT_ID,
+    mode,
+    isRunning: true,
+    containerName: `x-${mode}`,
+  } as Awaited<ReturnType<typeof runningServicesOwners>>[number];
 }
 
 function req(): Request {
@@ -85,6 +100,7 @@ function req(): Request {
 }
 
 beforeEach(() => {
+  delete process.env.HYPERTRADE_SERVICES_OWNER_MODE;
   mockedRequireTenant.mockResolvedValue(tenant());
   mockedMintToken.mockResolvedValue("signed-token-abc");
   mockedGetBotApiUrl.mockReturnValue("http://bot:8000");
@@ -94,6 +110,7 @@ beforeEach(() => {
     remaining: 4,
     resetInSeconds: 900,
   });
+  mockedOwners.mockResolvedValue([botRow("b", "mainnet")]);
   process.env.PUBLIC_URL = "https://example.com";
   process.env.API_KEY = "test-key";
 });
@@ -113,46 +130,56 @@ describe("POST /api/tenant/me/telegram/send-unlock-link", () => {
     expect(body.error).toContain("telegram");
   });
 
-  it("returns 503 when no running bot exists", async () => {
-    selectChain.limit
-      .mockResolvedValueOnce([
-        { chatId: BigInt(1234567890) },
-      ]) // linked
-      .mockResolvedValueOnce([]); // no running bot
+  it.each([
+    [false, "mainnet"],
+    [true, "paper"],
+  ])(
+    "returns 503 naming the owner mode when no owner runs (operator=%s → %s)",
+    async (isOperator, mode) => {
+      mockedRequireTenant.mockResolvedValueOnce(tenant(isOperator));
+      selectChain.limit.mockResolvedValueOnce([{ chatId: BigInt(1234567890) }]);
+      mockedOwners.mockResolvedValueOnce([]);
+      const res = await POST(req());
+      expect(res.status).toBe(503);
+      expect(mockedOwners).toHaveBeenCalledWith(TENANT_ID);
+      expect((await res.json()).error).toContain(`the ${mode} bot`);
+    },
+  );
+
+  it("sends through the owner in the tenant's owner mode during a handover", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(tenant(true));
+    selectChain.limit.mockResolvedValueOnce([{ chatId: BigInt(1234567890) }]);
+    mockedOwners.mockResolvedValueOnce([botRow("old", "mainnet"), botRow("new", "paper")]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
     const res = await POST(req());
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
+    expect(vi.mocked(loadBotApiKey)).toHaveBeenCalledWith("new");
+    vi.unstubAllGlobals();
+  });
+
+  it("uses the bot that still owns Telegram before the new owner restarts", async () => {
+    // Operator's owner is now paper, but only the old mainnet container
+    // was started with Telegram on: it is the one that can send.
+    mockedRequireTenant.mockResolvedValueOnce(tenant(true));
+    selectChain.limit.mockResolvedValueOnce([{ chatId: BigInt(1234567890) }]);
+    mockedOwners.mockResolvedValueOnce([botRow("old", "mainnet")]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+    const res = await POST(req());
+    expect(res.status).toBe(200);
+    expect(vi.mocked(loadBotApiKey)).toHaveBeenCalledWith("old");
+    vi.unstubAllGlobals();
   });
 
   it("returns 500 when PUBLIC_URL not set", async () => {
     delete process.env.PUBLIC_URL;
     delete process.env.DASHBOARD_URL;
-    selectChain.limit
-      .mockResolvedValueOnce([{ chatId: BigInt(1234567890) }])
-      .mockResolvedValueOnce([
-        {
-          id: "b",
-          tenantId: TENANT_ID,
-          mode: "paper",
-          isRunning: true,
-          containerName: "x",
-        },
-      ]);
+    selectChain.limit.mockResolvedValueOnce([{ chatId: BigInt(1234567890) }]);
     const res = await POST(req());
     expect(res.status).toBe(500);
   });
 
   it("returns 502 when bot proxy rejects", async () => {
-    selectChain.limit
-      .mockResolvedValueOnce([{ chatId: BigInt(1234567890) }])
-      .mockResolvedValueOnce([
-        {
-          id: "b",
-          tenantId: TENANT_ID,
-          mode: "paper",
-          isRunning: true,
-          containerName: "x",
-        },
-      ]);
+    selectChain.limit.mockResolvedValueOnce([{ chatId: BigInt(1234567890) }]);
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ error: "telegram not configured" }), {
         status: 503,
@@ -165,17 +192,7 @@ describe("POST /api/tenant/me/telegram/send-unlock-link", () => {
   });
 
   it("happy path forwards to bot's internal endpoint with chat_id + signed URL", async () => {
-    selectChain.limit
-      .mockResolvedValueOnce([{ chatId: BigInt(1234567890) }])
-      .mockResolvedValueOnce([
-        {
-          id: "b",
-          tenantId: TENANT_ID,
-          mode: "paper",
-          isRunning: true,
-          containerName: "x",
-        },
-      ]);
+    selectChain.limit.mockResolvedValueOnce([{ chatId: BigInt(1234567890) }]);
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ sent: true }), { status: 200 }),
     );
@@ -212,6 +229,7 @@ describe("POST /api/tenant/me/telegram/send-unlock-link", () => {
     expect(body.retryAfterSeconds).toBe(600);
     // DB lookup + bot fetch must NOT have happened.
     expect(selectChain.limit).not.toHaveBeenCalled();
+    expect(mockedOwners).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });

@@ -190,6 +190,17 @@ services:
       # a warning and skips alerting (graceful degradation).
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      # Side-services owner (roadmap NU-7, lib/services-owner.ts): the mode
+      # whose bot runs Telegram, HODL, the vault scanner and key reminders
+      # for the operator tenant (other tenants keep mainnet).
+      # The orchestrator sets TELEGRAM_ENABLED + SERVICES_OWNER on that bot
+      # only; /hodl, /vaults and the unlock DM read it. Changing it takes
+      # effect per bot on restart: restart the old owner first.
+      HYPERTRADE_SERVICES_OWNER_MODE: "${HYPERTRADE_SERVICES_OWNER_MODE:-paper}"
+      # The operator's vault-tracking wallet (Phase; never in the repo).
+      # Injected on the operator's owner bot, which (paper by default) has
+      # no mainnet account to fall back on.
+      VAULT_TRACKING_ADDRESS: "${VAULT_TRACKING_ADDRESS:-}"
       # Heartbeat-watchdog tuning (src/lib/heartbeat-watchdog.ts).
       # POLL_SECONDS = how often the watchdog probes running bots;
       # STALE_SECONDS = heartbeat age past which a bot is "down".
@@ -227,11 +238,12 @@ services:
       HYPERTRADE_BOT_HL_INIT_RETRY_ATTEMPTS: "${HYPERTRADE_BOT_HL_INIT_RETRY_ATTEMPTS:-5}"
       HYPERTRADE_BOT_HL_INIT_RETRY_BACKOFF_SECONDS: "${HYPERTRADE_BOT_HL_INIT_RETRY_BACKOFF_SECONDS:-2.0}"
       # Per-mode tenant-bot memory caps (bot-orchestrator.ts
-      # memoryBytesForMode). mainnet defaults to 1 GiB because it runs
-      # the vault scanner + HODL eval + Telegram notifier on top of the
-      # strategy loop (pandas/pandas-ta peaks during the daily vault
-      # scan OOM-killed it ×4 at the old 512 MiB cap, 2026-06-17);
-      # paper/testnet stay at 512 MiB. Unset = use those code defaults.
+      # memoryBytesForMode). The services owner (paper by default)
+      # defaults to 1 GiB because it runs the vault scanner + HODL eval +
+      # Telegram notifier on top of the strategy loop (pandas/pandas-ta
+      # peaks during the daily vault scan OOM-killed it ×4 at 512 MiB,
+      # 2026-06-17); every other bot stays at 512 MiB. Unset = use those
+      # code defaults. A per-mode value here pins that mode regardless.
       # HYPERTRADE_BOT_MEMORY_BYTES is a global fallback for any mode
       # whose per-mode var is unset.
       HYPERTRADE_BOT_MEMORY_BYTES: "${HYPERTRADE_BOT_MEMORY_BYTES:-}"

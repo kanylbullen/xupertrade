@@ -59,47 +59,6 @@ class StrategyStats:
                 run = 0
         return best
 
-    @property
-    def avg_win(self) -> float:
-        wins = [p for p in self.pnls if p > 0]
-        return sum(wins) / len(wins) if wins else 0.0
-
-    @property
-    def avg_loss(self) -> float:
-        """Mean of |loss| for losing trades. Returns 0 if no losses."""
-        losses = [-p for p in self.pnls if p < 0]
-        return sum(losses) / len(losses) if losses else 0.0
-
-    @property
-    def kelly_fraction(self) -> float | None:
-        """Full-Kelly fraction f* = (bp - (1-p)) / b.
-
-        Returns None when the input is too unreliable to mean anything:
-        - fewer than 10 decisive trades
-        - no losses (b undefined)
-        - zero edge (clamps negative result to 0; >1 clamps to 1)
-        """
-        decisive = self.wins + self.losses
-        if decisive < 10:
-            return None
-        avg_loss = self.avg_loss
-        if avg_loss <= 0:
-            return None
-        p = self.win_rate
-        b = self.avg_win / avg_loss
-        f = (b * p - (1 - p)) / b
-        return max(0.0, min(1.0, f))
-
-    @property
-    def half_kelly(self) -> float | None:
-        k = self.kelly_fraction
-        return None if k is None else k / 2
-
-    @property
-    def quarter_kelly(self) -> float | None:
-        k = self.kelly_fraction
-        return None if k is None else k / 4
-
 
 async def evaluate(
     repo: Repository,
@@ -195,100 +154,9 @@ def format_summary_text(
     return "\n".join(lines)
 
 
-def format_kelly_report(
-    stats: dict[str, StrategyStats],
-    days: int = 30,
-    html: bool = False,
-) -> str:
-    """Half-Kelly sizing recommendation per strategy. Read-only — does NOT
-    modify live config. The user decides whether to apply the suggestions.
-
-    Half-Kelly is the practical default; full Kelly is too aggressive given
-    estimation error on win-rate / RR. Strategies with <10 decisive trades
-    are skipped — Kelly on tiny samples is statistical noise."""
-    bold = (lambda s: f"<b>{s}</b>") if html else (lambda s: s)
-    code = (lambda s: f"<code>{s}</code>") if html else (lambda s: s)
-
-    lines = [
-        f"📐 {bold(f'Half-Kelly sizing report — last {days}d')}",
-        f"Mode: {settings.exchange_mode}",
-        "",
-        "Half-Kelly = optimal-growth fraction × 0.5 (defensive against",
-        "estimation error). Suggested margin = current_margin × multiplier.",
-        "",
-    ]
-
-    rated = [s for s in stats.values() if s.kelly_fraction is not None]
-    skipped = [
-        s for s in stats.values()
-        if s.kelly_fraction is None and (s.wins + s.losses) > 0
-    ]
-
-    # In HTML mode, raw "<10" is parsed as a tag — escape with &lt;
-    lt = "&lt;" if html else "<"
-
-    if not rated:
-        lines.append("No strategy has ≥10 decisive trades in this window.")
-        lines.append("Run again after the bot has accumulated more history.")
-        if skipped:
-            lines.append("")
-            lines.append(bold(f"Insufficient sample ({lt}10 decisive trades):"))
-            for s in skipped:
-                decisive = s.wins + s.losses
-                lines.append(f"  {code(s.name)} — {decisive} trades")
-        return "\n".join(lines)
-
-    rated.sort(key=lambda s: (s.half_kelly or 0), reverse=True)
-
-    # Header for the table
-    lines.append(
-        f"{bold('strategy'):<22} "
-        f"{'p%':>6} {'b':>6} {'kelly':>7} {'½-k':>7} {'multiplier':>11}"
-    )
-    for s in rated:
-        decisive = s.wins + s.losses
-        b = s.avg_win / s.avg_loss if s.avg_loss > 0 else 0
-        # Multiplier: half-Kelly relative to a baseline of "current sizing
-        # corresponds to ~10% of equity per trade" (rough heuristic since we
-        # can't know the user's actual equity vs MAX_POSITION_SIZE_USD ratio
-        # from here). The point is the *relative* ranking, not the absolute.
-        baseline = 0.10
-        hk = s.half_kelly or 0
-        mult = hk / baseline if baseline > 0 else 0
-        arrow = "↑" if mult > 1.1 else ("↓" if mult < 0.9 else "·")
-        lines.append(
-            f"{code(s.name):<22} "
-            f"{s.win_rate * 100:>5.0f}% "
-            f"{b:>6.2f} "
-            f"{(s.kelly_fraction or 0) * 100:>6.1f}% "
-            f"{hk * 100:>6.1f}% "
-            f"{arrow}{mult:>9.2f}× ({decisive}t)"
-        )
-
-    if skipped:
-        lines.append("")
-        lines.append(bold(f"Insufficient sample ({lt}10 decisive trades):"))
-        for s in skipped:
-            decisive = s.wins + s.losses
-            lines.append(f"  {code(s.name)} — {decisive} trades")
-
-    lines.append("")
-    lines.append(
-        bold("⚠ Caveats:") + " Kelly assumes the win/loss distribution stays "
-        "stable. Crypto regimes shift; treat these as one signal among many. "
-        "Multipliers assume current sizing ≈ 10% of equity per trade — adjust "
-        "the baseline if your MAX_POSITION_SIZE_USD/equity ratio differs."
-    )
-    return "\n".join(lines)
-
-
 async def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7)
-    parser.add_argument(
-        "--kelly", action="store_true",
-        help="Print Half-Kelly sizing report instead of weekly summary",
-    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -297,10 +165,7 @@ async def _main() -> None:
     repo = Repository()
     try:
         stats = await evaluate(repo, names, days=args.days)
-        if args.kelly:
-            print(format_kelly_report(stats, days=args.days, html=False))
-        else:
-            print(format_summary_text(stats, days=args.days, html=False))
+        print(format_summary_text(stats, days=args.days, html=False))
     finally:
         await repo.close()
 

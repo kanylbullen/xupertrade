@@ -21,6 +21,7 @@ import {
   inspectContainer,
   stopAndRemove,
 } from "./docker";
+import { isServicesOwner, SERVICES_OWNER_LABEL } from "./services-owner";
 
 export type BotMode = "paper" | "testnet" | "mainnet";
 
@@ -124,6 +125,27 @@ export type BotStartParams = {
    * re-injects this map.
    */
   keyExpiries?: Record<string, string> | null;
+  /**
+   * Wallet whose HL vault holdings /vaults lists, injected as
+   * `VAULT_TRACKING_ADDRESS` on the services-owner bot only (roadmap
+   * NU-7). The owner is paper by default and has no mainnet account to
+   * fall back on, so it must be explicit. The caller passes the
+   * operator's Phase value for the operator tenant only
+   * (`services-owner.ts:operatorVaultTrackingAddress`), so another
+   * tenant's /vaults never lists the operator's holdings; a tenant's own
+   * Credentials slot still arrives through `decryptedSecrets`.
+   *
+   * `null` / omitted → nothing injected here.
+   */
+  vaultTrackingAddress?: string | null;
+  /**
+   * `tenants.is_operator`. Picks the services owner: the configured
+   * mode for the operator, mainnet (the pre-NU-7 owner) for everyone
+   * else (`services-owner.ts:servicesOwnerModeFor`). Omitted → not the
+   * operator, so a caller that forgets it never makes a paper bot the
+   * owner.
+   */
+  isOperator?: boolean;
 };
 
 const IMAGE = process.env.HYPERTRADE_BOT_IMAGE ?? "xupertrade-bot:latest";
@@ -149,22 +171,22 @@ const DEFAULT_LOG_CONFIG: { Type: string; Config: Record<string, string> } = {
 };
 
 /**
- * Per-mode container memory cap.
+ * Container memory cap.
  *
- * paper/testnet have been stable at 512 MiB for weeks. The mainnet bot
- * runs three mainnet-only heavy jobs ON TOP of the strategy loop that
- * paper/testnet never touch:
+ * Every bot runs the strategy loop, stable at 512 MiB for weeks. The
+ * services owner (`services-owner.ts`, paper by default) also runs three
+ * heavy jobs the others never touch:
  *   - the vault scanner (`_poll_vaults`: ~14 MB catalogue + per-vault
  *     details + Sharpe/max-DD math during the daily scan),
  *   - HODL signal evaluation (`_evaluate_hodl_signals`), and
- *   - the Telegram notifier (mainnet is the single Telegram owner).
- * pandas/pandas-ta peaks during the daily vault scan pushed mainnet's
- * anon-rss past the old 512 MiB cgroup cap → OOM-killed ×4 on
- * 2026-06-17 (it self-heals via Docker restart but keeps alerting).
- * Give mainnet 1 GiB; keep paper/testnet at 512 MiB.
+ *   - the Telegram notifier.
+ * pandas/pandas-ta peaks during the daily vault scan pushed the owner's
+ * anon-rss past a 512 MiB cgroup cap → OOM-killed ×4 on 2026-06-17 (then
+ * on mainnet, the owner at the time). So the owner gets 1 GiB and the
+ * others 512 MiB — the cap follows the owner, not a fixed mode.
  *
- * Like the C-1 operator-policy caps, each mode's default is
- * env-overridable for tuning without a redeploy of the dashboard image:
+ * Like the C-1 operator-policy caps, the default is env-overridable for
+ * tuning without a redeploy of the dashboard image:
  *   - per-mode: HYPERTRADE_BOT_{PAPER,TESTNET,MAINNET}_MEMORY_BYTES
  *   - global fallback: HYPERTRADE_BOT_MEMORY_BYTES (applies to any mode
  *     whose per-mode var is unset).
@@ -172,19 +194,17 @@ const DEFAULT_LOG_CONFIG: { Type: string; Config: Record<string, string> } = {
  * process.env between calls (env is read once per buildSpec, not at
  * module load).
  */
-const DEFAULT_MEMORY_BYTES_BY_MODE: Readonly<Record<BotMode, number>> = {
-  paper: 512 * 1024 * 1024, // 512 MiB
-  testnet: 512 * 1024 * 1024, // 512 MiB
-  mainnet: 1024 * 1024 * 1024, // 1 GiB — vault scan + HODL + Telegram
-};
+const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024; // 512 MiB
+const SERVICES_OWNER_MEMORY_BYTES = 1024 * 1024 * 1024; // 1 GiB — vault scan + HODL + Telegram
 
 /**
- * Resolve the memory cap (bytes) for a bot mode. Honors a per-mode env
- * override first, then a global override, then the per-mode default.
- * Non-positive or non-numeric env values are ignored (fall through to
- * the next source) so a typo can't silently set a 0-byte / NaN limit.
+ * Resolve the memory cap (bytes) for a bot. Honors a per-mode env
+ * override first, then a global override, then the default (1 GiB for
+ * the services owner, 512 MiB otherwise). Non-positive or non-numeric
+ * env values are ignored (fall through to the next source) so a typo
+ * can't silently set a 0-byte / NaN limit.
  */
-export function memoryBytesForMode(mode: BotMode): number {
+export function memoryBytesForMode(mode: BotMode, servicesOwner: boolean): number {
   const perMode = process.env[`HYPERTRADE_BOT_${mode.toUpperCase()}_MEMORY_BYTES`];
   const global = process.env.HYPERTRADE_BOT_MEMORY_BYTES;
   for (const raw of [perMode, global]) {
@@ -192,7 +212,7 @@ export function memoryBytesForMode(mode: BotMode): number {
     const n = Number(raw);
     if (Number.isFinite(n) && n > 0) return Math.floor(n);
   }
-  return DEFAULT_MEMORY_BYTES_BY_MODE[mode];
+  return servicesOwner ? SERVICES_OWNER_MEMORY_BYTES : DEFAULT_MEMORY_BYTES;
 }
 
 /**
@@ -334,7 +354,7 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   //   2. decryptedSecrets (user-supplied)
   //   3. systemEnv (orchestrator-supplied; wins over user)
   //   4. API_PORT (mode-pinned)
-  //   5. TELEGRAM_ENABLED (mode-pinned; PR #99)
+  //   5. TELEGRAM_ENABLED + SERVICES_OWNER (owner-pinned; NU-7)
   //   6. API_KEY (per-bot; security audit H-1) — last so neither a
   //      tenant secret nor a stale system value can win.
   // Steps 4 and 5 are mode-derived final overrides — they're set
@@ -344,7 +364,8 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
   // mode dictates: paper=8000, testnet=8001, mainnet=8002 — so a single
   // getBotApiUrl helper in lib/bot-api.ts works for everything).
   // TELEGRAM_ENABLED pins the single-Telegram-owner convention (only
-  // mainnet posts; see the comment on that key below).
+  // the services owner posts; see the comment on that key below).
+  const servicesOwner = isServicesOwner(params.mode, { isOperator: params.isOperator });
   const envMap: Record<string, string> = {
     TENANT_ID: params.tenantId,
     BOT_ID: params.botId,
@@ -352,38 +373,34 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     ...params.decryptedSecrets,
     ...(params.systemEnv ?? {}),
     API_PORT: String(API_PORT_BY_MODE[params.mode]),
-    // Mode-gate Telegram so only ONE bot per tenant posts notifications.
-    // The legacy compose model hardcoded `TELEGRAM_ENABLED=false` on
-    // bot-paper and bot-mainnet; only bot-testnet posted (and
-    // subscribed to all 3 modes' event channels for routing). After
-    // PR 4c retired the compose-bot model, every orchestrator-spawned
-    // bot inherited `Settings.telegram_enabled=True` (the bot config
-    // default) — so paper + testnet both fired notifiers and the
-    // operator saw EVERY trade.executed twice (once paper-tagged,
-    // once testnet-tagged).
+    // Exactly ONE bot per tenant owns the side services (roadmap NU-7,
+    // decision 5.12): for the operator the one whose mode is
+    // HYPERTRADE_SERVICES_OWNER_MODE (default paper), for any other
+    // tenant mainnet (`services-owner.ts`). It gets TELEGRAM_ENABLED —
+    // its notifier subscribes to all three modes' event channels, and two
+    // bots polling getUpdates with one token collide — and SERVICES_OWNER,
+    // which gates HODL, the vault scanner and the key reminders in the
+    // bot. Every other bot gets false for both.
     //
-    // 2026-05-13: ownership moved from testnet to mainnet. Corollary
-    // to PR #113, which moved the vault scanner to mainnet (vaults
-    // only exist on HL mainnet). Mainnet is now the single owner of
-    // both Telegram notifications and the vault scanner, so the
-    // operator sees the real-money side prefixed correctly instead
-    // of every notification tagged TESTNET.
-    //   - mainnet is the canonical Telegram owner (matches vault
-    //     scanner ownership; its notifier subscribes to
-    //     paper+testnet+mainnet event channels for cross-mode
-    //     routing).
-    //   - testnet is silenced (was the previous owner; would
-    //     otherwise double-emit during the overlap window — operator
-    //     must restart both bots after deploy).
-    //   - paper is silenced (would spam duplicates of every
-    //     trade.executed since all bots' notifiers receive the same
-    //     pubsub messages).
+    // History: after PR 4c retired the compose-bot model every bot
+    // inherited `telegram_enabled=True` and each trade.executed arrived
+    // once per mode, so PR #99 pinned the gate to one mode. That mode
+    // moved testnet → mainnet on 2026-05-13 to sit with the vault
+    // scanner, which meant stopping the real-money bot silenced
+    // everything; NU-7 made the owner configurable, paper by default.
+    //
     // Placed AFTER the `...systemEnv` spread (and AFTER
-    // `...decryptedSecrets`) so neither tenant-supplied
-    // TELEGRAM_ENABLED nor a stale orchestrator-system value can win
-    // over the mode-derived gate. Same pattern as API_PORT — the
-    // value is mode-pinned and not operator-overridable per-bot.
-    TELEGRAM_ENABLED: params.mode === "mainnet" ? "true" : "false",
+    // `...decryptedSecrets`) so neither a tenant-supplied value nor a
+    // stale orchestrator-system value can win over the owner gate. Same
+    // pattern as API_PORT.
+    TELEGRAM_ENABLED: servicesOwner ? "true" : "false",
+    SERVICES_OWNER: servicesOwner ? "true" : "false",
+    // The operator's Phase address wins over the tenant's Credentials
+    // slot on the owner (system over user, as everywhere here); the
+    // caller only passes it for the operator tenant.
+    ...(servicesOwner && params.vaultTrackingAddress
+      ? { VAULT_TRACKING_ADDRESS: params.vaultTrackingAddress }
+      : {}),
     // Per-bot API key (security audit H-1). Set last so neither a
     // tenant-supplied API_KEY (smuggled via secret CRUD) nor a stale
     // systemEnv value can override it.
@@ -416,7 +433,7 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
     image: IMAGE,
     env,
     networkName: NETWORK,
-    memoryBytes: memoryBytesForMode(params.mode),
+    memoryBytes: memoryBytesForMode(params.mode, servicesOwner),
     nanoCpus: DEFAULT_NANO_CPUS,
     logConfig: DEFAULT_LOG_CONFIG,
     restartPolicy: "unless-stopped",
@@ -424,6 +441,10 @@ export function buildSpec(params: BotStartParams): ContainerSpec {
       "hypertrade.tenant_id": params.tenantId,
       "hypertrade.bot_id": params.botId,
       "hypertrade.mode": params.mode,
+      // What this container was started as: a bot reads its env once, so
+      // after an owner change the running containers, not the configured
+      // mode, say who owns Telegram (`services-owner-check.ts`).
+      [SERVICES_OWNER_LABEL]: servicesOwner ? "true" : "false",
     },
   };
 }
