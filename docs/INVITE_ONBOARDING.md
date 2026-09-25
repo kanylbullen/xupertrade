@@ -100,6 +100,44 @@ dashboard.
    configured; with the group set it logs the group it requires
    instead. Check after a deploy:
    `docker logs hypertrade-dashboard-1 2>&1 | grep oidc-group-gate`.
+   That line only proves that *new* sign-ins are gated; step 4 covers
+   the tenants that already exist.
+4. **Once, right after step 3: audit the tenants created while the
+   gate was off.** The group is checked only when a tenant row is
+   created (`tenant.ts:autocreateTenant`). A user who already has a
+   row resolves to it with no group check, and a row created before
+   NU-8 has `max_active_bots` NULL, which is no cap
+   (`admin/limits.ts:reserveBotStart`). So anyone the IdP let in while
+   the gate was off (M-3, until NU-8) still has a working tenant with
+   unlimited bots. Those users are the ones the gate is meant to keep
+   out.
+
+   List every non-operator tenant with its running bots, as the
+   Postgres superuser
+   (`ssh -t root@$DEPLOY_HOST docker exec -it hypertrade-postgres-1 psql -U postgres -d hypertrade`):
+   ```sql
+   SELECT t.id, t.email, t.authentik_sub, t.created_at, t.is_active,
+          t.max_active_bots,
+          count(b.id) FILTER (WHERE b.is_running) AS running_bots
+     FROM tenants t
+     LEFT JOIN tenant_bots b ON b.tenant_id = t.id
+    WHERE NOT t.is_operator
+    GROUP BY t.id
+    ORDER BY t.created_at;
+   ```
+   Compare the rows with the members of `hypertrade-users` in
+   Authentik. `authentik_sub` is the user's OIDC `sub`, but `email` is
+   usually quicker to match. Then:
+   - **Not in the group:** disable the row. `/admin` shows `is_active`
+     but cannot change it, so use SQL:
+     `UPDATE tenants SET is_active = false WHERE id = '<uuid>';`.
+     This locks them out of the dashboard on their next request, but a
+     running bot keeps trading. Stop it as in "Removing a tenant"
+     step 1.
+   - **In the group:** set an explicit **Max active bots** in `/admin`
+     → the tenant → Limits (see "Inviting a new user", step 4). Leave
+     it blank only for a tenant you mean to leave uncapped, not by
+     accident.
 
 ### Inviting a new user
 
@@ -121,7 +159,8 @@ dashboard.
    Max active bots** — `1` for a normal single-bot tenant. Blank
    means no cap. Tenants that existed before NU-8 keep whatever they
    had (NULL = no cap, unless you set one); only rows created from
-   then on start at 0.
+   then on start at 0. The one-time audit in "One-time setup", step 4
+   handles the older rows.
 
 That's it on the operator side. The dashboard auto-creates their
 `tenants` row on first sign-in; the bot allowance is the operator's
@@ -322,8 +361,9 @@ Their bot is dead; their data stays. They can recreate via the dashboard if they
 so for repeat offenders also remove their account from the
 `hypertrade-users` Authentik group.
 
-**AVAILABLE NOW**: set `tenants.is_active = false` (SQL, or via
-`/admin`). The tenant resolver enforces it — the tenant is bounced to
+**AVAILABLE NOW**: set `tenants.is_active = false` (SQL only:
+`/admin` shows the flag but has no control for it). The tenant
+resolver enforces it — the tenant is bounced to
 `/login?error=tenant-disabled` on their next request and cannot create
 or start bots. Killing the container is still a separate step, since
 `is_active` gates the dashboard rather than reaching into a running
