@@ -144,6 +144,7 @@ _start_time = time.time()
 # NU-2: how often a standing reconcile hold is announced again.
 HOLD_REALERT_SECONDS = 1800.0
 _HOLD_SET = "reconcile hold is set"
+_FIRST_PASS = "first reconcile pass since the bot started"
 
 
 class EngineRunner:
@@ -230,11 +231,12 @@ class EngineRunner:
         # a subscriber has it, even after the sentinel is written.
         self._lost_state_alerted = False
         self._lost_state_alert: str | None = None
-        # A hold we decided on but could not write: enforced in memory,
-        # the write retried on every check.
-        self._hold_unwritten = False
+        self._lost_state_at = ""
         # Monotonic time of the last hold alert; None when nothing is held.
         self._hold_alert_at: float | None = None
+        # Pass 2 holds every orphan until one readable, unpaused pass ran:
+        # a restore, a key change or an emptied DB shows up there first.
+        self._orphans_checked = False
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -564,26 +566,30 @@ class EngineRunner:
 
         hold = await self._check_control_state()
         traded = {s.symbol for s in self.strategies}
+        first = None if self._orphans_checked else _FIRST_PASS
         result = await self.repo.reconcile_positions(
             self.exchange,
             close_exchange_orphans=not paused,
             on_strategy_close=self._on_reconcile_close,
             dry_run=paused,
-            hold_orphans=hold,
+            hold_orphans=hold or first,
             traded_symbols=traded,
         )
-        if hold is None and traded.intersection(result.held_orphans):
-            # Several orphans, one on a coin we trade. The hold makes that
-            # stick until a human clears it (roadmap: the alarm must be
-            # acknowledged by hand) — otherwise a count that drops to one,
-            # say after a human closed one of them, releases the survivor
-            # to a market close — and it blocks opens that would net into
-            # them.
+        if not (paused or result.skipped) and hold in (None, _HOLD_SET):
+            self._orphans_checked = True
+        held = sorted(traded.intersection(result.held_orphans)) if hold is None else []
+        if held:
+            # Held on a coin we trade: several at once, or the first pass.
+            # The hold makes that stick until a human clears it (roadmap:
+            # the alarm must be acknowledged by hand) — otherwise a count
+            # that drops to one, or the next pass, releases it to a market
+            # close — and blocks opens that would net into them.
             await self._write_hold()
             hold = self.portfolio.opens_held = _HOLD_SET
+            self._last_reconcile_notice = None  # a re-set hold is news
             result.failures.append(
-                "Reconcile hold SET: several exchange positions without a "
-                "DB row — this bot opens nothing and closes none of them "
+                f"Reconcile hold SET: {', '.join(held)} on the exchange with "
+                "no DB row — this bot opens nothing and closes none of them "
                 f"until a human clears the hold. {self._clear_hold_how()}"
             )
 
@@ -627,8 +633,19 @@ class EngineRunner:
         holds — and never raises, so exits keep running.
         """
         why = await self._read_control_state()
+        was_held = self.portfolio.opens_held
         # Without BotControl there is no hold to honour (not production).
         self.portfolio.opens_held = why if self.control is not None else None
+        if was_held and self.portfolio.opens_held is None:
+            # Just cleared: reconcile runs first in this tick, before any
+            # strategy can open into a held orphan.
+            self._last_reconcile = 0.0
+        if why is None and self._lost_state_alert is not None:
+            # Cleared before anyone got the alert: the hold it names is gone.
+            self._lost_state_alert = (
+                f"Redis control state was lost at {self._lost_state_at}; "
+                "the reconcile hold has since been cleared by hand."
+            )
         if self._lost_state_alert is not None and await self._publish_error(
             "restore-guard", self._lost_state_alert,
         ):
@@ -643,7 +660,8 @@ class EngineRunner:
             if not await self.control.sentinel_present():
                 await self._secure_lost_control_state()
                 return _HOLD_SET
-            if self._hold_unwritten and not await self._write_hold():
+            self._lost_state_alerted = False  # back, if a human clear wrote it
+            if self.control.hold_unwritten and not await self._write_hold():
                 return _HOLD_SET
             held = await self.control.is_reconcile_hold_active()
         except Exception:
@@ -656,15 +674,13 @@ class EngineRunner:
         return _HOLD_SET if held else None
 
     async def _write_hold(self) -> bool:
-        """Set this bot's reconcile hold. A failed write is remembered, so
-        the hold holds in memory and the write is retried on every check."""
+        """Set this bot's reconcile hold. A failed write stays in
+        `control.hold_unwritten`: held in memory, retried on every check."""
         try:
             await self.control.set_reconcile_hold(True)
         except Exception:
             logger.exception("Restore guard: writing the reconcile hold failed")
-            self._hold_unwritten = True
             return False
-        self._hold_unwritten = False
         return True
 
     async def _secure_lost_control_state(self) -> None:
@@ -680,6 +696,7 @@ class EngineRunner:
         landed = await self._write_hold()
         if not self._lost_state_alerted:
             self._lost_state_alerted = True
+            self._lost_state_at = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
             mainnet = (
                 " On mainnet the tenant's strategy opt-in set lived in this "
                 "Redis too, so no strategy runs, exits included, until it "
@@ -690,8 +707,9 @@ class EngineRunner:
                 "write retried every tick."
             )
             self._lost_state_alert = (
-                "Redis control state was lost (sentinel missing: Redis "
-                "flushed or recreated, or this build's first boot). "
+                f"Redis control state was lost at {self._lost_state_at} "
+                "(sentinel missing: Redis flushed or recreated, or this "
+                "build's first boot). "
                 "Reconcile hold ON for this bot: it opens nothing and "
                 "market-closes no exchange position without a DB row. "
                 "Exits keep running; the bot is NOT paused. If Redis was "
@@ -712,12 +730,14 @@ class EngineRunner:
 
     def _clear_hold_how(self) -> str:
         return (
-            "Check the book against the exchange and deal with every "
-            "exchange position without a DB row first: once the hold is "
-            "cleared this bot opens again, and the next reconcile pass "
-            "market-closes a lone one on a coin it trades. Clear it with "
-            'POST /api/control/reconcile-hold {"active": false} (bot API '
-            f"key) or redis-cli DEL {self.control.reconcile_hold_key}"
+            "Check the book against the exchange first. Once the hold is "
+            "cleared, a reconcile pass runs before any open: it "
+            "market-closes a lone exchange position without a DB row on a "
+            "coin this bot trades, sets the hold again while several "
+            "remain, and leaves ones on coins it does not trade alone. "
+            'Clear it with POST /api/control/reconcile-hold {"active": '
+            "false} (bot API key) or redis-cli DEL "
+            f"{self.control.reconcile_hold_key}"
         )
 
     async def _open_positions_text(self) -> str:
@@ -739,7 +759,10 @@ class EngineRunner:
         notice that named the held positions counts as an announcement."""
         now = time.monotonic()
         hold_set = hold == _HOLD_SET
-        if not hold_set and not result.held_orphans:
+        if not hold_set and (hold is None or not result.held_orphans):
+            # Nothing held, or only coins nobody here trades (nothing can
+            # net into those): their notice, deduplicated until a size or
+            # side changes, is the one announcement.
             self._hold_alert_at = None
             return
         if announced:
@@ -1528,36 +1551,43 @@ class EngineRunner:
         # refusing it would trap a losing position past MAX_DAILY_LOSS_USD
         # until UTC midnight.
         if not await self.portfolio.check_risk_limits(is_open=is_open):
+            # This bot's reconcile hold (NU-2) says so, not "risk limit";
+            # the hold is announced on its own, so a plain open refused by
+            # it is only logged.
+            held = is_open and self.portfolio.opens_held
+            category = "reconcile hold" if held else "risk limit"
+            head = f"Reconcile hold ({held})" if held else "Risk limit breached"
             if existing is None:
                 if is_open:
                     await self._flat_after_refused_open(
-                        signal, "risk limit", bar_time,
-                        f"Risk limit breached — execution of "
+                        signal, category, bar_time,
+                        f"{head} — execution of "
                         f"{signal.action.value} {signal.symbol} blocked",
-                        publish=True,
+                        publish=not held,
                     )
                 else:
                     await self._note_refusal(
-                        signal, "risk limit", bar_time,
-                        f"Risk limit breached — execution of "
+                        signal, category, bar_time,
+                        f"{head} — execution of "
                         f"{signal.action.value} {signal.symbol} blocked",
                         publish=True,
                     )
                 return False
             if await self._flip_close(
                 signal, existing, current_price, leverage, bar_time,
-                why="(the open half is refused by a risk limit)",
+                why=f"(the open half is refused by {category})",
             ):
                 await self._reset_strategy_state(
                     signal.strategy_name,
-                    why="a flip closed its position but a risk limit "
+                    why=f"a flip closed its position but {category} "
                         "refused the open",
                 )
                 await self._note_refusal(
-                    signal, "risk limit", bar_time,
-                    f"Risk limit breached — closed the {existing.side} "
+                    signal, category, bar_time,
+                    f"{head} — closed the {existing.side} "
                     f"{signal.symbol} half of a flip but blocked "
-                    f"{signal.action.value}; flat, strategy reset to flat",
+                    f"{signal.action.value}; flat, strategy reset to flat"
+                    + (f". {self._clear_hold_how()}" if held else ""),
                     publish=True,
                 )
             return False
@@ -1704,6 +1734,15 @@ class EngineRunner:
                 signal.strategy_name, signal.action.value, signal.symbol,
                 order.size, size,
             )
+        # A close that filled short by more than szDecimals rounding keeps
+        # its row open for the rest, so the strategy's next exit closes it
+        # — nothing is left on the exchange without a row for reconcile
+        # (and a reconcile hold) to strand.
+        remaining = 0.0 if is_open else size - order.size
+        if remaining > 0 and remaining <= 10 ** -self.exchange.get_size_precision(
+            signal.symbol,
+        ):
+            remaining = 0.0
         size = order.size
 
         filled_price = order.filled_price or 0
@@ -1827,8 +1866,17 @@ class EngineRunner:
                         fee=fee,
                         pnl=close_pnl or 0,
                         reason=signal.reason,
+                        remaining=remaining,
                     )
                     await self.portfolio.record_pnl(close_pnl or 0)
+                    if remaining and open_pos is not None:
+                        logger.warning(
+                            "[%s] %s %s filled short: %s of it stays open "
+                            "on its row; the strategy is re-synced to it",
+                            signal.strategy_name, signal.action.value,
+                            signal.symbol, remaining,
+                        )
+                        self._resync_strategy_to_row(open_pos)
             except Exception as db_exc:
                 # The order is already on the exchange. We failed to
                 # record it. STOP TRADING so we don't open more
@@ -1917,7 +1965,8 @@ class EngineRunner:
                 signal.action.value, signal.symbol,
             )
 
-        return parity_ok
+        # A short-filled close did not finish: a flip must not open on it.
+        return parity_ok and not remaining
 
     async def _open_refusal(
         self,

@@ -471,13 +471,24 @@ def _control_routes(
                 {"error": "field 'active' must be a JSON boolean (true/false)"},
                 status=400,
             )
-        await control.set_reconcile_hold(active)
+        try:
+            await control.set_reconcile_hold(active)
+        except Exception as exc:
+            return _redis_error(exc)
         return _cors({"reconcile_hold": active})
 
     async def reconcile_hold_get(request: web.Request) -> web.Response:
+        """The hold as the bot enforces it, a failed write included."""
         if (err := _require_auth(request)) is not None:
             return err
-        return _cors({"reconcile_hold": await control.is_reconcile_hold_active()})
+        try:
+            return _cors({"reconcile_hold": await control.is_reconcile_hold_active()})
+        except Exception as exc:
+            return _redis_error(exc)
+
+    def _redis_error(exc: Exception) -> web.Response:
+        logger.warning("reconcile-hold: Redis error", exc_info=True)
+        return _cors({"error": f"Redis error: {type(exc).__name__}"}, status=503)
 
     async def toggle_strategy(request: web.Request) -> web.Response:
         if (err := _require_auth(request)) is not None:

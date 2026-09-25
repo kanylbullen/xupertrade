@@ -39,6 +39,8 @@ def _runner(filled_size, *, open_row=None):
     exchange = MagicMock()
     exchange.update_leverage = AsyncMock(return_value=True)
     exchange.get_position = AsyncMock(return_value=None)
+    # BTC: the request and the fill differ by rounding, not a short fill.
+    exchange.get_size_precision = MagicMock(return_value=5)
 
     async def _place(symbol, side, size, order_type=OrderType.MARKET):
         return Order(

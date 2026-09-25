@@ -113,7 +113,7 @@ class _OrphanClosePrice:
 
 def _orphan_hold_reason(
     symbol: str,
-    orphan_count: int,
+    traded_count: int,
     hold_orphans: str | None,
     traded_symbols: set[str] | frozenset[str],
 ) -> str | None:
@@ -121,13 +121,15 @@ def _orphan_hold_reason(
     (roadmap NU-2 guard 2). A lone orphan is usually a leftover of our
     own; several at once, or one on a coin no strategy here trades, look
     like a restored DB or a human's position, and closing those is the
-    liquidation the guard exists to stop."""
+    liquidation the guard exists to stop. Only orphans on traded coins
+    count as several: a human's position elsewhere must not escalate a
+    leftover of ours."""
     if hold_orphans:
         return hold_orphans
-    if orphan_count > 1:
-        return f"{orphan_count} exchange orphans in one pass"
     if symbol not in traded_symbols:
         return "no strategy in this bot trades this coin"
+    if traded_count > 1:
+        return f"{traded_count} exchange orphans on traded coins in one pass"
     return None
 
 
@@ -331,8 +333,12 @@ class Repository:
         fee: float = 0.0,
         pnl: float = 0.0,
         reason: str = "",
+        remaining: float = 0.0,
     ) -> Trade:
         """Insert Trade + UPDATE matching open PositionRecord atomically.
+
+        `remaining` > 0 is a close that filled short: the row stays open
+        with that size, so the strategy's next exit closes the rest.
 
         Mirror of record_trade_and_open_position for the close path
         (audit M8). Without atomicity, a crash between recording the
@@ -372,7 +378,9 @@ class Repository:
                     mode=self._mode,
                 )
                 session.add(trade)
-                if pos is not None:
+                if pos is not None and remaining > 0:
+                    pos.size = remaining
+                elif pos is not None:
                     pos.is_open = False
                     pos.exit_price = price
                     pos.pnl = pnl
@@ -1083,9 +1091,21 @@ class Repository:
                 (sym, p) for sym, p in ex_by_symbol.items()
                 if sym not in db_symbols and p.size >= 1e-6
             ]
+            n_traded = sum(sym in traded_symbols for sym, _ in orphans)
+            reasons = {
+                sym: _orphan_hold_reason(sym, n_traded, hold_orphans, traded_symbols)
+                for sym, _ in orphans
+            }
+            # A close rests on one read that can miss a position; closing
+            # needs a second read with the same orphans (NU-2). Without it
+            # the close waits for the next pass — deferred, not held, so a
+            # read blip does not set the hold.
+            confirmed = None not in reasons.values() or await self._same_orphans(
+                exchange, db_symbols, set(reasons), confirm_delay_seconds,
+            )
             for sym, ex_pos in orphans:
-                why = _orphan_hold_reason(
-                    sym, len(orphans), hold_orphans, traded_symbols,
+                why = reasons[sym] or (
+                    None if confirmed else "a re-read did not confirm the orphans"
                 )
                 if why:
                     msg = (
@@ -1093,7 +1113,8 @@ class Repository:
                         f"{sym} — not closed: {why}"
                     )
                     result.failures.append(msg)
-                    result.held_orphans.append(sym)
+                    if reasons[sym]:
+                        result.held_orphans.append(sym)
                     logger.warning("Reconcile: %s", msg)
                     continue
                 close_side = "buy" if ex_pos.side == "short" else "sell"
@@ -1179,6 +1200,19 @@ class Repository:
                 result.db_open, result.exchange_open,
             )
         return result
+
+    @staticmethod
+    async def _same_orphans(exchange, db_symbols, orphans, delay) -> bool:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            again = await exchange.get_positions()
+        except Exception:
+            logger.warning("Reconcile: orphan re-read failed", exc_info=True)
+            return False
+        return orphans == {
+            p.symbol for p in again if p.symbol not in db_symbols and p.size >= 1e-6
+        }
 
     async def _insert_reconcile_trade(
         self,

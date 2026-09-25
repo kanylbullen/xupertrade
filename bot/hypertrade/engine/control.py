@@ -55,6 +55,9 @@ class BotControl:
         self._key_kill_switch = _key(self._mode, "kill_switch")
         self._key_sentinel = _key(self._mode, "sentinel", settings.tenant_id)
         self.reconcile_hold_key = _key(self._mode, "reconcile_hold", settings.tenant_id)
+        # A hold whose write failed: the runner enforces and retries it,
+        # GET reports it and a human clear ends it.
+        self.hold_unwritten = False
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -261,19 +264,27 @@ class BotControl:
         await self._redis.set(self._key_sentinel, str(int(time.time())))
 
     async def is_reconcile_hold_active(self) -> bool:
-        """Any value counts as held; only deleting the key clears it. No
-        Redis client means the hold cannot be read, so it counts as held."""
-        if self._redis is None:
+        """Any value counts as held; only deleting the key clears it. A
+        hold whose write failed counts, and so does no Redis client (the
+        hold cannot be read)."""
+        if self.hold_unwritten or self._redis is None:
             return True
         return await self._redis.get(self.reconcile_hold_key) is not None
 
     async def set_reconcile_hold(self, active: bool) -> None:
-        if self._redis is None:
-            return
+        """A set holds in memory until its write lands. A clear writes the
+        sentinel too — a human clear acknowledges a lost state, so a hold
+        whose write never landed cannot come straight back."""
         if active:
-            await self._redis.set(self.reconcile_hold_key, str(int(time.time())))
-        else:
-            await self._redis.delete(self.reconcile_hold_key)
+            self.hold_unwritten = True
+        if self._redis is not None:
+            now = str(int(time.time()))
+            if active:
+                await self._redis.set(self.reconcile_hold_key, now)
+            else:
+                await self._redis.set(self._key_sentinel, now)
+                await self._redis.delete(self.reconcile_hold_key)
+        self.hold_unwritten = False
         logger.warning("Reconcile hold %s", "SET" if active else "cleared")
 
     async def beat_heartbeat(self) -> None:

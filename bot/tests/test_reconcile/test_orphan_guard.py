@@ -22,11 +22,20 @@ CLOSEABLE = {"traded_symbols": {"ETH", "SOL"}}
 
 
 class FakeExchange:
-    def __init__(self, positions):
+    """`reads` scripts the answers of successive `get_positions()` calls
+    (a list of positions or an exception); `positions` answers after."""
+
+    def __init__(self, positions, reads=()):
         self.positions = list(positions)
+        self.reads = list(reads)
         self.orders: list[tuple] = []
 
     async def get_positions(self):
+        if self.reads:
+            answer = self.reads.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return list(answer)
         return list(self.positions)
 
     async def fetch_user_fills(self, address=None, since_ms=None):
@@ -140,3 +149,29 @@ async def test_held_orphan_writes_no_row(repo):
     await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
     assert await _trades(repo) == []
     assert await repo.get_open_positions() == []
+
+
+async def test_an_untraded_orphan_does_not_make_a_traded_one_several(repo):
+    """A human's position on a coin nobody here trades must not escalate
+    a leftover of ours: the ETH is closed, the DOGE held."""
+    doge = Position(symbol="DOGE", side="long", size=100.0, entry_price=0.1)
+    ex = FakeExchange([doge, ETH])
+    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
+    assert ex.orders == [("ETH", "sell", 2.0)]
+    assert result.held_orphans == ["DOGE"]
+
+
+@pytest.mark.parametrize("second", [[ETH, SOL], ConnectionError("502")])
+async def test_a_close_needs_a_re_read_with_the_same_orphans(repo, second):
+    """One read can miss a position: ETH and SOL on the book, the first
+    read shows only ETH. The re-read before the close sees SOL too (or
+    fails), so nothing is closed this pass."""
+    ex = FakeExchange([ETH, SOL], reads=[[ETH], second])
+    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
+    assert ex.orders == []
+    assert "re-read did not confirm" in _held(result, "ETH")[0]
+    assert result.held_orphans == []  # deferred: a read blip sets no hold
+
+    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
+    assert ex.orders == []  # the next pass sees both
+    assert sorted(result.held_orphans) == ["ETH", "SOL"]

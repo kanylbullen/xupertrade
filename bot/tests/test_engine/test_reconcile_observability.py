@@ -39,6 +39,10 @@ def _runner(*, result=None, paused=False, pause_raises=False):
         control.is_paused = AsyncMock(side_effect=RuntimeError("redis down"))
     else:
         control.is_paused = AsyncMock(return_value=paused)
+    # A healthy NU-2 control state: sentinel present, no reconcile hold.
+    control.sentinel_present = AsyncMock(return_value=True)
+    control.is_reconcile_hold_active = AsyncMock(return_value=False)
+    control.hold_unwritten = False
     event_bus = MagicMock()
     event_bus.publish = AsyncMock()
     runner = EngineRunner(
@@ -47,6 +51,8 @@ def _runner(*, result=None, paused=False, pause_raises=False):
     )
     runner.portfolio = MagicMock()
     runner.portfolio.record_pnl = AsyncMock()
+    runner.portfolio.opens_held = None
+    runner._orphans_checked = True  # a bot past its first pass
     return runner, repo, event_bus
 
 
@@ -75,6 +81,26 @@ async def test_running_bot_still_closes_exchange_orphans():
     kwargs = repo.reconcile_positions.await_args.kwargs
     assert kwargs["dry_run"] is False
     assert kwargs["close_exchange_orphans"] is True
+    assert kwargs["hold_orphans"] is None  # nothing holds pass 2
+
+
+@pytest.mark.asyncio
+async def test_first_pass_and_an_unreadable_control_state_hold_pass_two():
+    """NU-2: the first pass after boot holds every orphan, and so does a
+    control state that cannot be read."""
+    runner, repo, _ = _runner(paused=False)
+    runner._orphans_checked = False
+    await runner._run_reconcile("Startup")
+    assert "first reconcile pass" in repo.reconcile_positions.await_args.kwargs[
+        "hold_orphans"
+    ]
+    assert runner._orphans_checked is True
+
+    runner.control.sentinel_present = AsyncMock(side_effect=ConnectionError("x"))
+    await runner._run_reconcile("Periodic")
+    assert repo.reconcile_positions.await_args.kwargs["hold_orphans"] == (
+        "Redis control state unreadable"
+    )
 
 
 @pytest.mark.asyncio
