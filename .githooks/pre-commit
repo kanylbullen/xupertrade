@@ -164,6 +164,17 @@ soft_warn_pcre "operator-specific service subdomain (auth/phase/secrets/console.
 block_pcre "absolute /home/<user>/ path (use ~/path or relative)" \
     '(?<![a-zA-Z0-9])/home/[a-z][a-z0-9_-]{1,30}/'
 
+# === Monitoring credentials ===
+# healthchecks.io ping URLs come from Phase or env, never from the repo
+# (roadmap NU-3); docs use the placeholder hc-ping.com/<uuid>. Kept in
+# sync with .gitleaks.toml, so update both together.
+
+# Whoever holds a ping URL can report the check up (hiding an outage) or
+# down. Covers /<uuid> and /<ping-key>/<slug>, on hc-ping.com and on a
+# self-hosted instance's /ping/ path.
+block_pcre "healthchecks.io ping URL" \
+    '(hc-ping\.com|/ping)/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b|[A-Za-z0-9_-]{22}/)'
+
 if [[ $violations -gt 0 ]]; then
     echo "Blocked $violations secret pattern(s) — refusing commit."
     echo

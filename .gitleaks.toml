@@ -74,6 +74,15 @@ id = "absolute-home-path"
 description = "Absolute /home/<user>/ path reveals operator OS username"
 regex = '''\b/home/[a-z][a-z0-9_-]{1,30}/'''
 
+# --- Monitoring credentials ---
+# Mirrors the healthchecks block_pcre rule in .githooks/pre-commit.
+
+[[rules]]
+id = "healthchecks-ping-url"
+description = "healthchecks.io ping URL (anyone holding it can report the check up or down)"
+regex = '''(?:hc-ping\.com|/ping)/(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b|[A-Za-z0-9_-]{22}/)'''
+keywords = ["hc-ping", "/ping/"]
+
 # --- Allowlist (false positives) ---
 
 [allowlist]

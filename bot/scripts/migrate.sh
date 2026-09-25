@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Run Alembic migrations against the live database.
-# Usage (from the bot/ directory):
-#   DATABASE_URL=postgresql+asyncpg://... uv run alembic upgrade head
+# Run Alembic migrations against the database in DATABASE_URL.
+# Usage, from a checkout with the bot's dependencies installed (the script
+# cds into bot/ itself):
+#   DATABASE_URL=postgresql+asyncpg://... bot/scripts/migrate.sh
 #
-# Or via docker compose:
-#   docker compose run --rm bot-testnet sh /app/scripts/migrate.sh
+# On the host there is no bot service in docker-compose.yml any more, and
+# scripts/ is not copied into the image, so run alembic from the bot image
+# on the compose network instead (phase run supplies POSTGRES_PASSWORD).
+# `-e DATABASE_URL` without a value makes docker read it from its own
+# environment, so the password never appears in the docker CLI's argv:
+#   phase run -- bash -c 'DATABASE_URL="postgresql+asyncpg://postgres:$POSTGRES_PASSWORD@postgres:5432/hypertrade" \
+#     docker run --rm --network hypertrade_default -e DATABASE_URL \
+#     --entrypoint /app/.venv/bin/alembic xupertrade-bot:latest upgrade head'
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
