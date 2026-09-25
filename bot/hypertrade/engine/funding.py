@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+
+from hypertrade.db.models import FundingPayment
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,12 @@ _MS = timedelta(milliseconds=1)
 
 # fetch(start_ms, end_ms) → one page of raw `userFunding` records.
 FetchFunding = Callable[[int, int | None], Awaitable[list[dict]]]
+
+# A page goes in as one INSERT, so one row the DB refuses fails the page,
+# and the poll resumes from the newest stored row: it would refail there
+# forever. parse_event must reject what the columns cannot hold.
+_COIN_LEN = FundingPayment.__table__.c.coin.type.length
+_HASH_LEN = FundingPayment.__table__.c.hash.type.length
 
 
 def as_utc(value: datetime) -> datetime:
@@ -65,29 +74,37 @@ class FundingEvent:
 
 
 def _opt_float(value: object) -> float | None:
-    return None if value is None else float(value)
+    if value is None:
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
 
 
 def parse_event(record: object) -> FundingEvent | None:
     """One `userFunding` record, or None when it is not a funding event
-    that can be stored (no coin, no time, a non-numeric amount)."""
+    that can be stored (no coin or one too long for its column, no time
+    or one out of range, an amount that is not a finite number)."""
     try:
         delta = record.get("delta") or {}
         if delta.get("type", "funding") != "funding":
             return None
         coin = str(delta.get("coin") or "")
         ts_ms = int(record["time"])
+        usdc = float(delta["usdc"])
+        # The hash is not the key: one that does not fit is dropped
+        # like a missing one, not the payment with it.
+        h = str(record.get("hash") or "")
         event = FundingEvent(
             ts=from_ms(ts_ms),
             coin=coin,
-            usdc=float(delta["usdc"]),
+            usdc=usdc,
             szi=_opt_float(delta.get("szi")),
             funding_rate=_opt_float(delta.get("fundingRate")),
-            hash=str(record.get("hash") or ""),
+            hash=h if len(h) <= _HASH_LEN else "",
         )
-    except (AttributeError, KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
         return None
-    if not coin or ts_ms <= 0:
+    if not coin or len(coin) > _COIN_LEN or ts_ms <= 0 or not math.isfinite(usdc):
         return None
     return event
 
@@ -144,15 +161,22 @@ async def _ingest_page(
     """Store (or count) one page; returns its newest event time in ms."""
     events: list[FundingEvent] = []
     newest_ms = 0
+    unreadable: list = []
     for record in page:
         event = parse_event(record)
         if event is None:
-            result.skipped += 1
+            unreadable.append(record)
             continue
         newest_ms = max(newest_ms, event.key[1])
         if event.key not in seen:  # else: re-read at the page boundary
             seen.add(event.key)
             events.append(event)
+    if unreadable:
+        result.skipped += len(unreadable)
+        logger.warning(
+            "Funding: skipped %d record(s) that cannot be stored, first: %.300r",
+            len(unreadable), unreadable[0],
+        )
     if not events:
         return newest_ms
 
@@ -208,12 +232,16 @@ async def ingest_funding(
     apply: bool = True,
     max_pages: int | None = None,
     page_pause: float = 0.0,
+    result: IngestResult | None = None,
 ) -> IngestResult:
     """Read funding events from `start_ms` (to `end_ms`, or now) and
     store the ones `repo` lacks — or, with `apply=False`, only count
     them. Pages forward while HL answers full pages, up to `max_pages`,
-    sleeping `page_pause` seconds between requests."""
-    result = IngestResult()
+    sleeping `page_pause` seconds between requests. A failed fetch or
+    insert raises; each page is committed on its own, so the pages
+    before it stay. `result`, if given, is filled in place, so a caller
+    still has their count when this raises."""
+    result = IngestResult() if result is None else result
     seen: set[tuple[str, int]] = set()
     cursor = start_ms
     while True:

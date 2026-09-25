@@ -250,7 +250,8 @@ async def test_the_repository_dedupes_with_on_conflict_on_postgres(scratch_db):
     async def fetch(start_ms, end_ms):
         return page
 
-    repo = Repository(scratch_db, tenant_id=str(TENANT), mode="testnet")
+    repo = Repository(scratch_db, tenant_id=str(TENANT))
+    repo._mode, repo._is_paper = "testnet", False
     try:
         first = await funding.ingest_funding(repo, fetch, t0_ms)
         again = await funding.ingest_funding(repo, fetch, t0_ms)
@@ -261,6 +262,41 @@ async def test_the_repository_dedupes_with_on_conflict_on_postgres(scratch_db):
 
     assert (first.new, again.new, dry.new) == (2, 0, 0)
     assert latest == T0 + timedelta(hours=1)
+
+
+@needs_pg
+async def test_a_coin_postgres_would_refuse_does_not_fail_its_page(scratch_db):
+    """A page is one INSERT: one coin longer than String(16) failed all
+    of it (StringDataRightTruncation), and the poll, resuming from the
+    newest stored row, refailed on that page every 30 minutes."""
+    from hypertrade.db.repo import Repository
+    from hypertrade.engine import funding
+
+    _migrate(scratch_db, "head")
+    conn = await _connect(scratch_db)
+    try:
+        await _add_tenant(conn)
+    finally:
+        await conn.close()
+
+    t0_ms = funding.to_ms(T0)
+    page = [
+        {"time": t0_ms + hours * 3_600_000, "hash": ZERO_HASH,
+         "delta": {"type": "funding", "coin": coin, "usdc": "-0.5"}}
+        for hours, coin in ((0, "BTC"), (0, "abcdefghijklmnopq"), (1, "BTC"))
+    ]
+
+    async def fetch(start_ms, end_ms):
+        return page
+
+    repo = Repository(scratch_db, tenant_id=str(TENANT))
+    repo._mode, repo._is_paper = "testnet", False
+    try:
+        result = await funding.ingest_funding(repo, fetch, t0_ms)
+    finally:
+        await repo.close()
+
+    assert (result.new, result.skipped) == (2, 1)
 
 
 @needs_pg

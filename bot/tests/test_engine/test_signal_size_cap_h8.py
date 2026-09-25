@@ -24,7 +24,6 @@ def _runner():
     repo = MagicMock()
     repo.get_open_positions = AsyncMock(return_value=[])
     repo.get_open_position = AsyncMock(return_value=None)
-    repo.get_open_position_any = AsyncMock(return_value=None)
 
     portfolio = MagicMock()
     portfolio.check_risk_limits = AsyncMock(return_value=True)

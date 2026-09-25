@@ -35,9 +35,6 @@ def _runner_with(exchange_pos, db_pos):
     else:
         db_recs = [db_pos]
     repo = MagicMock()
-    repo.get_open_position_any = AsyncMock(
-        return_value=db_recs[0] if db_recs else None
-    )
     repo.get_open_positions_for_symbol = AsyncMock(return_value=db_recs)
     repo.record_trade_and_close_position = AsyncMock()
     repo.record_trade = AsyncMock()

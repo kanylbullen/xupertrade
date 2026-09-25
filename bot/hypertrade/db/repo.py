@@ -157,14 +157,12 @@ class Repository:
         self,
         database_url: str | None = None,
         tenant_id: str | None = None,
-        mode: str | None = None,
     ) -> None:
         url = database_url or settings.database_url
         self._engine = create_async_engine(url, echo=False)
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
-        # `mode`: for a CLI (funding_backfill); the bot uses EXCHANGE_MODE.
-        self._mode = mode or settings.exchange_mode
-        self._is_paper = self._mode == "paper"
+        self._mode = settings.exchange_mode
+        self._is_paper = settings.is_paper
         # Multi-tenancy Phase 3b: when set, every hot-path INSERT this
         # Repository writes carries this tenant_id (Trade, PositionRecord,
         # EquitySnapshot, FundingPayment). When None, falls back to
@@ -454,27 +452,6 @@ class Repository:
             if pos:
                 pos.pnl = pnl
                 await session.commit()
-
-    async def get_open_position_any(self, symbol: str) -> PositionRecord | None:
-        """The OLDEST open row on `symbol`, any strategy.
-
-        `ORDER BY opened_at, id` makes "which row" deterministic when
-        several strategies hold the coin (`allow_multi_coin=True`); a bare
-        `LIMIT 1` let Postgres return any of them. Callers that must see
-        every holder (the engine's open gates) read all rows instead.
-        """
-        async with self._session_factory() as session:
-            result = await session.execute(
-                select(PositionRecord)
-                .where(
-                    PositionRecord.symbol == symbol,
-                    PositionRecord.mode == self._mode,
-                    PositionRecord.is_open == True,
-                )
-                .order_by(PositionRecord.opened_at, PositionRecord.id)
-                .limit(1)
-            )
-            return result.scalar_one_or_none()
 
     async def get_open_positions_for_symbol(
         self, symbol: str,

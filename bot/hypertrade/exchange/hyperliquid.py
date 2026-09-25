@@ -1005,10 +1005,14 @@ class HyperLiquidExchange(Exchange):
         )
 
     async def get_user_funding_history(
-        self, start_time_ms: int, end_time_ms: int | None = None
+        self, start_time_ms: int, end_time_ms: int | None = None,
+        *, strict: bool = False,
     ) -> list[dict]:
         """Fetch funding payments since start_time_ms (epoch ms) for the
-        trading account. Returns the raw HL list of funding events."""
+        trading account. Returns the raw HL list of funding events, or []
+        once the read retry gives up — the poll stops and the next one
+        resumes. `strict` raises instead: a backfill that stopped early
+        must not look finished."""
         try:
             return await self._run_with_retry(
                 self._info.user_funding_history,
@@ -1018,6 +1022,8 @@ class HyperLiquidExchange(Exchange):
                 validate=_check_list,
             ) or []
         except Exception:
+            if strict:
+                raise
             logger.exception("Failed to fetch user funding history")
             return []
 

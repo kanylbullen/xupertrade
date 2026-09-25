@@ -111,7 +111,8 @@ class Exchange(ABC):
         return True
 
     async def get_user_funding_history(
-        self, start_time_ms: int, end_time_ms: int | None = None
+        self, start_time_ms: int, end_time_ms: int | None = None,
+        *, strict: bool = False,
     ) -> list[dict]:
         """Fetch funding events. Default no-op for paper / non-perpetual."""
         return []

@@ -649,6 +649,24 @@ async def test_html_200_on_list_reads_returns_empty_not_a_dict(
     assert hl_http.count(kind) == 3
 
 
+async def test_strict_funding_read_raises_instead_of_answering_empty(
+    hl_http, build_exchange, no_sleep,
+):
+    """The funding backfill's read (NU-6.1): [] would look like the end
+    of the history. Same retry policy as every read: three tries for a
+    transient answer, one for a 4xx."""
+    exchange = build_exchange()
+    hl_http.route("userFunding", (200, HTML_PAGE))
+    with pytest.raises(ConnectionError):
+        await exchange.get_user_funding_history(1, strict=True)
+    assert hl_http.count("userFunding") == 3
+
+    hl_http.route("userFunding", (422, {"code": 422, "msg": "bad user"}))
+    with pytest.raises(ClientError):
+        await exchange.get_user_funding_history(1, strict=True)
+    assert hl_http.count("userFunding") == 4
+
+
 # --- 8. Order POST with an unknown outcome gets the delayed-fill poll -------
 
 

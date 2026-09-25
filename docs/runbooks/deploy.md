@@ -113,9 +113,23 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && echo \"HEAD: \$(git rev-parse HEAD)\" && \
    docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
+
+# 3. Migrate the database with that image, before any bot Start. Nothing
+#    else runs alembic: a bot on code whose migration is missing fails the
+#    statements that need it, and only its log says so (0017: the funding
+#    poll's ON CONFLICT). A no-op when nothing is pending. Bots still on
+#    the old image run on the new schema; a migration that breaks that
+#    says so in its PR. `current` must then end in `(head)`.
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && phase run -- bash -c ' \
+   export DATABASE_URL=\"postgresql+asyncpg://postgres:\$POSTGRES_PASSWORD@postgres:5432/hypertrade\"; \
+   for cmd in \"upgrade head\" current; do \
+     docker run --rm --network hypertrade_default -e DATABASE_URL \
+       --entrypoint /app/.venv/bin/alembic xupertrade-bot:latest \$cmd || exit 1; \
+   done'"
 ```
 
-3. **Stop, then Start each running bot**, mainnet included. A running
+4. **Stop, then Start each running bot**, mainnet included. A running
    bot keeps the image it was started on, and the orchestrator does not
    restart bots when the tag moves. `/settings/bots` has a Stop and a
    Start button, no Restart. Start needs the tenant's passphrase
@@ -123,7 +137,7 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    `POST /api/tenant/me/bots/<bot_id>/stop`, then `/start`, from a
    signed-in session with the passphrase unlocked (`/start` answers 401
    while it is locked).
-4. **Every bot card shows HEAD** (next paragraph).
+5. **Every bot card shows HEAD** (next paragraph).
 
 A dashboard change waiting for deploy can go in the same session: run
 the dashboard deploy as well.
@@ -139,7 +153,7 @@ again. A bot's `/api/version` needs no API key, so from the host:
 `docker exec <bot-container> python -c 'import urllib.request; print(urllib.request.urlopen("http://localhost:<port>/api/version").read().decode())'`
 (ports as in [health-check.md](health-check.md)).
 
-**An emergency bot fix outside the window** is the same four steps, and
+**An emergency bot fix outside the window** is the same five steps, and
 the build takes all of master: every bot PR merged since the last window
 ships with the fix. See what that is first, on the host:
 `git log --oneline <sha on the bot cards>..origin/master -- bot/`.

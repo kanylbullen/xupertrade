@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy import select
 
+from hypertrade.config import settings
 from hypertrade.db import models
 from hypertrade.db.repo import Repository
 from hypertrade.engine import funding
@@ -42,8 +43,9 @@ def record(ms: int, coin: str = "BTC", usdc: float = -0.5, szi: float | None = 0
 
 
 @pytest.fixture
-async def repo():
-    r = Repository("sqlite+aiosqlite:///:memory:", tenant_id=TENANT, mode="testnet")
+async def repo(monkeypatch):
+    monkeypatch.setattr(settings, "exchange_mode", "testnet")
+    r = Repository("sqlite+aiosqlite:///:memory:", tenant_id=TENANT)
     await r.init_db()
     yield r
     await r._engine.dispose()
@@ -131,6 +133,38 @@ def test_parse_event_rejects_what_it_cannot_store():
     # A missing hash is stored as "", not skipped: the hash is not the key.
     no_hash = {"time": T0_MS, "delta": {"coin": "BTC", "usdc": "1"}}
     assert funding.parse_event(no_hash).hash == ""
+
+
+def test_parse_event_rejects_what_the_columns_cannot_hold():
+    """A page is one INSERT and the poll resumes from the newest stored
+    row, so one row Postgres refuses would fail that page on every poll."""
+    assert funding.parse_event(record(T0_MS, "x" * 16)).coin == "x" * 16
+    assert funding.parse_event(record(T0_MS, "x" * 17)) is None  # String(16)
+    for ms in (10**16, -10**16):  # from_ms: OverflowError
+        assert funding.parse_event(record(ms)) is None
+    for usdc in (float("nan"), float("inf")):
+        assert funding.parse_event(record(T0_MS, usdc=usdc)) is None
+    # Not the payment's fault: a hash that does not fit is dropped like a
+    # missing one, and a szi that is not a number picks no side.
+    long_hash = {**record(T0_MS), "hash": "0x" + "f" * 100}
+    assert funding.parse_event(long_hash).hash == ""
+    assert funding.parse_event(record(T0_MS, szi=float("nan"))).szi is None
+
+
+async def test_a_record_the_db_would_refuse_is_skipped_and_the_rest_stored(repo, caplog):
+    await store_one(repo, T0)
+    fetch, _ = pager([[
+        record(T0_MS + HOUR_MS), record(T0_MS + HOUR_MS, "abcdefghijklmnopq"),
+        record(T0_MS + 2 * HOUR_MS),
+    ]])
+
+    with caplog.at_level(logging.WARNING, logger="hypertrade.engine.funding"):
+        result = await funding.ingest_funding(repo, fetch, T0_MS)
+
+    assert (result.new, result.skipped) == (2, 1)
+    latest = await repo.get_latest_funding_timestamp()
+    assert funding.to_ms(latest) == T0_MS + 2 * HOUR_MS  # the next poll moves on
+    assert "abcdefghijklmnopq" in caplog.text
 
 
 # ── paging ───────────────────────────────────────────────────────────
@@ -300,3 +334,72 @@ async def test_runner_poll_resumes_a_minute_before_the_newest_row_and_pages(repo
     assert [c[0] for c in calls] == [start, page1[-1]["time"]]
     # 500 on page 1 (its first event is the stored one) plus 1 on page 2.
     assert len(await stored(repo)) == funding.PAGE_CAP + 1
+
+
+# ── failures between pages ──────────────────────────────────────────
+
+
+def hl_history(events: list[dict], empty_calls=()):
+    """fetch() that answers like HL: `events` from start_ms on, oldest
+    first, 500 at most. The calls numbered in `empty_calls` answer [],
+    as the exchange wrapper does once its read retry gives up."""
+    calls: list[int] = []
+
+    async def fetch(start_ms, end_ms):
+        calls.append(start_ms)
+        if len(calls) in empty_calls:
+            return []
+        return [e for e in events if e["time"] >= start_ms][:funding.PAGE_CAP]
+
+    return fetch, calls
+
+
+def runner_on(repo, fetch) -> EngineRunner:
+    exchange = MagicMock()
+    exchange.get_user_funding_history = AsyncMock(side_effect=fetch)
+    return EngineRunner(exchange=exchange, strategies=[], repo=repo,
+                        event_bus=None, control=MagicMock())
+
+
+# 510 events over 102 hours: page 1 is 500 of them, the rest follow.
+HISTORY = full_page(T0_MS) + full_page(T0_MS + 100 * HOUR_MS)[:10]
+
+
+async def test_a_failed_read_on_page_two_keeps_page_one_and_the_next_poll_catches_up(repo):
+    await store_one(repo, T0)
+    fetch, calls = hl_history(HISTORY, empty_calls={2})
+    runner = runner_on(repo, fetch)
+
+    await runner._poll_funding()
+    assert len(calls) == 2
+    assert len(await stored(repo)) == funding.PAGE_CAP
+
+    await runner._poll_funding()
+    assert len(await stored(repo)) == len(HISTORY)
+
+
+async def test_a_failed_insert_on_page_two_keeps_page_one_and_the_next_poll_catches_up(
+    repo, monkeypatch,
+):
+    await store_one(repo, T0)
+    fetch, _ = hl_history(HISTORY)
+    runner = runner_on(repo, fetch)
+    insert = repo.insert_funding_payments
+    inserts = 0
+
+    async def flaky(rows):
+        nonlocal inserts
+        inserts += 1
+        if inserts == 2:
+            raise ConnectionError("database went away")
+        return await insert(rows)
+
+    monkeypatch.setattr(repo, "insert_funding_payments", flaky)
+
+    # The tick's try/except logs this; each page is its own transaction.
+    with pytest.raises(ConnectionError):
+        await runner._poll_funding()
+    assert len(await stored(repo)) == funding.PAGE_CAP
+
+    await runner._poll_funding()
+    assert len(await stored(repo)) == len(HISTORY)
