@@ -10,7 +10,7 @@ import aiohttp
 
 from hypertrade.config import settings
 from hypertrade.data.feed import fetch_candles
-from hypertrade.db.repo import ReconcileResult, Repository
+from hypertrade.db.repo import ORPHAN_CONFIRM_SECONDS, ReconcileResult, Repository
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.portfolio import PortfolioManager
 from hypertrade.engine.signals import Signal, SignalAction
@@ -141,6 +141,15 @@ def _is_transient_unknown_verdict(verdict: str | None) -> bool:
 
 _start_time = time.time()
 
+# NU-2: how often a standing reconcile hold is announced again.
+HOLD_REALERT_SECONDS = 1800.0
+_HOLD_SET = "reconcile hold is set"
+
+_CLEAR_HOLD_HOW = (
+    "Check the book against the exchange, then clear the hold with "
+    'POST /api/control/reconcile-hold {"active": false}'
+)
+
 
 class EngineRunner:
     # How long a refusal note stands when the caller gave no bar time.
@@ -221,6 +230,13 @@ class EngineRunner:
         self._outage_start: float | None = None  # first failure of the open window
         self._outage_affected: set[str] = set()  # strategies failed during the window
         self._outage_alerted: bool = False  # one-alert-per-window latch
+        # NU-2 restore guards (roadmap). (symbol, side) -> monotonic time
+        # an exchange orphan was first seen in an unbroken run of passes.
+        self._orphan_first_seen: dict[tuple[str, str], float] = {}
+        # One lost-state alert per episode, even while its writes fail.
+        self._lost_state_alerted = False
+        # Monotonic time of the last hold alert; None when nothing is held.
+        self._hold_alert_at: float | None = None
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -544,12 +560,26 @@ class EngineRunner:
                 "reported; no rows closed, no trades written, no orders.",
             )
 
+        hold = await self._reconcile_hold_reason()
+        now = time.monotonic()
+        confirmed = {
+            k for k, seen in self._orphan_first_seen.items()
+            if now - seen >= ORPHAN_CONFIRM_SECONDS
+        }
         result = await self.repo.reconcile_positions(
             self.exchange,
             close_exchange_orphans=not paused,
             on_strategy_close=self._on_reconcile_close,
             dry_run=paused,
+            hold_orphans=hold,
+            traded_symbols={s.symbol for s in self.strategies},
+            confirmed_orphans=confirmed,
         )
+        # A pass that did not look at orphans breaks the run of sightings.
+        self._orphan_first_seen = {
+            k: self._orphan_first_seen.get(k, now)
+            for k in (result.exchange_orphans or [])
+        }
 
         if result.skipped:
             logger.warning("%s reconcile: %s", label, result.skipped)
@@ -561,6 +591,7 @@ class EngineRunner:
             )
 
         notice = result.summary() if (result.skipped or result.took_action) else None
+        published = False
         if notice is None:
             self._last_reconcile_notice = None
         elif notice == self._last_reconcile_notice:
@@ -570,6 +601,7 @@ class EngineRunner:
             )
         elif self.event_bus:
             self._last_reconcile_notice = notice
+            published = True
             try:
                 await self.event_bus.publish(
                     ErrorOccurred(
@@ -581,7 +613,136 @@ class EngineRunner:
                 logger.exception("Reconcile: event publish failed")
         else:
             self._last_reconcile_notice = notice
+        await self._remind_hold(hold, result, published, now)
         return result
+
+    async def _reconcile_hold_reason(self) -> str | None:
+        """Why pass 2 may close no exchange orphan this pass, or None.
+
+        Also runs NU-2 guard 1: a missing sentinel means Redis lost the
+        control state. Fails closed — an unreadable key holds — and never
+        raises, so the pass (and its exits) still runs.
+        """
+        if self.control is None:
+            return "no Redis control connection"
+        try:
+            present = await self.control.sentinel_present()
+        except Exception:
+            logger.warning(
+                "Restore guard: sentinel unreadable — holding exchange "
+                "orphans this pass", exc_info=True,
+            )
+            return "Redis control state unreadable"
+        if not present:
+            await self._secure_lost_control_state()
+            return _HOLD_SET
+        try:
+            held = await self.control.is_reconcile_hold_active()
+        except Exception:
+            logger.warning(
+                "Restore guard: reconcile hold unreadable — holding "
+                "exchange orphans this pass", exc_info=True,
+            )
+            return "reconcile hold unreadable"
+        return _HOLD_SET if held else None
+
+    async def _secure_lost_control_state(self) -> None:
+        """Guard 1: Redis lost the control state (sentinel missing).
+
+        Kill switch ON, not pause (operator decision 5.4: a pause would
+        freeze exits too), and the reconcile hold ON; one alert; then
+        the sentinel, written only once both writes landed, so a failed
+        write is retried on the next pass instead of being forgotten.
+        """
+        failed = []
+        for what, write in (
+            ("kill switch", self.control.set_kill_switch),
+            ("reconcile hold", self.control.set_reconcile_hold),
+        ):
+            try:
+                await write(True)
+            except Exception:
+                logger.exception("Restore guard: writing the %s failed", what)
+                failed.append(what)
+        if not self._lost_state_alerted:
+            self._lost_state_alerted = True
+            self._hold_alert_at = time.monotonic()
+            mainnet = (
+                " On mainnet the tenant's strategy opt-in set lived in this "
+                "Redis too, so no strategy runs, exits included, until it "
+                "is re-enabled." if settings.is_mainnet else ""
+            )
+            broken = (
+                f" WRITE FAILED: {', '.join(failed)} — retried every "
+                "reconcile pass." if failed else ""
+            )
+            await self._publish_error("restore-guard", (
+                "Redis control state was lost (sentinel missing: Redis "
+                "flushed or recreated, or this build's first boot). Kill "
+                "switch ON: new opens blocked, exits keep running, the "
+                "bot is NOT paused. Reconcile hold ON: no exchange "
+                "position without a DB row is market-closed. Disabled "
+                "strategies, leverage overrides and the daily-loss "
+                "counter were reset. Open DB positions: "
+                f"{await self._open_positions_text()}.{mainnet}{broken} "
+                f"{_CLEAR_HOLD_HOW}, and the kill switch with "
+                'POST /api/control/kill-switch {"active": false}.'
+            ))
+        if failed:
+            return
+        try:
+            await self.control.write_sentinel()
+        except Exception:
+            logger.exception("Restore guard: writing the sentinel failed")
+            return
+        self._lost_state_alerted = False
+        logger.warning("Restore guard: kill switch and hold saved, sentinel written")
+
+    async def _open_positions_text(self) -> str:
+        try:
+            rows = await self.repo.get_open_positions()
+        except Exception:
+            logger.exception("Restore guard: reading open positions failed")
+            return "unreadable"
+        return "; ".join(
+            f"{r.strategy_name} {r.side} {r.size} {r.symbol}" for r in rows
+        ) or "none"
+
+    async def _remind_hold(
+        self, hold: str | None, result: ReconcileResult, published: bool,
+        now: float,
+    ) -> None:
+        """Re-announce a standing hold at most every HOLD_REALERT_SECONDS,
+        so a held position cannot become permanent after one alert. A
+        restart announces a hold still set once more."""
+        hold_set = hold == _HOLD_SET
+        if not hold_set and not result.held_orphans:
+            self._hold_alert_at = None
+            return
+        if published:
+            self._hold_alert_at = now
+            return
+        if (
+            self._hold_alert_at is not None
+            and now - self._hold_alert_at < HOLD_REALERT_SECONDS
+        ):
+            return
+        self._hold_alert_at = now
+        held = ", ".join(result.held_orphans) or "none right now"
+        if hold_set:
+            message = (
+                "Reconcile hold is still set: no exchange position without "
+                f"a DB row is market-closed (held now: {held}). "
+                f"{_CLEAR_HOLD_HOW}."
+            )
+        else:
+            message = (
+                "Reconcile is still holding exchange positions without a "
+                f"DB row instead of closing them: {held}"
+                f"{f' ({hold})' if hold else ''}. Decide on them by hand; "
+                "reconcile will not close them while this holds."
+            )
+        await self._publish_error("reconcile", message)
 
     async def _on_reconcile_close(
         self, strategy_name: str, pnl: float | None = None,

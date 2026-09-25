@@ -10,9 +10,21 @@ State keys:
                                         new value, then writes the same
                                         token to flat_request_done
 - hypertrade:control:flat_request_done
+- hypertrade:<mode>[:t:<tenant_id>]:control:sentinel -> written once this
+                                        bot has booted against this Redis.
+                                        MISSING means the control state was
+                                        lost (NU-2 guard 1, see
+                                        `EngineRunner._reconcile_hold_reason`).
+- hypertrade:<mode>[:t:<tenant_id>]:control:reconcile_hold -> present while
+                                        reconcile must not market-close any
+                                        exchange position (NU-2 guard 2).
+                                        Only a human clears it.
+The two NU-2 keys carry the tenant id whenever the bot has one, so one
+tenant's bot never reads or clears another's.
 """
 
 import logging
+import time
 
 import redis.asyncio as redis
 
@@ -20,14 +32,22 @@ from hypertrade.config import settings
 
 logger = logging.getLogger(__name__)
 
-def _key(mode: str, suffix: str) -> str:
+def _key(mode: str, suffix: str, tenant_id: str | None = None) -> str:
+    if tenant_id:
+        return f"hypertrade:{mode}:t:{tenant_id}:control:{suffix}"
     return f"hypertrade:{mode}:control:{suffix}"
 
 
 class BotControl:
-    def __init__(self, redis_url: str | None = None, mode: str | None = None) -> None:
+    def __init__(
+        self,
+        redis_url: str | None = None,
+        mode: str | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
         self._redis_url = redis_url or settings.redis_url
         self._mode = mode or settings.exchange_mode
+        tenant = tenant_id if tenant_id is not None else settings.tenant_id
         self._key_paused = _key(self._mode, "paused")
         self._key_disabled = _key(self._mode, "disabled")
         self._key_flat_req = _key(self._mode, "flat_request_id")
@@ -36,6 +56,8 @@ class BotControl:
         self._key_allow_multi = _key(self._mode, "allow_multi_coin")
         self._key_heartbeat = _key(self._mode, "heartbeat")
         self._key_kill_switch = _key(self._mode, "kill_switch")
+        self._key_sentinel = _key(self._mode, "sentinel", tenant)
+        self._key_reconcile_hold = _key(self._mode, "reconcile_hold", tenant)
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -224,6 +246,38 @@ class BotControl:
         if self._redis is None:
             return
         await self._redis.delete(self._key_kill_switch)
+
+    # --- NU-2 restore guards. Unlike most setters above, these let a
+    # Redis error propagate: the runner has to know whether a read or a
+    # write landed, and fails closed when it did not.
+
+    async def sentinel_present(self) -> bool:
+        """False when this bot's sentinel is gone. No Redis client means
+        no Redis state to lose, so that counts as present."""
+        if self._redis is None:
+            return True
+        return await self._redis.get(self._key_sentinel) is not None
+
+    async def write_sentinel(self) -> None:
+        if self._redis is None:
+            return
+        await self._redis.set(self._key_sentinel, str(int(time.time())))
+
+    async def is_reconcile_hold_active(self) -> bool:
+        """Any value counts as held; only deleting the key clears it. No
+        Redis client means the hold cannot be read, so it counts as held."""
+        if self._redis is None:
+            return True
+        return await self._redis.get(self._key_reconcile_hold) is not None
+
+    async def set_reconcile_hold(self, active: bool) -> None:
+        if self._redis is None:
+            return
+        if active:
+            await self._redis.set(self._key_reconcile_hold, str(int(time.time())))
+        else:
+            await self._redis.delete(self._key_reconcile_hold)
+        logger.warning("Reconcile hold %s", "SET" if active else "cleared")
 
     async def beat_heartbeat(self) -> None:
         """Write current timestamp + TTL of 5 minutes. A watchdog reads this

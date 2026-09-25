@@ -452,6 +452,32 @@ def _control_routes(
             "redis_override": redis_state,
         })
 
+    async def reconcile_hold_set(request: web.Request) -> web.Response:
+        """POST /api/control/reconcile-hold — roadmap NU-2. Body
+        {"active": true|false}, strict JSON bool as for the kill switch.
+        While set, reconcile market-closes no exchange position; the bot
+        sets it itself when Redis lost its state, and only this (or a
+        `redis-cli DEL`) clears it."""
+        if (err := _require_auth(request)) is not None:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            return _cors({"error": "body must be valid JSON"}, status=400)
+        active = body.get("active") if isinstance(body, dict) else None
+        if not isinstance(active, bool):
+            return _cors(
+                {"error": "field 'active' must be a JSON boolean (true/false)"},
+                status=400,
+            )
+        await control.set_reconcile_hold(active)
+        return _cors({"reconcile_hold": active})
+
+    async def reconcile_hold_get(request: web.Request) -> web.Response:
+        if (err := _require_auth(request)) is not None:
+            return err
+        return _cors({"reconcile_hold": await control.is_reconcile_hold_active()})
+
     async def toggle_strategy(request: web.Request) -> web.Response:
         if (err := _require_auth(request)) is not None:
             return err
@@ -852,6 +878,8 @@ def _control_routes(
     app.router.add_post("/api/control/flat-all", flat_all)
     app.router.add_get("/api/control/kill-switch", kill_switch_get)
     app.router.add_post("/api/control/kill-switch", kill_switch_set)
+    app.router.add_get("/api/control/reconcile-hold", reconcile_hold_get)
+    app.router.add_post("/api/control/reconcile-hold", reconcile_hold_set)
     app.router.add_post("/api/control/strategy/{name}/toggle", toggle_strategy)
     app.router.add_post("/api/control/strategy/{name}/leverage", set_leverage)
     app.router.add_post("/api/control/strategy/{name}/leverage/reset", reset_leverage)
