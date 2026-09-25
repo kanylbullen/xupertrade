@@ -732,6 +732,18 @@ async def test_flat_all_books_what_filled_not_what_was_read(repo):
     assert not status.ok, "0.6 of what it read did not fill"
 
 
+async def test_flat_all_without_a_row_books_what_filled(repo):
+    ex = HLLike(Position(symbol="ETH", side="long", size=0.4, entry_price=ENTRY))
+    ex.stale = [Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY)]
+    runner, _ = _runner(repo, ex)
+
+    await runner._flat_all_positions()
+
+    [trade] = await _trades(repo)
+    assert (trade.strategy_name, trade.size) == ("manual_flat", pytest.approx(0.4))
+    assert trade.fee == pytest.approx(MID * 0.4 * settings.taker_fee_rate)
+
+
 async def test_reconcile_books_the_orphan_size_that_filled(repo):
     """Pass 2 confirms an orphan long of 2.0; it is cut to 0.5 before the
     reduce-only close lands. The trade row and its fee are 0.5, not 2.0."""
