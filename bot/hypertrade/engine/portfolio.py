@@ -51,12 +51,10 @@ class PortfolioManager:
         self._kill_switch_unreadable: bool = False
         self._persist_failure_logged: bool = False
         self._persist_alerted: bool = False
-        # NU-2: set by the runner on every tick and reconcile pass while
-        # this bot's reconcile hold stands (or could not be read or
-        # written), and until a reconcile pass that counts ran after boot
-        # or after a clear. It blocks OPENS like a kill switch scoped to this
-        # bot — the kill switch key itself is shared by every tenant of
-        # the mode. Kept in memory so a hold whose write failed still holds.
+        # NU-2, set by the runner: why this bot's opens are blocked — its
+        # reconcile hold (in memory, so an unwritten one holds too) or a
+        # wait for a reconcile pass. A kill switch scoped to this bot; the
+        # kill switch key is shared by every tenant of the mode.
         self.opens_held: str | None = None
 
     async def _ensure_loaded(self) -> None:

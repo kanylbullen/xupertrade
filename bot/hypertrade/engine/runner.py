@@ -141,11 +141,12 @@ def _is_transient_unknown_verdict(verdict: str | None) -> bool:
 
 _start_time = time.time()
 
-# NU-2: how often a standing reconcile hold is announced again.
+# NU-2: how often a standing hold is re-announced, how long opens may wait
+# for a reconcile pass that counts before that is, and the reasons shown.
 HOLD_REALERT_SECONDS = 1800.0
+OPENS_STUCK_SECONDS = 600.0
 _HOLD_SET = "reconcile hold is set"
 _FIRST_PASS = "first reconcile pass since the bot started"
-# Why opens wait for a reconcile pass that counts (readable, unpaused).
 _AWAIT_FIRST_PASS = "waiting for the first reconcile pass since the bot started"
 _AWAIT_PASS_AFTER_CLEAR = "waiting for a reconcile pass after the hold cleared"
 
@@ -229,9 +230,8 @@ class EngineRunner:
         self._outage_start: float | None = None  # first failure of the open window
         self._outage_affected: set[str] = set()  # strategies failed during the window
         self._outage_alerted: bool = False  # one-alert-per-window latch
-        # NU-2 restore guards (roadmap). One lost-state alert per episode,
-        # even while its writes fail; the alert itself stays queued until
-        # a subscriber has it, even after the sentinel is written.
+        # NU-2 restore guards. One lost-state alert per episode, queued
+        # until a subscriber has it, even after the sentinel is written.
         self._lost_state_alerted = False
         self._lost_state_alert: str | None = None
         self._lost_state_at = ""
@@ -240,12 +240,13 @@ class EngineRunner:
         self._hold_alert_at: float | None = None
         # Pass 2 holds every orphan until one readable, unpaused pass ran:
         # a restore, a key change or an emptied DB shows up there first.
-        # Opens wait for that pass too, and for the first such pass after
-        # a hold (or an unreadable control state) cleared: an open that
-        # nets into an orphan gives its coin a row, and the orphan is
-        # then never held, only logged as a size mismatch.
-        self._orphans_checked = False
-        self._pass_after_clear = False
+        # Opens wait for that pass (`_awaiting`: which one, since when; a
+        # paused pass restarts the clock; no repo, no pass, no wait), and
+        # for the first one after a hold or an unreadable state cleared:
+        # an open that nets into an orphan gives its coin a row, and the
+        # orphan is then never held, only logged as a size mismatch.
+        self._awaiting = _AWAIT_FIRST_PASS if repo is not None else None
+        self._awaiting_since = time.monotonic()
         # The last `_check_control_state` answer, to see a hold clear.
         self._control_hold: str | None = None
 
@@ -570,6 +571,7 @@ class EngineRunner:
                 )
                 paused = True
         if paused:
+            self._awaiting_since = time.monotonic()  # paused is not stuck
             logger.info(
                 "Reconcile: bot is paused — dry run. Divergences are "
                 "reported; no rows closed, no trades written, no orders.",
@@ -577,7 +579,7 @@ class EngineRunner:
 
         hold = await self._check_control_state()
         traded = {s.symbol for s in self.strategies}
-        first = None if self._orphans_checked else _FIRST_PASS
+        first = _FIRST_PASS if self._awaiting == _AWAIT_FIRST_PASS else None
         result = await self.repo.reconcile_positions(
             self.exchange,
             close_exchange_orphans=not paused,
@@ -586,18 +588,18 @@ class EngineRunner:
             hold_orphans=hold or first,
             traded_symbols=traded,
         )
-        if not (paused or result.skipped) and hold in (None, _HOLD_SET):
-            # A pass that counts: opens no longer wait for one.
-            self._orphans_checked = True
-            self._pass_after_clear = False
+        if hold in (None, _HOLD_SET) and not (
+            paused or result.skipped or result.unresolved_orphans
+        ):
+            # A pass that counts: opens no longer wait for one. Not one
+            # that left an orphan unheld (its re-read or close failed).
+            self._awaiting = None
             self.portfolio.opens_held = hold
         held = sorted(traded.intersection(result.held_orphans)) if hold is None else []
         if held:
-            # Held on a coin we trade: several at once, or the first pass.
-            # The hold makes that stick until a human clears it (roadmap:
-            # the alarm must be acknowledged by hand) — otherwise a count
-            # that drops to one, or the next pass, releases it to a market
-            # close — and blocks opens that would net into them.
+            # Held on a coin we trade (several at once, or the first pass):
+            # the hold keeps it held until a human clears it — not until a
+            # count drops to one — and blocks opens that would net into it.
             await self._write_hold()
             hold = self.portfolio.opens_held = self._control_hold = _HOLD_SET
             self._last_reconcile_notice = None  # a re-set hold is news
@@ -638,24 +640,23 @@ class EngineRunner:
         return result
 
     async def _check_control_state(self) -> str | None:
-        """NU-2, on every tick and every reconcile pass: why this bot may
-        neither open nor market-close an exchange orphan, or None.
-
-        Also runs guard 1 (a missing sentinel means Redis lost the control
-        state) and retries whatever it could not finish: an unwritten
-        hold, an undelivered alert. Fails closed — an unreadable key
-        holds — and never raises, so exits keep running.
-        """
+        """NU-2, every tick and reconcile pass: why this bot may neither
+        open nor market-close an exchange orphan, or None. Runs guard 1
+        (a missing sentinel: Redis lost the control state), retries an
+        unwritten hold or undelivered alert, fails closed and never
+        raises, so exits keep running."""
         why = await self._read_control_state()
         if self._control_hold is not None and why is None:
             # Just cleared: opens wait for a pass that counts, and that
             # pass runs first in this tick, before any strategy runs.
-            self._pass_after_clear = True
+            if self._awaiting is None and self.repo is not None:
+                self._awaiting = _AWAIT_PASS_AFTER_CLEAR
+                self._awaiting_since = time.monotonic()
             self._last_reconcile = 0.0
         self._control_hold = why
         # Without BotControl there is no hold to honour (not production).
         self.portfolio.opens_held = (
-            (why or self._awaited_pass()) if self.control is not None else None
+            (why or self._awaiting) if self.control is not None else None
         )
         if why is None and self._lost_state_alert is not None:
             # Cleared before anyone got the alert: the hold it names is
@@ -672,24 +673,13 @@ class EngineRunner:
             self._hold_alert_at = time.monotonic()
         return why
 
-    def _awaited_pass(self) -> str | None:
-        """Why opens wait for a readable, unpaused reconcile pass, or
-        None. Without a repo there is no pass to wait for."""
-        if self.repo is None:
-            return None
-        if not self._orphans_checked:
-            return _AWAIT_FIRST_PASS
-        return _AWAIT_PASS_AFTER_CLEAR if self._pass_after_clear else None
-
     async def _reconcile_due(self) -> bool:
-        """Every 5 minutes, and on every tick while opens wait for a pass
-        that counts (`_awaited_pass`) — a skipped pass is retried on the
-        next tick. A paused pass counts for nothing, so a paused bot
-        keeps the 5-minute cadence and the wait ends on its first
-        unpaused tick."""
+        """Every 5 minutes, and on every unpaused tick while opens wait
+        for a pass that counts (`_awaiting`): a skipped pass is retried on
+        the next tick; a paused bot keeps the 5-minute cadence."""
         if time.time() - self._last_reconcile > 300:
             return True
-        if self.control is None or self._awaited_pass() is None:
+        if self.control is None or self._awaiting is None:
             return False
         try:
             return not await self.control.is_paused()
@@ -727,15 +717,11 @@ class EngineRunner:
         return True
 
     async def _secure_lost_control_state(self) -> None:
-        """Guard 1: Redis lost the control state (sentinel missing).
-
-        Sets this bot's reconcile hold — no opens, no orphan closes, exits
-        keep running; never a pause (operator decision 5.4: a pause would
-        freeze exits too) — and queues one alert. Then the sentinel, only
-        once the hold landed, so a failed write comes back next check. The
-        mode-wide kill switch is left alone: the sentinel is per tenant,
-        and one tenant's lost state must not stop another tenant's bot.
-        """
+        """Guard 1: Redis lost the control state (sentinel missing). Sets
+        this bot's reconcile hold — never a pause (operator decision 5.4:
+        exits must run) nor the mode-wide kill switch (other tenants) —
+        queues one alert, and writes the sentinel only once the hold
+        landed, so a failed write comes back on the next check."""
         landed = await self._write_hold()
         if not self._lost_state_alerted:
             self._lost_state_alerted = True
@@ -797,42 +783,53 @@ class EngineRunner:
         ) or "none"
 
     async def _remind_hold(
-        self, hold: str | None, result: ReconcileResult, announced: bool,
+        self, hold: str | None, result: ReconcileResult | None,
+        announced: bool, error: str | None = None,
     ) -> None:
-        """Re-announce a standing hold at most every HOLD_REALERT_SECONDS,
-        so a held position cannot become permanent after one alert. A
+        """Re-announce a standing hold, held positions, or opens that
+        waited OPENS_STUCK_SECONDS for a pass that counts (as when every
+        pass raises: `error`, no `result`) at most every
+        HOLD_REALERT_SECONDS, so none goes quiet after one alert. A
         restart announces a hold still set once more. Only a delivered
         notice that named the held positions counts as an announcement."""
         now = time.monotonic()
-        hold_set = hold == _HOLD_SET
-        if not hold_set and (hold is None or not result.held_orphans):
+        held = ", ".join(result.held_orphans) if result else ""
+        waited = now - self._awaiting_since if self._awaiting else 0.0
+        holding = hold == _HOLD_SET or bool(hold and held)
+        if not holding and waited < OPENS_STUCK_SECONDS:
             # Nothing held, or only coins nobody here trades (nothing can
             # net into those): their notice, deduplicated until a size or
             # side changes, is the one announcement.
             self._hold_alert_at = None
             return
-        if announced:
+        if announced and holding:
             self._hold_alert_at = now
             return
-        if (
-            self._hold_alert_at is not None
-            and now - self._hold_alert_at < HOLD_REALERT_SECONDS
-        ):
+        last = self._hold_alert_at
+        if last is not None and now - last < HOLD_REALERT_SECONDS:
             return
-        held = ", ".join(result.held_orphans) or "none seen this pass"
-        if hold_set:
+        if hold == _HOLD_SET:
             message = (
                 "Reconcile hold is still set: this bot opens nothing and "
                 "market-closes no exchange position without a DB row "
-                f"(held now: {held}). {self._clear_hold_how()}."
+                f"(held now: {held or 'none seen this pass'}). "
+                f"{self._clear_hold_how()}."
+            )
+        elif holding:
+            message = (
+                "Reconcile is still holding exchange positions without a "
+                f"DB row instead of closing them: {held} ({hold}). Decide "
+                "on them by hand; reconcile will not close them while this "
+                "holds."
             )
         else:
             message = (
-                "Reconcile is still holding exchange positions without a "
-                f"DB row instead of closing them: {held}"
-                f"{f' ({hold})' if hold else ''}. Decide on them by hand; "
-                "reconcile will not close them while this holds."
+                "Opens are blocked until a reconcile pass completes "
+                f"({self._awaiting}, {int(waited // 60)} min so far). "
+                "Exits keep running."
             )
+        if error:
+            message += f" The last pass raised {error}."
         if await self._publish_error("reconcile", message):
             self._hold_alert_at = now
 
@@ -928,8 +925,13 @@ class EngineRunner:
         if self.repo and await self._reconcile_due():
             try:
                 await self._run_reconcile("Periodic")
-            except Exception:
+            except Exception as exc:
                 logger.exception("Periodic reconcile failed")
+                # Exits still run below; opens that wait for this pass
+                # are announced once they have waited too long.
+                await self._remind_hold(
+                    self._control_hold, None, False, type(exc).__name__,
+                )
             self._last_reconcile = time.time()
 
         # Funding poll every 30 minutes. Backfills user_funding_history
@@ -1598,8 +1600,7 @@ class EngineRunner:
         # until UTC midnight.
         if not await self.portfolio.check_risk_limits(is_open=is_open):
             # This bot's reconcile hold (NU-2) says so, not "risk limit";
-            # the hold is announced on its own, so a plain open refused by
-            # it is only logged.
+            # it is announced on its own, so a plain open is only logged.
             held = is_open and self.portfolio.opens_held
             category = "reconcile hold" if held else "risk limit"
             head = f"Reconcile hold ({held})" if held else "Risk limit breached"
@@ -2009,19 +2010,12 @@ class EngineRunner:
         return parity_ok and not remaining
 
     def _unfilled(self, symbol: str, requested: float, filled: float) -> float:
-        """What a close left unfilled, rounded to szDecimals; 0.0 when it
-        filled everything it sent.
-
-        Measured against the request rounded the way the exchange wrapper
-        rounds it before sending (to nearest), not against the raw DB
-        size: rounding in either direction — up to half a step, e.g. a
-        legacy unrounded row, or a float-noise remainder like
-        0.3 - 0.1 — is not a remainder. A close that fills MORE than the
-        row asked is not one either. What is left is a whole number of
-        steps the order did not fill, and it stays on the row so the
-        strategy's next exit closes it instead of reconcile (or a
-        reconcile hold) finding it without a row.
-        """
+        """What a close left unfilled, in whole szDecimals steps; 0.0 when
+        it filled all it sent. Measured against the request rounded as
+        the wrapper rounds it (to nearest), so rounding — a legacy
+        unrounded row, float noise like 0.3 - 0.1 — or an over-fill is no
+        remainder. The rest stays on the row for the strategy's next exit
+        to close, instead of reconcile finding it without a row."""
         if filled >= requested:
             return 0.0
         p = self.exchange.get_size_precision(symbol)

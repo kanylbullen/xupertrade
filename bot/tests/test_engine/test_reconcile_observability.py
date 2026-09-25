@@ -18,7 +18,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hypertrade.db.repo import ReconcileResult
-from hypertrade.engine.runner import EngineRunner, _is_transient_network_error
+from hypertrade.engine.runner import (
+    _AWAIT_FIRST_PASS,
+    EngineRunner,
+    _is_transient_network_error,
+)
 from hypertrade.events.types import ErrorOccurred
 from hypertrade.exchange.base import (
     ExchangeReadError,
@@ -52,7 +56,7 @@ def _runner(*, result=None, paused=False, pause_raises=False):
     runner.portfolio = MagicMock()
     runner.portfolio.record_pnl = AsyncMock()
     runner.portfolio.opens_held = None
-    runner._orphans_checked = True  # a bot past its first pass
+    runner._awaiting = None  # a bot past its first pass
     return runner, repo, event_bus
 
 
@@ -89,12 +93,12 @@ async def test_first_pass_and_an_unreadable_control_state_hold_pass_two():
     """NU-2: the first pass after boot holds every orphan, and so does a
     control state that cannot be read."""
     runner, repo, _ = _runner(paused=False)
-    runner._orphans_checked = False
+    runner._awaiting = _AWAIT_FIRST_PASS
     await runner._run_reconcile("Startup")
     assert "first reconcile pass" in repo.reconcile_positions.await_args.kwargs[
         "hold_orphans"
     ]
-    assert runner._orphans_checked is True
+    assert runner._awaiting is None
 
     runner.control.sentinel_present = AsyncMock(side_effect=ConnectionError("x"))
     await runner._run_reconcile("Periodic")

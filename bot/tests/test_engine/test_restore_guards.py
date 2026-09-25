@@ -31,7 +31,11 @@ from hypertrade.config import settings
 from hypertrade.db import repo as repo_module
 from hypertrade.db.repo import Repository
 from hypertrade.engine.control import BotControl
-from hypertrade.engine.runner import HOLD_REALERT_SECONDS, EngineRunner
+from hypertrade.engine.runner import (
+    HOLD_REALERT_SECONDS,
+    OPENS_STUCK_SECONDS,
+    EngineRunner,
+)
 from hypertrade.engine.signals import Signal, SignalAction
 from hypertrade.events.bus import EventBus
 from hypertrade.events.types import ErrorOccurred
@@ -91,17 +95,24 @@ class FakeRedis:
 class FakeExchange:
     """Nets every fill into `positions`, like HL's one position per coin.
     `fill_cap` makes an order fill at most that much (an IOC that fills
-    short)."""
+    short). `reads` answers the next reads, in order: positions, or an
+    exception to raise; then `positions` again."""
 
     def __init__(self, positions=()):
         self.positions = list(positions)
         self.read_error: Exception | None = None
+        self.reads: list = []
         self.orders: list[tuple] = []
         self.fill_cap: float | None = None
 
     async def get_positions(self):
         if self.read_error is not None:
             raise self.read_error
+        if self.reads:
+            answer = self.reads.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return list(answer)
         return list(self.positions)
 
     async def get_position(self, symbol):
@@ -227,7 +238,8 @@ def _runner(repo, redis, exchange, *, symbols=("ETH",), first_pass=False):
         repo=repo, event_bus=bus, control=_control(redis),
     )
     runner._restore_read_backoff = ()
-    runner._orphans_checked = not first_pass
+    if not first_pass:
+        runner._awaiting = None
     return runner, bus
 
 
@@ -723,6 +735,132 @@ async def test_a_skipped_pass_after_a_clear_keeps_opens_waiting(repo):
     assert seen == [(False, []), (True, [("ETH", "sell", 2.0)])]
 
 
+def _reread_fails(ex):
+    ex.reads = [[ETH], ExchangeReadError("502 Bad Gateway")]
+
+
+def _reread_disagrees(ex):
+    ex.reads = [[ETH], [Position(symbol="ETH", side="long", size=1.5, entry_price=2000.0)]]
+
+
+def _close_fails(ex):
+    ex.place_order = AsyncMock(side_effect=ConnectionError("order POST failed"))
+
+
+@pytest.mark.parametrize("fault", [_reread_fails, _reread_disagrees, _close_fails])
+async def test_a_pass_that_leaves_an_orphan_unheld_keeps_opens_waiting(repo, fault):
+    """The pass a clear forces finds a lone ETH leftover, but its
+    confirming re-read fails or disagrees, or its close fails: ETH is
+    neither closed nor held, so the pass does not count and opens keep
+    waiting — an open now would net into it. The next pass that closes
+    it lets them resume."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    redis.data[HOLD] = "1"
+    ex = FakeExchange([ETH])
+    runner, _ = _runner(repo, redis, ex)
+    await runner._check_control_state()
+    del redis.data[HOLD]
+    fault(ex)
+
+    result = await runner._run_reconcile("Periodic")
+
+    assert result.unresolved_orphans == ["ETH"] and result.held_orphans == []
+    assert ex.orders == [] and HOLD not in redis.data
+    assert await _opens_allowed(runner) is False
+
+    ex.__dict__.pop("place_order", None)
+    await runner._run_reconcile("Periodic")
+    assert ex.orders == [("ETH", "sell", 2.0)]
+    assert await _opens_allowed(runner) is True
+
+
+async def test_a_reconcile_that_keeps_raising_blocks_opens_and_says_so(repo):
+    """Opens wait for a pass that counts, and a pass that raises on every
+    tick must not freeze them in silence: exits keep running, and once
+    opens have waited OPENS_STUCK_SECONDS one alert names the exception
+    — again at most every HOLD_REALERT_SECONDS while it lasts."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    ex = FakeExchange([ETH])
+    runner, bus = _runner(repo, redis, ex, first_pass=True)
+    await _row(repo, "ETH", strategy="s_ETH", size=2.0)
+    runner.repo.reconcile_positions = AsyncMock(side_effect=TimeoutError("DB"))
+    runner._last_funding_poll = time.time()
+    seen = []
+
+    async def run_strategy(strategy):
+        seen.append(await _opens_allowed(runner))
+        if not ex.orders:  # the strategy's exit, on the first tick
+            ok = await runner._execute_signal(_signal(SignalAction.CLOSE_LONG), 2100.0)
+            assert ok is True
+
+    runner._run_strategy = run_strategy
+    await runner.tick()
+    runner._awaiting_since -= OPENS_STUCK_SECONDS - 60  # 9 minutes in
+    await runner.tick()
+    assert bus.errors("reconcile") == []
+
+    runner._awaiting_since -= 61
+    for _ in range(3):
+        await runner.tick()
+
+    [alert] = bus.errors("reconcile")
+    assert "Opens are blocked until a reconcile pass completes" in alert
+    assert "TimeoutError" in alert and "Exits keep running" in alert
+    assert seen == [False] * 5  # every tick ran, none could open
+    assert ex.orders == [("ETH", "sell", 2.0)]  # the exit did
+    assert await repo.get_open_positions() == []
+    assert runner.repo.reconcile_positions.await_count == 5  # every tick
+
+    runner._hold_alert_at -= HOLD_REALERT_SECONDS + 1
+    await runner.tick()
+    assert len(bus.errors("reconcile")) == 2
+
+
+async def test_a_notice_that_names_held_positions_does_not_silence_blocked_opens(
+    repo,
+):
+    """A delivered notice naming a held DOGE announces that hold, not that
+    opens are still blocked behind a deferred ETH close."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    redis.data[HOLD] = "1"
+    doge = Position(symbol="DOGE", side="long", size=100.0, entry_price=0.1)
+    ex = FakeExchange([doge, ETH])
+    runner, bus = _runner(repo, redis, ex)
+    await runner._check_control_state()
+    del redis.data[HOLD]
+    await runner._check_control_state()
+    runner._awaiting_since -= OPENS_STUCK_SECONDS + 1
+    ex.reads = [[doge, ETH], ExchangeReadError("502 Bad Gateway")]
+
+    result = await runner._run_reconcile("Periodic")
+
+    assert result.held_orphans == ["DOGE"] and result.unresolved_orphans == ["ETH"]
+    assert "HELD exchange-orphan long 100.0 DOGE" in bus.errors("reconcile")[0]
+    assert "Opens are blocked" in bus.errors("reconcile")[-1]
+
+
+async def test_only_orphans_that_get_an_order_are_compared_on_the_re_read(repo):
+    """A human trading DOGE by hand between the two reads changes a
+    held orphan's size; that must not defer closing our ETH leftover."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    doge = Position(symbol="DOGE", side="long", size=100.0, entry_price=0.1)
+    ex = FakeExchange([doge, ETH])
+    runner, _ = _runner(repo, redis, ex)
+    ex.reads = [[doge, ETH], [Position(
+        symbol="DOGE", side="short", size=90.0, entry_price=0.1,
+    ), ETH]]
+
+    result = await runner._run_reconcile("Periodic")
+
+    assert ex.orders == [("ETH", "sell", 2.0)]
+    assert result.held_orphans == ["DOGE"] and result.unresolved_orphans == []
+    assert await _opens_allowed(runner) is True
+
+
 async def test_a_hold_set_again_after_a_clear_is_announced(repo):
     """Cleared while both orphans remain: the next pass sets the hold
     again with the same summary, which must not be deduplicated away."""
@@ -766,7 +904,7 @@ async def test_escalation_whose_hold_write_failed_still_holds(repo):
 async def test_without_bot_control_orphans_are_held_and_opens_allowed(repo):
     ex = FakeExchange([ETH])
     runner = EngineRunner(exchange=ex, strategies=[Strat("ETH")], repo=repo)
-    runner._orphans_checked = True
+    runner._awaiting = None
 
     result = await runner._run_reconcile("Periodic")
 

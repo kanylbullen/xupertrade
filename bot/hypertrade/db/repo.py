@@ -88,6 +88,10 @@ class ReconcileResult:
     held_orphans: list[str] = field(default_factory=list)
     """Symbols pass 2 held for a human instead of closing (NU-2)."""
 
+    unresolved_orphans: list[str] = field(default_factory=list)
+    """Symbols pass 2 meant to close and did not — a re-read did not
+    confirm them, or the close failed. Such a pass does not count (NU-2)."""
+
     @property
     def took_action(self) -> bool:
         return bool(self.actions or self.failures)
@@ -118,12 +122,10 @@ def _orphan_hold_reason(
     traded_symbols: set[str] | frozenset[str],
 ) -> str | None:
     """Why pass 2 must not market-close this exchange orphan, or None
-    (roadmap NU-2 guard 2). A lone orphan is usually a leftover of our
-    own; several at once, or one on a coin no strategy here trades, look
-    like a restored DB or a human's position, and closing those is the
-    liquidation the guard exists to stop. Only orphans on traded coins
-    count as several: a human's position elsewhere must not escalate a
-    leftover of ours."""
+    (NU-2 guard 2). A lone orphan is usually our own leftover; several on
+    traded coins, or one on a coin no strategy here trades, look like a
+    restored DB or a human's position — closing those is the liquidation
+    the guard exists to stop."""
     if hold_orphans:
         return hold_orphans
     if symbol not in traded_symbols:
@@ -1096,14 +1098,15 @@ class Repository:
                 sym: _orphan_hold_reason(sym, n_traded, hold_orphans, traded_symbols)
                 for sym, _ in orphans
             }
-            # A close rests on one read that can miss a position; closing
-            # needs a second read with the same orphans, each on the same
-            # side and size — the order uses them, and a human may have
-            # cut or reversed one in between (NU-2). Without it the close
-            # waits for the next pass — deferred, not held, so a read blip
-            # does not set the hold.
-            confirmed = None not in reasons.values() or await self._same_orphans(
-                exchange, db_symbols, dict(orphans), confirm_delay_seconds,
+            # A close needs a second read with the same orphans, each one
+            # to close on the same side and size: a read can miss one, and
+            # a human may cut or reverse one in between (NU-2). Otherwise it
+            # waits for the next pass — deferred, not held: a blip sets no hold.
+            result.unresolved_orphans = [s for s, _ in orphans if not reasons[s]]
+            confirmed = not result.unresolved_orphans or await self._same_orphans(
+                exchange, db_symbols,
+                {s: None if reasons[s] else p for s, p in orphans},
+                confirm_delay_seconds,
             )
             for sym, ex_pos in orphans:
                 why = reasons[sym] or (
@@ -1149,6 +1152,7 @@ class Repository:
                     logger.error("Reconcile: %s", msg)
                     continue
 
+                result.unresolved_orphans.remove(sym)
                 fill_price = float(order.filled_price or ex_pos.entry_price or 0.0)
                 fee = fill_price * float(ex_pos.size) * float(settings.taker_fee_rate)
                 try:
@@ -1205,8 +1209,9 @@ class Repository:
 
     @staticmethod
     async def _same_orphans(exchange, db_symbols, orphans, delay) -> bool:
-        """True when a re-read after `delay` shows exactly `orphans`
-        (symbol -> Position), each on the same side and, within dust, the
+        """True when a re-read after `delay` shows exactly the symbols of
+        `orphans`, and each one to close (symbol -> Position; None when
+        held for its own reason) on the same side and, within dust, the
         same size."""
         if delay > 0:
             await asyncio.sleep(delay)
@@ -1221,7 +1226,7 @@ class Repository:
         }
         return now.keys() == orphans.keys() and all(
             now[sym].side == p.side and abs(now[sym].size - p.size) < 1e-6
-            for sym, p in orphans.items()
+            for sym, p in orphans.items() if p
         )
 
     async def _insert_reconcile_trade(
