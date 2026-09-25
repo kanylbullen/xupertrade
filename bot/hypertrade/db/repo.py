@@ -7,7 +7,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -155,12 +157,14 @@ class Repository:
         self,
         database_url: str | None = None,
         tenant_id: str | None = None,
+        mode: str | None = None,
     ) -> None:
         url = database_url or settings.database_url
         self._engine = create_async_engine(url, echo=False)
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
-        self._mode = settings.exchange_mode
-        self._is_paper = settings.is_paper
+        # `mode`: for a CLI (funding_backfill); the bot uses EXCHANGE_MODE.
+        self._mode = mode or settings.exchange_mode
+        self._is_paper = self._mode == "paper"
         # Multi-tenancy Phase 3b: when set, every hot-path INSERT this
         # Repository writes carries this tenant_id (Trade, PositionRecord,
         # EquitySnapshot, FundingPayment). When None, falls back to
@@ -521,43 +525,95 @@ class Repository:
             result = await session.execute(query)
             return list(result.scalars().all())
 
-    async def upsert_funding_payment(
-        self,
-        ts: datetime,
-        h: str,
-        coin: str,
-        usdc: float,
-        szi: float | None,
-        funding_rate: float | None,
-        strategy_name: str | None,
-    ) -> bool:
-        """Insert a funding payment if not already present (dedup by hash).
-        Returns True if inserted, False if already existed."""
-        from sqlalchemy.exc import IntegrityError
+    # ── Funding payments: one row per (tenant_id, mode, coin, timestamp),
+    # alembic 0017; paging and attribution live in engine/funding.py.
+
+    def _funding_scope(self) -> list:
+        """This repository's funding rows: its mode and, if set, tenant."""
+        conds = [FundingPayment.mode == self._mode]
+        if self._tenant_id is not None:
+            conds.append(FundingPayment.tenant_id == self._tenant_id)
+        return conds
+
+    async def insert_funding_payments(
+        self, rows: list[dict],
+    ) -> set[tuple[str, datetime]]:
+        """Insert funding rows (FundingPayment columns but tenant, mode and
+        is_paper, which are this repository's) with ON CONFLICT DO NOTHING
+        on the event key, so an overlapping page is harmless. Returns the
+        (coin, timestamp) of the rows inserted (naive on SQLite)."""
+        if not rows:
+            return set()
+        values = [
+            {
+                **row,
+                "tenant_id": self._tenant_id,
+                "is_paper": self._is_paper,
+                "mode": self._mode,
+            }
+            for row in rows
+        ]
+        insert = (
+            pg_insert if self._engine.dialect.name == "postgresql"
+            else sqlite_insert
+        )
+        stmt = (
+            insert(FundingPayment)
+            .values(values)
+            .on_conflict_do_nothing(
+                index_elements=["tenant_id", "mode", "coin", "timestamp"],
+            )
+            .returning(FundingPayment.coin, FundingPayment.timestamp)
+        )
         async with self._session_factory() as session:
-            existing = await session.execute(
-                select(FundingPayment.id).where(FundingPayment.hash == h)
+            async with session.begin():
+                result = await session.execute(stmt)
+                return {(coin, ts) for coin, ts in result.all()}
+
+    async def get_funding_event_keys(
+        self, start: datetime, end: datetime,
+    ) -> set[tuple[str, datetime]]:
+        """`(coin, timestamp)` of this repository's stored funding events
+        in [start, end] — what a dry-run backfill counts as present."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(FundingPayment.coin, FundingPayment.timestamp).where(
+                    *self._funding_scope(),
+                    FundingPayment.timestamp >= start,
+                    FundingPayment.timestamp <= end,
+                )
             )
-            if existing.scalar_one_or_none() is not None:
-                return False
-            row = FundingPayment(
-                tenant_id=self._tenant_id,
-                timestamp=ts,
-                hash=h,
-                coin=coin,
-                usdc=usdc,
-                szi=szi,
-                funding_rate=funding_rate,
-                strategy_name=strategy_name,
-                is_paper=self._is_paper,
-                mode=self._mode,
+            return {(coin, ts) for coin, ts in result.all()}
+
+    async def get_positions_covering(
+        self, coins: set[str], start: datetime, end: datetime,
+    ) -> list[PositionRecord]:
+        """Rows on `coins` whose [opened_at, closed_at) overlaps [start,
+        end], for funding attribution. A closed row without a closed_at has
+        no known end, so it is left out rather than claim every event."""
+        if not coins:
+            return []
+        conds = [
+            PositionRecord.mode == self._mode,
+            PositionRecord.symbol.in_(sorted(coins)),
+            PositionRecord.opened_at <= end,
+            or_(
+                PositionRecord.closed_at > start,
+                and_(
+                    PositionRecord.closed_at.is_(None),
+                    PositionRecord.is_open == True,  # noqa: E712 — SQL, § 9
+                ),
+            ),
+        ]
+        if self._tenant_id is not None:
+            conds.append(PositionRecord.tenant_id == self._tenant_id)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PositionRecord)
+                .where(*conds)
+                .order_by(PositionRecord.opened_at, PositionRecord.id)
             )
-            session.add(row)
-            try:
-                await session.commit()
-                return True
-            except IntegrityError:
-                return False
+            return list(result.scalars().all())
 
     async def get_funding_since(self, since: datetime) -> list[FundingPayment]:
         async with self._session_factory() as session:
@@ -572,10 +628,12 @@ class Repository:
             return list(result.scalars().all())
 
     async def get_latest_funding_timestamp(self) -> datetime | None:
+        """Newest stored funding event of this tenant and mode — where
+        the poller resumes."""
         async with self._session_factory() as session:
             result = await session.execute(
                 select(FundingPayment.timestamp)
-                .where(FundingPayment.mode == self._mode)
+                .where(*self._funding_scope())
                 .order_by(FundingPayment.timestamp.desc())
                 .limit(1)
             )

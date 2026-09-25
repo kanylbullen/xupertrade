@@ -202,3 +202,15 @@ jobs:
           echo "heads:   $heads"
           test "$(echo "$heads" | wc -l)" -eq 1
           test "$current" = "$heads"
+
+      # Migration tests that need a real Postgres (the bot job's suite
+      # skips them): each migrates a scratch database of its own on
+      # this server, e.g. 0017 from 0016 with the old UNIQUE(hash) row.
+      # pytest lives in the dev group, so sync it only now — the
+      # upgrade above ran on runtime deps alone, like the image.
+      - name: Install (dev group, for pytest)
+        run: uv sync --locked
+      - name: Postgres migration tests
+        run: uv run --no-sync pytest -q tests/test_db/test_migration_0017_funding_key.py
+        env:
+          MIGRATION_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/hypertrade
