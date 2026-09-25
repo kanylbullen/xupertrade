@@ -25,9 +25,13 @@ import {
   getSessionSecret,
   verifySession,
 } from "./auth";
-import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { getRequiredOidcGroup, type Tenant } from "./tenant";
+import {
+  OIDC_GROUP_DENIED,
+  TENANT_DISABLED,
+  autocreateTenant,
+  type Tenant,
+} from "./tenant";
 import { isSessionRevoked } from "./session-store";
 
 // Operator tenant UUID (Phase 6b backfill). Used as a fallback in
@@ -42,8 +46,8 @@ const OPERATOR_TENANT_ID = "00000000-0000-0000-0000-000000000001";
  * Redirects to /login when there's no/invalid session — server
  * components can't return Responses, so we use Next.js's `redirect()`.
  *
- * Auto-creates the tenant row on first sight (same behavior as the
- * API-route `getCurrentTenant` to keep the two in sync).
+ * Auto-creates the tenant row on first sight through the same
+ * `autocreateTenant` the API-route `getCurrentTenant` uses.
  */
 export async function requireTenantServer(): Promise<Tenant> {
   // Disabled-auth fast path: mirror proxy.ts which lets all requests
@@ -98,45 +102,17 @@ export async function requireTenantServer(): Promise<Tenant> {
     return existing[0];
   }
 
-  // M-3: gate autocreate on the operator-configured Authentik group.
-  // Existing tenants above are NOT re-checked — group enforcement is
-  // autocreate-only by design. Default-empty `OIDC_REQUIRED_GROUP`
-  // preserves pre-M-3 behavior. Mirrors getCurrentTenant in tenant.ts.
-  const requiredGroup = getRequiredOidcGroup();
-  if (requiredGroup) {
-    // Copilot review fix on PR #94: explicit Array.isArray guard
-    // mirrors tenant.ts to avoid `.includes` substring-match if
-    // `groups` ever lands as a string.
-    const groups = Array.isArray(session.groups) ? session.groups : [];
-    if (!groups.includes(requiredGroup)) {
-      redirect("/login?error=oidc-not-in-required-group");
-    }
-  }
-
-  // First-sight auto-create. onConflictDoNothing handles the race
-  // between two parallel requests for a brand-new sub.
-  await db
-    .insert(tenants)
-    .values({
-      id: randomUUID(),
-      authentikSub: session.sub,
-      email: session.sub,
-      displayName: session.sub,
-    })
-    .onConflictDoNothing({ target: tenants.authentikSub });
-
-  const created = await db
-    .select()
-    .from(tenants)
-    .where(eq(tenants.authentikSub, session.sub))
-    .limit(1);
-  if (created.length === 0) {
-    throw new Error("tenant insert succeeded but row not found");
+  // First sight: the shared autocreate path in tenant.ts applies the
+  // M-3 group gate and the new-tenant bot cap, so pages and API routes
+  // cannot create tenants differently.
+  const created = await autocreateTenant(session);
+  if (created === OIDC_GROUP_DENIED) {
+    redirect("/login?error=oidc-not-in-required-group");
   }
   // M-2 belt-and-braces: pre-existing disabled row could have won the
   // onConflictDoNothing race.
-  if (created[0].isActive !== true) redirect("/login?error=tenant-disabled");
-  return created[0];
+  if (created === TENANT_DISABLED) redirect("/login?error=tenant-disabled");
+  return created;
 }
 
 /**

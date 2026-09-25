@@ -180,8 +180,36 @@ describe("requireTenantServer", () => {
       expect.objectContaining({
         authentikSub: "newuser@example.com",
         email: "newuser@example.com",
+        // NU-8: the page path creates tenants through the same helper
+        // as the API path, so it gets the same zero bot allowance.
+        maxActiveBots: 0,
       }),
     );
+  });
+
+  it("redirects with oidc-not-in-required-group and creates no tenant when the group is missing", async () => {
+    // The page-side resolver had its own copy of the M-3 gate and no
+    // test of it; it now shares autocreateTenant with the API path.
+    vi.stubEnv("OIDC_REQUIRED_GROUP", "hypertrade-users");
+    try {
+      authEnabled();
+      setCookie("good.cookie");
+      mockedGetSecret.mockResolvedValue("secret");
+      mockedVerify.mockReturnValue({
+        sub: "stranger@example.com",
+        iat: 1,
+        exp: 9999999999,
+        groups: ["everyone"],
+      });
+      chainSelectReturning([]);
+
+      await expect(requireTenantServer()).rejects.toThrow(
+        /NEXT_REDIRECT;\/login\?error=oidc-not-in-required-group/,
+      );
+      expect(mockedInsert).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("redirects to /login?error=tenant-disabled when existing row has isActive=false", async () => {

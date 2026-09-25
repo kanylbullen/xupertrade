@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState, useTransition } from "react";
 import { UnlockModal } from "@/components/unlock-modal";
 import { LiveLog } from "@/components/live-log";
 import { MainnetStrategiesCard } from "@/components/mainnet-strategies-card";
+import { botRequestErrorText } from "@/lib/bot-request-error";
 import { formatBuild, type BuildInfoLike } from "@/lib/build-label";
 
 const MODES = ["mainnet", "testnet", "paper"] as const;
@@ -311,9 +312,7 @@ function BotCard({
         }
         if (!res.ok) {
           const data = await res.json().catch(() => null);
-          setError(
-            (data as { error?: string })?.error ?? `Failed (${res.status})`,
-          );
+          setError(botRequestErrorText(data, res.status));
           return;
         }
         onChange();
@@ -342,9 +341,7 @@ function BotCard({
         }
         if (!res.ok) {
           const data = await res.json().catch(() => null);
-          setError(
-            (data as { error?: string })?.error ?? `Failed (${res.status})`,
-          );
+          setError(botRequestErrorText(data, res.status));
           return;
         }
         onChange();

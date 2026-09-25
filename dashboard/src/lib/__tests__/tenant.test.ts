@@ -35,7 +35,12 @@ vi.mock("../db", () => ({
 
 import { getSessionSecret, verifySession } from "../auth";
 import { db } from "../db";
-import { getCurrentTenant, requireTenant, OIDC_GROUP_DENIED } from "../tenant";
+import {
+  NEW_TENANT_MAX_ACTIVE_BOTS,
+  OIDC_GROUP_DENIED,
+  getCurrentTenant,
+  requireTenant,
+} from "../tenant";
 
 const mockedGetSecret = vi.mocked(getSessionSecret);
 const mockedVerify = vi.mocked(verifySession);
@@ -115,6 +120,23 @@ describe("getCurrentTenant — M-3 OIDC group autocreate gate", () => {
     expect(t).toBe(newRow);
     expect(values).toHaveBeenCalledWith(
       expect.objectContaining({ authentikSub: "newuser@example.com" }),
+    );
+  });
+
+  it("creates the new tenant with max_active_bots = 0 (NU-8): no bots until the operator raises it", async () => {
+    delete process.env.OIDC_REQUIRED_GROUP;
+    setSessionGroups(undefined);
+    const { values } = selectFirstSightThenInsertedRow({
+      id: "44444444-4444-4444-4444-444444444444",
+      authentikSub: "newuser@example.com",
+      isActive: true,
+    });
+
+    await getCurrentTenant(makeRequest());
+
+    expect(NEW_TENANT_MAX_ACTIVE_BOTS).toBe(0);
+    expect(values).toHaveBeenCalledWith(
+      expect.objectContaining({ maxActiveBots: 0 }),
     );
   });
 

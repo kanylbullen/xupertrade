@@ -181,6 +181,14 @@ services:
       OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
       OIDC_SCOPES: "${OIDC_SCOPES:-}"
       AUTH_MODE: "${AUTH_MODE:-}"
+      # OIDC invite gate (security audit M-3, roadmap NU-8): a first
+      # sign-in only gets a tenant when the IdP's `groups` claim holds
+      # this exact, case-sensitive name. Read from env on every request,
+      # never copied into Redis. The code gate existed before this line
+      # did, so every IdP user got a tenant. Empty default keeps a
+      # dashboard without Phase booting; it then logs a WARNING at boot
+      # whenever OIDC sign-in is configured. docs/INVITE_ONBOARDING.md.
+      OIDC_REQUIRED_GROUP: "${OIDC_REQUIRED_GROUP:-}"
       # Operator-level Telegram alerting for the heartbeat watchdog
       # (feat/heartbeat-watchdog). `phase run` injects these; the
       # watchdog (src/lib/heartbeat-watchdog.ts) sends a DM directly to

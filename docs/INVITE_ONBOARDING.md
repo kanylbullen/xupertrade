@@ -9,10 +9,12 @@ Authentik account to the `hypertrade-users` group.
 This document covers the operator-side workflow (adding a new user)
 and the user-side workflow (first sign-in through bot-running).
 
-> **Status note (updated 2026-07-29):** Originally written ahead of
+> **Status note (updated 2026-09-25):** Originally written ahead of
 > Phase 6 + Phase 8. The admin API + `/admin` UI, per-tenant limits and
 > `is_active` enforcement have since shipped and are marked as such
-> below. Feature status is marked inline:
+> below. Since roadmap NU-8 the group gate is wired into
+> `docker-compose.yml` and new tenants start with no bot allowance.
+> Feature status is marked inline:
 > - **AVAILABLE NOW** = implemented + on `master`
 > - **PLANNED** = part of a later phase, not yet implemented
 > Where the operator workflow currently relies on raw DB / SSH
@@ -61,17 +63,81 @@ dashboard.
 
    Without this policy, *any* Authentik user can sign in. With
    it, only group members can.
-3. Set `OIDC_REQUIRED_GROUP=hypertrade-users` on the dashboard
-   container (security audit M-3). This makes the dashboard verify
-   the `groups` claim on first sign-in and refuse to autocreate a
-   tenant row when the claim doesn't include the expected group.
-   Defense in depth alongside the Authentik-side policy: if the
-   IdP policy is misconfigured (or the operator federates a new
-   IdP that bypasses it), the dashboard still won't auto-onboard
-   strangers. Empty/unset = no enforcement (any successful OIDC
-   auth autocreates a tenant — pre-M-3 behavior). Group check
-   fires only on autocreate; existing tenants are NOT re-checked
-   on login.
+3. Set `OIDC_REQUIRED_GROUP=hypertrade-users` in Phase and recreate
+   the dashboard (`phase run -- docker compose up -d --no-deps
+   --force-recreate dashboard`, see
+   [runbooks/deploy.md](runbooks/deploy.md)). `docker-compose.yml`
+   passes it to the dashboard container; before NU-8 it did not, so
+   the gate below existed in code but never ran and every IdP user
+   got a tenant (security audit M-3, roadmap NU-8).
+
+   What the dashboard then does on a user's **first** sign-in:
+   - It reads the `groups` claim from the **ID token** — not the
+     userinfo endpoint. Authentik puts it there through the default
+     `profile` scope mapping (`OIDC_SCOPES` defaults to
+     `openid profile email`), as long as the provider's
+     **Include claims in id_token** setting is on (the default).
+     Turned off, the claim is missing and every new user is refused.
+     Other IdPs need a mapper that emits a `groups` claim.
+   - The claim may be a JSON array of names or a single string. The
+     match is **exact and case-sensitive**: `Hypertrade-Users` does
+     not satisfy `hypertrade-users`. Surrounding whitespace in the
+     env value is trimmed; the claim values are not.
+   - No match → no tenant row. The user lands on `/login` with "your
+     account isn't in the operator-approved group" (API routes
+     answer 403 `oidc-not-in-required-group`, naming the group).
+
+   Defense in depth alongside the Authentik-side policy: if the IdP
+   policy is misconfigured (or the operator federates a new IdP that
+   bypasses it), the dashboard still won't auto-onboard strangers.
+   The check fires only on autocreate; existing tenants are NOT
+   re-checked on login — revoke with `is_active` (below). A basic-auth
+   session carries no groups, so with the gate on, a basic username
+   that isn't already a tenant gets none either.
+
+   Empty/unset = no enforcement. The dashboard then logs a `WARNING`
+   line from `[oidc-group-gate]` at every boot while OIDC sign-in is
+   configured; with the group set it logs the group it requires
+   instead. Check after a deploy:
+   `docker logs hypertrade-dashboard-1 2>&1 | grep oidc-group-gate`.
+   That line only proves that *new* sign-ins are gated; step 4 covers
+   the tenants that already exist.
+4. **Once, right after step 3: audit the tenants created while the
+   gate was off.** The group is checked only when a tenant row is
+   created (`tenant.ts:autocreateTenant`). A user who already has a
+   row resolves to it with no group check, and a row created before
+   NU-8 has `max_active_bots` NULL, which is no cap
+   (`admin/limits.ts:reserveBotStart`). So anyone the IdP let in while
+   the gate was off (M-3, until NU-8) still has a working tenant with
+   unlimited bots. Those users are the ones the gate is meant to keep
+   out.
+
+   List every non-operator tenant with its running bots, as the
+   Postgres superuser
+   (`ssh -t root@$DEPLOY_HOST docker exec -it hypertrade-postgres-1 psql -U postgres -d hypertrade`):
+   ```sql
+   SELECT t.id, t.email, t.authentik_sub, t.created_at, t.is_active,
+          t.max_active_bots,
+          count(b.id) FILTER (WHERE b.is_running) AS running_bots
+     FROM tenants t
+     LEFT JOIN tenant_bots b ON b.tenant_id = t.id
+    WHERE NOT t.is_operator
+    GROUP BY t.id
+    ORDER BY t.created_at;
+   ```
+   Compare the rows with the members of `hypertrade-users` in
+   Authentik. `authentik_sub` is the user's OIDC `sub`, but `email` is
+   usually quicker to match. Then:
+   - **Not in the group:** disable the row. `/admin` shows `is_active`
+     but cannot change it, so use SQL:
+     `UPDATE tenants SET is_active = false WHERE id = '<uuid>';`.
+     This locks them out of the dashboard on their next request, but a
+     running bot keeps trading. Stop it as in "Removing a tenant"
+     step 1.
+   - **In the group:** set an explicit **Max active bots** in `/admin`
+     → the tenant → Limits (see "Inviting a new user", step 4). Leave
+     it blank only for a tenant you mean to leave uncapped, not by
+     accident.
 
 ### Inviting a new user
 
@@ -86,9 +152,19 @@ dashboard.
    the user-facing walkthrough (sign-in → passphrase → API wallet →
    credentials → first bot), including what the beta does not do yet.
 
-That's it on the operator side. The user can now sign in and
-the dashboard will auto-create their `tenants` row on first sign-
-in.
+4. After their first sign-in, give them a bot allowance. A new
+   tenant row is created with `max_active_bots = 0`: signed in, but
+   unable to start any bot (the dashboard says "Your account can't
+   run bots yet"). Raise it in **`/admin` → the tenant → Limits →
+   Max active bots** — `1` for a normal single-bot tenant. Blank
+   means no cap. Tenants that existed before NU-8 keep whatever they
+   had (NULL = no cap, unless you set one); only rows created from
+   then on start at 0. The one-time audit in "One-time setup", step 4
+   handles the older rows.
+
+That's it on the operator side. The dashboard auto-creates their
+`tenants` row on first sign-in; the bot allowance is the operator's
+second, deliberate step.
 
 ### Removing a tenant
 
@@ -118,7 +194,7 @@ in.
 
 **AVAILABLE NOW** — an operator-only `/admin` UI shipped, backed by
 `/api/admin/tenants`: tenant list with status, bot counts, trade counts
-and P&L; per-tenant limits (`max_active_strategies`,
+and P&L; per-tenant limits (`max_active_bots`, `max_active_strategies`,
 `allowed_strategies`); and `/admin/server` for host CPU/RAM/disk.
 
 **STILL PLANNED**:
@@ -182,8 +258,11 @@ What a freshly-invited user experiences:
 - Get redirected to Authentik for OIDC sign-in
 - Authentik authenticates them; checks `hypertrade-users`
   membership; redirects back to dashboard with a session cookie
-- Dashboard auto-creates a `tenants` row keyed on their
-  Authentik `sub` claim. They are now tenant N.
+- Dashboard checks the `groups` claim against
+  `OIDC_REQUIRED_GROUP`, then auto-creates a `tenants` row keyed on
+  their Authentik `sub` claim. They are now tenant N, with no bot
+  allowance until the operator raises it (see "Inviting a new
+  user", step 4).
 
 ### 2. Set passphrase
 
@@ -226,7 +305,9 @@ To create a bot, the dashboard needs your passphrase ONCE
 per session to decrypt the secrets and inject them into the
 bot container.
 
-- Click **Create bot** on the dashboard
+- Click **Create bot** on the dashboard. If it answers "Your
+  account can't run bots yet", the operator hasn't raised your bot
+  limit — ask them.
 - Enter passphrase → unlock
 - Pick mode: **paper** / **testnet** / **mainnet**
   - For non-operator tenants: only one bot at a time. To switch
@@ -280,8 +361,9 @@ Their bot is dead; their data stays. They can recreate via the dashboard if they
 so for repeat offenders also remove their account from the
 `hypertrade-users` Authentik group.
 
-**AVAILABLE NOW**: set `tenants.is_active = false` (SQL, or via
-`/admin`). The tenant resolver enforces it — the tenant is bounced to
+**AVAILABLE NOW**: set `tenants.is_active = false` (SQL only:
+`/admin` shows the flag but has no control for it). The tenant
+resolver enforces it — the tenant is bounced to
 `/login?error=tenant-disabled` on their next request and cannot create
 or start bots. Killing the container is still a separate step, since
 `is_active` gates the dashboard rather than reaching into a running
@@ -327,8 +409,9 @@ Roughly: 10 single-bot paper tenants ≈ 5 GB RAM + 10 CPU shares, plus
 the operator's own bots.
 
 **Per-tenant limits ARE available now** via `/admin`:
-`max_active_strategies` and `allowed_strategies` are enforced per
-tenant.
+`max_active_bots`, `max_active_strategies` and `allowed_strategies`
+are enforced per tenant. New tenants start at `max_active_bots = 0`,
+so a sign-in alone never adds a container to the host.
 
 **`MAX_TENANTS` is still NOT implemented.** The operator polices
 headcount via the `hypertrade-users` Authentik group and watches
