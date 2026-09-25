@@ -44,6 +44,9 @@ class Order:
     filled_price: float | None = None
     status: OrderStatus = OrderStatus.PENDING
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Why it was not filled, when known ("Reduce only order would
+    # increase position.", "no mid price", an unknown outcome).
+    error: str | None = None
 
 
 @dataclass

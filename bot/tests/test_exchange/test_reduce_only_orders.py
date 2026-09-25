@@ -99,6 +99,7 @@ async def test_hl_reduce_only_refusal_is_rejected(hl_http, build_exchange):
     order = await exchange.place_order("BTC", "sell", 0.01, reduce_only=True)
 
     assert order.status == OrderStatus.REJECTED
+    assert order.error.startswith("Reduce only order would increase position")
 
 
 async def test_slippage_sets_the_ioc_band(hl_http, build_exchange):
@@ -119,27 +120,77 @@ async def test_slippage_sets_the_ioc_band(hl_http, build_exchange):
 # --- HyperLiquid: the timeout poll knows the clamp --------------------------
 
 
-def _stub() -> HyperLiquidExchange:
+def _stub(fills=(), mid=50_000.0) -> HyperLiquidExchange:
     ex = HyperLiquidExchange.__new__(HyperLiquidExchange)
     ex._sz_decimals = {"BTC": 5}
+    ex.fetch_user_fills = AsyncMock(return_value=list(fills))
+    ex.get_current_price = AsyncMock(return_value=mid)
     return ex
+
+
+SENT_MS = 1_790_000_000_000
+
+
+def _close_fill(px: str, sz: str = "0.02", oid: int = 4242) -> dict:
+    return {"coin": "BTC", "side": "A", "sz": sz, "px": px, "fee": "0.4",
+            "time": SENT_MS + 3_000, "oid": oid}
+
+
+async def _poll_close(ex, monkeypatch, limit_px=47_500.0):
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    ex.get_position = AsyncMock(return_value=None)  # flat after the fill
+    return await ex._poll_for_delayed_fill(
+        symbol="BTC", side="sell", requested_size=0.05,
+        requested_rounded=0.05, order_type=OrderType.MARKET, price=None,
+        pre_signed=0.02, limit_px=limit_px, reduce_only=True,
+        sent_ms=SENT_MS,
+    )
 
 
 async def test_poll_waits_for_the_clamped_reduce_only_fill(monkeypatch):
     """A reduce-only sell of 0.05 against a 0.02 long can only take the
     long to flat. Waiting for -0.03 would call a real fill REJECTED."""
-    ex = _stub()
-    ex.get_position = AsyncMock(return_value=None)  # flat after the fill
-    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
-
-    order = await ex._poll_for_delayed_fill(
-        symbol="BTC", side="sell", requested_size=0.05,
-        requested_rounded=0.05, order_type=OrderType.MARKET, price=None,
-        pre_signed=0.02, limit_px=49_750.0, reduce_only=True,
-    )
+    order = await _poll_close(_stub([_close_fill("49990.0")]), monkeypatch)
 
     assert order.status == OrderStatus.FILLED
     assert order.size == pytest.approx(0.02)
+
+
+async def test_a_late_close_is_priced_from_its_own_fill(monkeypatch):
+    """A close that filled after its POST timed out leaves no position
+    to read a price from. It used to book the limit — up to 5 % off on
+    the wide band. HL's closing fill since the send is the price, and its
+    oid the id (so reconcile never spends that fill twice)."""
+    old = {**_close_fill("45000.0", oid=1), "time": SENT_MS - 60_000}
+    ex = _stub([old, _close_fill("49990.0")])
+
+    order = await _poll_close(ex, monkeypatch)
+
+    assert order.filled_price == pytest.approx(49_990.0)
+    assert order.id == "4242"
+
+
+async def test_a_late_close_with_no_fill_found_is_priced_at_the_mid(monkeypatch):
+    order = await _poll_close(_stub(mid=50_000.0), monkeypatch)
+
+    assert order.status == OrderStatus.FILLED
+    assert order.filled_price == pytest.approx(50_000.0), "never the limit"
+
+
+async def test_a_timeout_with_no_fill_says_the_outcome_is_unknown(monkeypatch):
+    ex = _stub()
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    ex._signed_position_size = AsyncMock(return_value=0.02)  # never moves
+
+    order = await ex._poll_for_delayed_fill(
+        symbol="BTC", side="sell", requested_size=0.02,
+        requested_rounded=0.02, order_type=OrderType.MARKET, price=None,
+        pre_signed=0.02, limit_px=49_750.0, reduce_only=True,
+        sent_ms=SENT_MS,
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert order.error.startswith("outcome unknown")
 
 
 async def test_poll_skips_a_reduce_only_order_with_nothing_to_reduce(monkeypatch):
@@ -192,6 +243,7 @@ async def test_paper_reduce_only_that_would_increase_is_rejected(position):
     order = await ex.place_order("ETH", "sell", 1.0, reduce_only=True)
 
     assert order.status == OrderStatus.REJECTED
+    assert order.error == "Reduce only order would increase position."
     assert await ex.get_position("ETH") == position
     assert (await ex.get_balance()).total == pytest.approx(before.total)
 

@@ -473,8 +473,7 @@ async def test_flip_close_not_filled_resyncs_and_alerts_once():
     assert exchange.place_order.await_count == 3, "one close attempt per tick"
     assert all(c.kwargs["reduce_only"] for c in exchange.place_order.await_args_list)
     repo.record_trade_and_open_position.assert_not_awaited()
-    assert set(strat.restored) == {("short", 50_000.0)}
-    assert len(strat.restored) >= 3, "re-synced after every attempt"
+    assert strat.restored == [("short", 50_000.0)] * 3, "once per attempt"
     # One alert for the (strategy, coin) until a close fills (NU-5a): the
     # rejected close's, which the flip does not repeat.
     errors = _errors(bus)

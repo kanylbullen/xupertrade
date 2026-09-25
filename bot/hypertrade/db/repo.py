@@ -820,18 +820,8 @@ class Repository:
         nothing, and the row stays open. No order is placed. Returns the
         price used, or None when nothing was written.
         """
-        since_ms = _to_epoch_ms(row.opened_at)
-        try:
-            fills = list(await exchange.fetch_user_fills(since_ms=since_ms) or [])
-        except Exception:
-            logger.exception(
-                "External close: fetch_user_fills failed for %s — pricing "
-                "at the mid", row.symbol,
-            )
-            fills = []
-        ledger = FillLedger(
-            fills,
-            exclude_order_ids=await self._recorded_order_ids(fill_order_ids(fills)),
+        ledger = await self._fill_ledger(
+            exchange, _to_epoch_ms(row.opened_at), "External close",
         )
         priced = await self._price_orphan_close(
             exchange, row, ledger, {}, label="external close",
@@ -846,6 +836,37 @@ class Repository:
                 return None
             await session.commit()
         return priced
+
+    async def _fill_ledger(self, exchange, since_ms, who: str) -> FillLedger:
+        """The exchange's fills since `since_ms`, each spendable once and
+        none already booked as a trade (#167); empty when the fetch
+        fails, so every close prices at the mid."""
+        fills: list[dict] = []
+        try:
+            fills = list(await exchange.fetch_user_fills(since_ms=since_ms) or [])
+        except Exception:
+            logger.exception(
+                "%s: fetch_user_fills failed — falling back to mid price", who,
+            )
+        if len(fills) >= _HL_FILL_PAGE_CAP:
+            logger.warning(
+                "%s: fetch_user_fills returned %d records (HL caps a page at "
+                "%d) — the window from %s may be truncated and a close older "
+                "than the newest %d fills would price at the mid instead",
+                who, len(fills), _HL_FILL_PAGE_CAP, since_ms, _HL_FILL_PAGE_CAP,
+            )
+        ledger = FillLedger(
+            fills,
+            exclude_order_ids=await self._recorded_order_ids(fill_order_ids(fills)),
+        )
+        if ledger.excluded_count:
+            logger.info(
+                "%s: %d of %d fill(s) are already booked as trades rows and "
+                "are not available to price an orphan", who,
+                ledger.excluded_count,
+                ledger.excluded_count + ledger.usable_count,
+            )
+        return ledger
 
     @staticmethod
     def _classify_closes(
@@ -1040,34 +1061,7 @@ class Repository:
             since_ms = min(
                 (_to_epoch_ms(p.opened_at) or 0) for p, _ in to_close
             ) or None
-            fills: list[dict] = []
-            try:
-                fills = list(await exchange.fetch_user_fills(since_ms=since_ms) or [])
-            except Exception:
-                logger.exception(
-                    "Reconcile: fetch_user_fills failed — falling back to mid price",
-                )
-            if len(fills) >= _HL_FILL_PAGE_CAP:
-                logger.warning(
-                    "Reconcile: fetch_user_fills returned %d records (HL caps "
-                    "a page at %d) — the window from %s may be truncated and "
-                    "a close older than the newest %d fills would price at "
-                    "the mid instead",
-                    len(fills), _HL_FILL_PAGE_CAP, since_ms, _HL_FILL_PAGE_CAP,
-                )
-            ledger = FillLedger(
-                fills,
-                exclude_order_ids=await self._recorded_order_ids(
-                    fill_order_ids(fills)
-                ),
-            )
-            if ledger.excluded_count:
-                logger.info(
-                    "Reconcile: %d of %d fill(s) are already booked as trades "
-                    "rows and are not available to price an orphan",
-                    ledger.excluded_count,
-                    ledger.excluded_count + ledger.usable_count,
-                )
+            ledger = await self._fill_ledger(exchange, since_ms, "Reconcile")
             mid_cache: dict[str, float] = {}
             for row, kind in to_close:
                 priced = await self._price_orphan_close(
@@ -1207,14 +1201,17 @@ class Repository:
 
                 result.unresolved_orphans.remove(sym)
                 fill_price = float(order.filled_price or ex_pos.entry_price or 0.0)
-                fee = fill_price * float(ex_pos.size) * float(settings.taker_fee_rate)
+                # Reduce-only: a position cut since the read fills less,
+                # and what filled is what is booked and reported.
+                filled = float(order.size)
+                fee = fill_price * filled * float(settings.taker_fee_rate)
                 try:
                     await self.record_trade(
                         order_id=order.id,
                         strategy_name="reconcile",
                         symbol=sym,
                         side=close_side,
-                        size=float(ex_pos.size),
+                        size=filled,
                         price=fill_price,
                         fee=fee,
                         # No DB row means no entry price, so there is no
@@ -1230,7 +1227,7 @@ class Repository:
                     # reconcile by hand.
                     fail = (
                         f"UNBOOKKEPT exchange-orphan close on {sym} "
-                        f"(order_id={order.id}, {ex_pos.side} {ex_pos.size} "
+                        f"(order_id={order.id}, {ex_pos.side} {filled} "
                         f"@ {fill_price:.6f}): Trade row failed to write: {e}"
                     )
                     result.failures.append(fail)
@@ -1239,8 +1236,9 @@ class Repository:
                         "row failed to write (order_id=%s)", sym, order.id,
                     )
                 msg = (
-                    f"closed exchange-orphan: {ex_pos.side} {ex_pos.size} "
-                    f"{sym} @ {fill_price:.6f} (filled)"
+                    f"closed exchange-orphan: {ex_pos.side} {filled} "
+                    f"{sym} @ {fill_price:.6f} (filled"
+                    + (f" of {ex_pos.size})" if filled < ex_pos.size - 1e-12 else ")")
                 )
                 result.actions.append(msg)
                 logger.warning("Reconcile: %s", msg)

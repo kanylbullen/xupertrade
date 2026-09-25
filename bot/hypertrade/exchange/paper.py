@@ -165,6 +165,7 @@ class PaperExchange(Exchange):
                     "increase position (holding %s)", side, size, symbol,
                     f"{existing.side} {existing.size}" if existing else "none",
                 )
+                rejected.error = "Reduce only order would increase position."
                 return rejected
             size = min(size, existing.size)
 

@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import socket
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -470,6 +471,7 @@ class HyperLiquidExchange(Exchange):
         size: float,
         order_type: OrderType,
         price: float | None,
+        error: str | None = None,
     ) -> Order:
         return Order(
             id=str(uuid.uuid4()),
@@ -479,6 +481,7 @@ class HyperLiquidExchange(Exchange):
             order_type=order_type,
             price=price,
             status=OrderStatus.REJECTED,
+            error=error,
         )
 
     async def place_order(
@@ -517,7 +520,7 @@ class HyperLiquidExchange(Exchange):
                 "(unknown or delisted coin?) — cannot round size or price",
                 symbol, side, size, symbol,
             )
-            return self._rejected(symbol, side, size, order_type, price)
+            return self._rejected(symbol, side, size, order_type, price, "no szDecimals")
 
         if order_type == OrderType.MARKET:
             mid = await self.get_current_price(symbol)
@@ -526,7 +529,7 @@ class HyperLiquidExchange(Exchange):
                     "No mid price for %s — cannot place market order %s %s",
                     symbol, side, size,
                 )
-                return self._rejected(symbol, side, size, order_type, price)
+                return self._rejected(symbol, side, size, order_type, price, "no mid price")
             if slippage is None:
                 slippage = 0.005  # 0.5% aggressive limit for IOC fill
             limit_px = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
@@ -542,7 +545,7 @@ class HyperLiquidExchange(Exchange):
                 "Rounded size for %s is zero (raw=%s, szDecimals=%s) — order skipped",
                 symbol, size, self._sz_decimals[symbol],
             )
-            return self._rejected(symbol, side, size, order_type, price)
+            return self._rejected(symbol, side, size, order_type, price, "size rounds to 0")
         # Audit H2: snapshot the pre-order signed position size so a
         # post-timeout poll can detect a delayed fill. Long = +size,
         # short = -size. Best-effort — if the read fails, we lose the
@@ -552,6 +555,7 @@ class HyperLiquidExchange(Exchange):
             pre_signed = await self._signed_position_size(symbol)
         except Exception:
             pre_signed = None
+        sent_ms = int(time.time() * 1000)
         try:
             # Order placement gets the longer write timeout. HL match
             # engine can take a few seconds under load; we'd rather
@@ -574,7 +578,7 @@ class HyperLiquidExchange(Exchange):
                     "HyperLiquid order failed for %s %s %s @ %s",
                     symbol, side, rounded_size, limit_px,
                 )
-                return self._rejected(symbol, side, rounded_size, order_type, price)
+                return self._rejected(symbol, side, rounded_size, order_type, price, repr(e))
             # The POST timed out or lost its connection — but HL may
             # STILL fill the order. Returning REJECTED here was the audit
             # H2 bug: the runner would skip the DB write while the
@@ -601,6 +605,7 @@ class HyperLiquidExchange(Exchange):
                 pre_signed=pre_signed,
                 limit_px=limit_px,
                 reduce_only=reduce_only,
+                sent_ms=sent_ms,
             )
 
         status_str = result.get("status", "")
@@ -609,7 +614,9 @@ class HyperLiquidExchange(Exchange):
                 "HyperLiquid order rejected for %s %s %s: %s",
                 symbol, side, rounded_size, result,
             )
-            return self._rejected(symbol, side, rounded_size, order_type, price)
+            return self._rejected(
+                symbol, side, rounded_size, order_type, price, str(result)[:200],
+            )
 
         statuses = (
             result.get("response", {}).get("data", {}).get("statuses", [])
@@ -618,6 +625,7 @@ class HyperLiquidExchange(Exchange):
         filled_price = limit_px
         filled_size = rounded_size
         order_status = OrderStatus.REJECTED
+        error = "no order status"
         if statuses:
             entry = statuses[0]
             if "filled" in entry:
@@ -629,7 +637,7 @@ class HyperLiquidExchange(Exchange):
                     requested=size, filled_price=filled_price,
                 )
                 if filled_size > 0:
-                    order_status = OrderStatus.FILLED
+                    order_status, error = OrderStatus.FILLED, None
                 else:
                     # HL said "filled" with a readable size of zero (or
                     # less): nothing is on the exchange, so nothing may
@@ -642,7 +650,7 @@ class HyperLiquidExchange(Exchange):
                         order_id or "?",
                     )
                     filled_size = rounded_size
-                    order_status = OrderStatus.REJECTED
+                    error = "filled 0"
             elif "resting" in entry:
                 oid = entry["resting"].get("oid")
                 order_id = str(oid) if oid is not None else ""
@@ -650,11 +658,13 @@ class HyperLiquidExchange(Exchange):
                     symbol=symbol, side=side, size=rounded_size,
                     limit_px=limit_px, tif=tif, order_id=order_id,
                 )
+                error = "rested on the book instead of filling"
             elif "error" in entry:
                 logger.warning(
                     "HyperLiquid per-order error for %s %s %s: %s",
                     symbol, side, rounded_size, entry["error"],
                 )
+                error = str(entry["error"])
             else:
                 logger.warning(
                     "HyperLiquid unknown status entry for %s %s %s: %s",
@@ -675,6 +685,7 @@ class HyperLiquidExchange(Exchange):
             price=price,
             filled_price=filled_price,
             status=order_status,
+            error=error,
         )
 
     @staticmethod
@@ -778,6 +789,7 @@ class HyperLiquidExchange(Exchange):
         pre_signed: float | None,
         limit_px: float,
         reduce_only: bool = False,
+        sent_ms: int | None = None,
     ) -> Order:
         """Audit H2: poll the exchange for a delayed fill after a
         place_order timeout.
@@ -796,7 +808,9 @@ class HyperLiquidExchange(Exchange):
 
         A reduce-only order fills at most the position it reduces, so the
         poll waits for that clamped amount; with nothing to reduce it
-        cannot have filled at all.
+        cannot have filled at all. What is left of the position says
+        nothing about what a close filled at: it is priced from HL's own
+        closing fills since `sent_ms`, else the mid (`_late_close_price`).
         """
         if pre_signed is None:
             logger.warning(
@@ -806,6 +820,7 @@ class HyperLiquidExchange(Exchange):
             )
             return self._rejected(
                 symbol, side, requested_rounded, order_type, price,
+                "outcome unknown (timeout, no pre-order position read)",
             )
 
         # Tolerance: one min step at szDecimals precision, matching the
@@ -824,6 +839,7 @@ class HyperLiquidExchange(Exchange):
                 )
                 return self._rejected(
                     symbol, side, requested_rounded, order_type, price,
+                    "timeout, and no position to reduce",
                 )
         expected_delta = expected if side == "buy" else -expected
         target = pre_signed + expected_delta
@@ -852,15 +868,20 @@ class HyperLiquidExchange(Exchange):
                     fill_px = float(pos.entry_price) if pos else float(limit_px)
                 except Exception:
                     fill_px = float(limit_px)
+                oid = None
+                if reduce_only:  # what is left says nothing of a close's price
+                    fill_px, oid = await self._late_close_price(
+                        symbol, side, expected, sent_ms, limit_px,
+                    )
                 logger.warning(
                     "Timeout-poll: detected delayed fill for %s %s %s "
-                    "(requested %s) after %.0fs (entry≈%.4f). Treating as "
+                    "(requested %s) after %.0fs (price≈%.4f). Treating as "
                     "FILLED.",
                     symbol, side, requested_rounded, requested_size,
                     elapsed, fill_px,
                 )
                 return Order(
-                    id=str(uuid.uuid4()), symbol=symbol, side=side,
+                    id=oid or str(uuid.uuid4()), symbol=symbol, side=side,
                     size=expected, order_type=order_type,
                     price=price, filled_price=fill_px,
                     status=OrderStatus.FILLED,
@@ -872,7 +893,38 @@ class HyperLiquidExchange(Exchange):
         )
         return self._rejected(
             symbol, side, requested_rounded, order_type, price,
+            f"outcome unknown: timed out, no fill seen in {elapsed:.0f}s "
+            "(it may still fill late)",
         )
+
+    async def _late_close_price(
+        self, symbol: str, side: str, size: float, sent_ms: int | None,
+        limit_px: float,
+    ) -> tuple[float, str | None]:
+        """The price and oid of a close that filled after its POST timed
+        out: HL's closing fills for `size` since it was sent (less a
+        little clock skew). Else the mid, logged as an estimate; the limit
+        price (as far as 5 % off) only when there is no mid either."""
+        from hypertrade.reconcile.fills import FillLedger  # noqa: PLC0415
+
+        since = None if sent_ms is None else sent_ms - 5_000
+        try:
+            got = FillLedger(await self.fetch_user_fills(since_ms=since)).take(
+                symbol=symbol, size=size, since_ms=since,
+                position_side="long" if side == "sell" else "short",
+            )
+            if got is not None:
+                return got.price, got.order_id
+            mid = await self.get_current_price(symbol)  # 0.0 on error
+        except Exception:
+            logger.exception("Timeout-poll: pricing the late close failed")
+            mid = 0.0
+        logger.warning(
+            "Timeout-poll: no closing fill found for %s %s %s — priced "
+            "ESTIMATED at %s", symbol, side, size,
+            f"the mid {mid}" if mid > 0 else f"the limit {limit_px}",
+        )
+        return (mid if mid > 0 else float(limit_px)), None
 
     async def update_leverage(self, symbol: str, leverage: int, is_cross: bool = True) -> bool:
         try:
