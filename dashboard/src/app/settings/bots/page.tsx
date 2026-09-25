@@ -1,3 +1,5 @@
+import { getBuildInfo } from "@/lib/build-info";
+
 import { BotsClient } from "./bots-client";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +15,9 @@ export default function BotsPage() {
           and unlocked first.
         </p>
       </header>
-      <BotsClient />
+      {/* Read server-side: the stamp file only exists in the runner
+          image. Each running bot's build is fetched by its card. */}
+      <BotsClient dashboardBuild={getBuildInfo()} />
     </main>
   );
 }

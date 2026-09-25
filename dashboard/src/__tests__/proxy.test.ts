@@ -117,7 +117,13 @@ describe("proxy — locked", () => {
     expect(loc.pathname).toBe("/login");
   });
 
-  it.each(["/login", "/api/auth/config", "/api/auth/login", "/api/healthz"])(
+  it.each([
+    "/login",
+    "/api/auth/config",
+    "/api/auth/login",
+    "/api/healthz",
+    "/api/version",
+  ])(
     "still lets public path %s through, so the notice can render",
     async (path) => {
       mockedFetchCfg.mockResolvedValue(cfg("locked"));

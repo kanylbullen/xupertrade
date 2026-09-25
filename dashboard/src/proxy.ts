@@ -19,6 +19,10 @@ const PUBLIC_PATHS = new Set([
   // the auth gate doesn't 307 it to /login (which would make the probe
   // succeed-but-with-redirect, an ambiguous signal).
   "/api/healthz",
+  // Which build is running ({ sha, built_at }). Public so a deploy can
+  // be checked without a session; it exposes nothing that isn't in the
+  // public repo (see app/api/version/route.ts).
+  "/api/version",
   // PR 3c unlock-deeplink landing page. The page itself validates
   // the signed token server-side; the passphrase POST it triggers
   // still requires an authenticated session, so the page is "public
