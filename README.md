@@ -484,7 +484,7 @@ class MyStrategy(Strategy):
    reads from these files (see "Strategies" above); there's no page
    component to edit by hand.
 
-5. Rebuild the bot image and restart running bots to pick it up: `docker compose --profile build build --no-cache --pull bot-image`, then restart each running bot from **Settings → Bots** in the dashboard (or `POST /api/tenant/me/bots/<id>/stop` then `/start`) — a bot only picks up new code when it's (re)started.
+5. Rebuild the bot image and restart running bots to pick it up: `GIT_SHA=$(git rev-parse HEAD) docker compose --profile build build --no-cache --pull bot-image`, then restart each running bot from **Settings → Bots** in the dashboard (or `POST /api/tenant/me/bots/<id>/stop` then `/start`) — a bot only picks up new code when it's (re)started. `GIT_SHA` stamps the image, so the bot's card on **Settings → Bots** shows which commit it runs (`unknown` without it).
 
 ## Project origin
 

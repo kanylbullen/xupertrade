@@ -25,24 +25,47 @@ brought the container up off an unchanged image SHA. See the cache-trap
 warning below for the underlying mechanic.
 
 ```bash
-# 1. Pull master + check disk + build with --no-cache --pull
+# 1. Pull master + check disk + build with --no-cache --pull, stamping
+#    both images with the commit just checked out (GIT_SHA)
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && \
    git fetch origin && git reset --hard origin/master && \
    df -h / | tail -1 && \
-   phase run -- docker compose --profile build build --no-cache --pull bot-image dashboard"
+   GIT_SHA=\$(git rev-parse HEAD) phase run -- docker compose --profile build build --no-cache --pull bot-image dashboard"
 
-# 2. Verify image age — both timestamps must be newer than your commit
+# 2. Verify the images: both timestamps newer than your commit, and
+#    both `rev:` equal to the HEAD printed first
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "docker image inspect hypertrade-dashboard -f 'built: {{.Created}}' && \
-   docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}'"
+  "cd /opt/hypertrade && echo \"HEAD: \$(git rev-parse HEAD)\" && \
+   docker image inspect hypertrade-dashboard -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}' && \
+   docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
 
 # 3. Only THEN recreate the containers. `--no-deps` is not optional:
 #    without it compose also recreates any dependency whose config
 #    changed (redis, postgres), and a recreated redis can come up empty.
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && phase run -- docker compose up -d --no-deps --force-recreate dashboard"
+
+# 4. The running dashboard must report the commit you built.
+#    /api/version is public, so no session is needed. Right after step 3
+#    the dashboard may still be starting; a curl error means retry.
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && want=\$(git rev-parse HEAD) && \
+   got=\$(curl -fsS http://127.0.0.1:3000/api/version) && \
+   echo \"HEAD:    \$want\" && echo \"running: \$got\" && \
+   case \"\$got\" in *\"\$want\"*) echo OK ;; *) echo MISMATCH >&2; exit 1 ;; esac"
 ```
+
+**The `\$` in `GIT_SHA=\$(git rev-parse HEAD)` is not optional.** The
+command must run on the host, after its `git reset`. Unescaped, your
+local shell expands it to whatever your own clone has checked out, and
+the image then reports a commit it was not built from; nothing checks
+the value beyond "looks like hex". Left out entirely, both images build
+fine but stamp `unknown`, so `rev: unknown` in step 2 and a `MISMATCH`
+in step 4 mean a rebuild with `GIT_SHA`, not a code problem (an empty
+`rev:` is an image from before the stamp existed, #182). A
+`MISMATCH` with a hex SHA means the dashboard is not running an image
+built from HEAD: check step 2 and the cache trap below.
 
 > ⚠️ **Never let compose recreate `redis` by accident.** The dashboard
 > `depends_on` redis, so `up -d --force-recreate dashboard` *without*
@@ -74,6 +97,17 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 > happens, the new bot logic only applies to bots STARTED after the
 > deploy — not to ones already running.
 
+**Checking which build a bot runs.** `/settings/bots` shows the
+dashboard's build and each running bot's, as `<short sha>, built <time>`.
+A bot restarted after the deploy must show HEAD; one that wasn't
+restarted still shows the build it was started on. `unknown` on a bot
+card means its image has no stamp: either the bot was started on an
+image from before the stamp (its `/api/version` answers 404) and needs a
+restart, or the image was built without `GIT_SHA` and needs step 1
+again. A bot's `/api/version` needs no API key, so from the host:
+`docker exec <bot-container> python -c 'import urllib.request; print(urllib.request.urlopen("http://localhost:<port>/api/version").read().decode())'`
+(ports as in [health-check.md](health-check.md)).
+
 **There is no per-mode compose profile or `bot-mainnet`/`bot-testnet`
 service any more** (that model predates the multi-tenant orchestrator, see
 `CLAUDE.md` § 2). One `bot-image` build (profile `build`) produces
@@ -96,7 +130,8 @@ as any other tenant bot: dashboard UI `Settings → Bots → restart`, or
 > first build of any service/image that hasn't been built recently:**
 >
 > ```bash
-> phase run -- bash -c 'docker compose --profile build build --no-cache --pull bot-image'
+> cd /opt/hypertrade && GIT_SHA=$(git rev-parse HEAD) \
+>   phase run -- bash -c 'docker compose --profile build build --no-cache --pull bot-image'
 > ```
 >
 > (`--pull` refreshes the base image too — combining both ensures the
@@ -140,10 +175,11 @@ the standalone build step (no chained `&& up -d`):
 
 ```bash
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
-  "cd /opt/hypertrade && phase run -- docker compose --profile build build --no-cache --pull dashboard"
+  "cd /opt/hypertrade && GIT_SHA=\$(git rev-parse HEAD) phase run -- docker compose --profile build build --no-cache --pull dashboard"
 ```
 
-Then verify image age and recreate per the three-step shape above. The
+Then verify the image, recreate and check `/api/version` per the steps
+above. The
 old `bash -c 'build --pull && up -d'` form is what bit us with the
 cache-trap — don't reintroduce it.
 

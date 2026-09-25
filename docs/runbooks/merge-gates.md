@@ -22,6 +22,10 @@ fails a `uv.lock` that no longer matches `bot/pyproject.toml`. The fix is
 
 ## Making them required (operator, once `ci` is green on master)
 
+Done on 2026-09-25: the ruleset requires `bot`, `dashboard`,
+`migrations` and `gitleaks`. `dashboard-integration` is not required
+yet. The steps stay here for the next change to the list.
+
 The ruleset is `default-protection` (id 15967890), on the default branch.
 In the repository settings: Rules → Rulesets → `default-protection` →
 Require status checks to pass → add `bot`, `dashboard`, `migrations` and

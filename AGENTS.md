@@ -11,8 +11,9 @@ CLAUDE.md map: § 0 secrets · § 1 mission & definition of done · § 2 repo
 layout · § 3 environment & runbook index · § 4 subagents · § 5 open backlog ·
 § 6 working principles · § 7 workflow & review · § 8 strategy evaluation ·
 § 9 pitfalls · § 10 glossary. Fixed-backlog history:
-[docs/CHANGELOG.md](docs/CHANGELOG.md). Operator runbooks (deploy, health
-check, auth recovery, Postgres rotation, Phase): [docs/runbooks/](docs/runbooks/).
+[docs/CHANGELOG.md](docs/CHANGELOG.md). Operator runbooks (deploy, merge
+gates, health check, auth recovery, Postgres rotation, Phase):
+[docs/runbooks/](docs/runbooks/).
 
 ## Project (one paragraph)
 
@@ -76,6 +77,8 @@ and under Claude Code it is the only one: the guard hook refuses
 5. **Commit** — Conventional-Commit message + `Co-Authored-By:` line (CLAUDE.md § 7).
 6. **Push + open PR** — `gh pr create --base master` with the
    `## Summary` / `## Test plan` / `## Notes for reviewer` template (CLAUDE.md § 7).
+   Then wait for the required CI checks (`gh pr checks <n> --watch`) and
+   fix anything red before asking for review.
 7. **Review before merge** — there is NO automated code reviewer. Zero
    comments on a PR means unreviewed, not approved: get a human review or
    an agent review pass and triage every finding; if no review is
@@ -103,16 +106,19 @@ and under Claude Code it is the only one: the guard hook refuses
   refuses them, and for Claude Code the PreToolUse hook
   `.claude/hooks/guard_bash.py` blocks them (and `--no-verify`) before they
   run. Emergency fixes are PRs too, which the operator merges without
-  waiting for review; the hook's override does not get past the ruleset
-  (CLAUDE.md § 7).
+  waiting for review (the required checks still apply); the hook's
+  override does not get past the ruleset (CLAUDE.md § 7).
 - **NO deploy to the remote server.** The operator deploys: dashboard and
   Caddy after merge, bot code in the weekly bot-deploy window
   ([docs/runbooks/deploy.md](docs/runbooks/deploy.md)).
 - **Merge gates:** bot changes → `pytest` green. Dashboard changes →
-  `tsc`, lint, `vitest` and `build` green. There is no test/build CI — the
-  local suite is the gate. Server-side checks that do run on every PR:
-  gitleaks secret-scan (`.github/workflows/secret-scan.yml`) and CodeQL —
-  both security scans, neither is a code review.
+  `tsc`, lint, `vitest` and `build` green. Run them locally before
+  pushing. CI runs them again on every PR (`.github/workflows/ci.yml`),
+  and `master` **requires** the checks `bot`, `dashboard`, `migrations`
+  and `gitleaks` (`.github/workflows/secret-scan.yml`): a PR with one red
+  or pending cannot merge. `dashboard-integration` and CodeQL also run
+  but are not required. None of them is a code review. Details and the
+  emergency bypass: [docs/runbooks/merge-gates.md](docs/runbooks/merge-gates.md).
 - Never bypass the pre-commit hook.
 
 ## Key commands
@@ -144,7 +150,8 @@ data and points at the docs in `node_modules/next/dist/docs/`.
 Same as CLAUDE.md § 1: PR → review → merge by the operator.
 
 - [ ] Changes committed on the task branch, pushed, PR opened.
-- [ ] Gates green (pytest / dashboard gates, as applicable).
+- [ ] Gates green locally (pytest / dashboard gates, as applicable), and
+      the required CI checks green on the PR.
 - [ ] Within the PR rules above (size, order-path WIP limit).
 - [ ] Review handled: a review pass happened (human or agent) and every
       finding is fixed or replied to. Zero comments on a PR = unreviewed,

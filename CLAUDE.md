@@ -1,17 +1,14 @@
 # HyperTrade — Agent Development Framework
 
 The operating manual for any Claude agent in this repo (Cline and Codex
-start from [AGENTS.md](AGENTS.md), which points here). The mission: a
-**production-grade autonomous crypto trader** that executes its 22
-registered strategies faithfully, recovers from failure, and never silently
-diverges from exchange reality. The agent works on its own up to a reviewed
-PR; the operator merges and deploys. It stops to ask when an action is
-destructive or genuinely ambiguous.
+start from [AGENTS.md](AGENTS.md), which points here). The mission (§ 1):
+a **production-grade autonomous crypto trader** that never silently
+diverges from exchange reality. The agent works on its own up to a
+reviewed PR; the operator merges and deploys. It stops to ask when an
+action is destructive or genuinely ambiguous.
 
-Kept elsewhere: fixed-backlog history in
-[docs/CHANGELOG.md](docs/CHANGELOG.md), operator runbooks in
-[docs/runbooks/](docs/runbooks/), the plan in
-`docs/plans/next-level-roadmap.md` (PR #177 until merged).
+Roadmap: `docs/plans/next-level-roadmap.md`. Runbooks: § 3. Fixed-backlog
+history: `docs/CHANGELOG.md`.
 
 ---
 
@@ -83,11 +80,11 @@ archetype, with evidence.
 
 **Definition of done: PR → review → merge by the operator.**
 1. A feature branch cut from `origin/master`, committed (§ 7), pushed, with a PR open against `master`.
-2. Green gates for what it touches. Bot: `cd bot && uv run pytest -q`. Dashboard: `cd dashboard && npm ci && npx tsc --noEmit && npm run lint && npm test && npm run build`.
+2. Green gates for what it touches, locally and in CI (§ 7). Bot: `cd bot && uv run pytest -q`. Dashboard: `cd dashboard && npm ci && npx tsc --noEmit && npm run lint && npm test && npm run build`.
 3. A fixed bug has a test or runtime check that would have caught it.
 4. A review pass happened; every finding is fixed or answered (§ 7).
 5. The operator merges. An agent merges only when the operator asks, for that PR.
-6. The operator deploys ([deploy](docs/runbooks/deploy.md)): dashboard and Caddy after merge, bot code in the weekly bot-deploy window (roadmap § 4.1), emergency fixes outside it. Then live verification ([health check](docs/runbooks/health-check.md)); an agent runs it only when asked.
+6. The operator deploys (runbook, § 3): dashboard and Caddy after merge, bot code in the weekly bot-deploy window (roadmap § 4.1), emergency fixes outside it. Then live verification (health-check runbook); an agent runs it only when asked.
 
 ---
 
@@ -133,16 +130,17 @@ tenant's decrypted secrets into one container per tenant per mode
 - **Postgres** `127.0.0.1:5432`, **Redis** `127.0.0.1:6379`: loopback only. Redis has no `requirepass`, so reachability *is* its access control; it holds the session-signing secret, the OIDC secret, the CF token and the per-bot API keys. **Never publish it beyond loopback without `requirepass`** threaded through dashboard and bots.
 - **Bot APIs:** paper `:8000`, testnet `:8001`, mainnet `:8002`, inside the containers only; most routes need the bot's `X-Api-Key`.
 - **Dashboard:** `127.0.0.1:3000` for probes; users come through Caddy (`:443`, LAN) or the Cloudflare tunnel. **Caddy:** `:80` → HTTPS, `:443`, `:443/udp`; admin API `:2019` internal only. TLS: Let's Encrypt via Cloudflare DNS-01, else self-signed for `CADDY_HOST`.
-- **Auth:** basic or OIDC via Phase (`AUTH_MODE`, `OIDC_*`, copied to Redis at boot by `lib/phase-sync.ts`) or `scripts/set-basic-auth.sh`; no settings UI. Stored mode gone and no config left → `locked`.
+- **Auth:** basic or OIDC via Phase (`AUTH_MODE`, `OIDC_*`, copied to Redis at boot by `lib/phase-sync.ts`) or `scripts/set-basic-auth.sh`; no settings UI. Stored mode gone and no config left → `locked`; fresh install (no tenant) → `disabled`, nobody can sign in.
 - **Secrets:** in Phase, injected by `phase run --`; no `.env` on the host.
 
 **Runbooks** (the operator's; an agent runs one only when asked):
 
 | Runbook | For |
 |---|---|
-| [deploy](docs/runbooks/deploy.md) | build, image-age check, recreate, cache trap, Redis hazard, bot restarts, prune cron |
+| [deploy](docs/runbooks/deploy.md) | `GIT_SHA` build, version checks, recreate, cache trap, Redis hazard, bot restarts, prune cron |
+| [merge-gates](docs/runbooks/merge-gates.md) | required CI checks, emergency bypass |
 | [health-check](docs/runbooks/health-check.md) | DB ↔ exchange parity, a bot's API, logs when `docker logs` breaks |
-| [dashboard-auth-recovery](docs/runbooks/dashboard-auth-recovery.md) | "Authentication is locked" on `/login` |
+| [dashboard-auth-recovery](docs/runbooks/dashboard-auth-recovery.md) | "Authentication is locked" on `/login`; fresh-install sign-in |
 | [postgres-password-rotation](docs/runbooks/postgres-password-rotation.md) | rotating `POSTGRES_PASSWORD` |
 | [phase-secrets](docs/runbooks/phase-secrets.md) | adding a secret, Phase on a new host |
 
@@ -151,8 +149,8 @@ tenant's decrypted secrets into one container per tenant per mode
 ## 4. Subagents
 
 Model choice and delegation follow the workspace policy in `~/CLAUDE.md`
-(above this repo, not in git), section *"Offloada arbete till
-subagenter på Opus och Sonnet"*. It decides; this repo has no model table.
+(outside git), section *"Offloada arbete till subagenter på Opus och
+Sonnet"*; this repo has no model table.
 Per it, anything touching production data or secrets (live DB, Redis,
 backfills) stays in the main session. On top of it (roadmap § 4.1):
 order-path code and migrations are Opus or main-session work, never sonnet
@@ -163,7 +161,7 @@ or Kanban.
 ## 5. Backlog
 
 Open items only. The PR that fixes one moves its entry verbatim to
-[docs/CHANGELOG.md](docs/CHANGELOG.md), ticked and citing the PR number.
+`docs/CHANGELOG.md`, ticked and citing the PR number.
 Never delete an entry. Add one for a defect you find and don't fix now.
 Planned initiatives live in the roadmap.
 
@@ -217,8 +215,8 @@ and stop distances are on price.
 `bot/tests/test_strategies/` (`vvv_hedge` in `bot/tests/test_vvv_hedge.py`)
 covering warmup guard, entry signal, restore without instant close and SL
 exit; new strategies add one in that shape. `test_universal_invariants.py`
-property-tests the whole registry. `uv run pytest -q` in `bot/`: 1188
-passed, 1 skipped, 3 xfailed on 2026-09-24. Paper mode is the integration
+property-tests the whole registry. `uv run pytest -q` in `bot/`: 1201
+passed, 1 skipped, 3 xfailed on 2026-09-25. Paper mode is the integration
 test.
 
 ---
@@ -229,7 +227,7 @@ test.
 2. Investigate: code, logs, DB rows (read-only).
 3. Non-trivial work: a plan in `docs/plans/<feature>.md`, signed off by the operator before coding.
 4. `git fetch origin && git switch -c <type>/<short-name> origin/master`. Types `feat`, `fix`, `docs`, `refactor`, `chore`; kebab-case and specific (`feat/vault-scanner`).
-5. Stay within the PR rules in [AGENTS.md](AGENTS.md): ≤600 added lines, mechanical refactors apart, one open order-path PR at a time.
+5. Stay within the PR rules in AGENTS.md: ≤600 added lines, mechanical refactors apart, one open order-path PR at a time.
 6. Gates (§ 1), commit, `git push -u origin <branch>`, `gh pr create --base master`. PR body: `## Summary` (what, why), `## Test plan` (gates, checks), `## Notes for reviewer` (subtleties, follow-ups).
 7. Review (below); fix or answer every finding.
 8. The operator merges (`gh pr merge --squash --delete-branch`) and deploys (§ 1).
@@ -250,10 +248,11 @@ positive (§ 0) instead of skipping. Tests:
 
 ### Review before merge — there is no automated code reviewer
 
-Every PR runs `gitleaks` (`.github/workflows/secret-scan.yml`) and CodeQL
-default setup. Both are security scans; nothing on GitHub reviews code.
-Copilot review stopped after PR #134; reading its silence as approval once
-merged five unreviewed PRs (#156–#160).
+`master` requires the CI checks `bot`, `dashboard`, `migrations` and
+`gitleaks`, emergency fixes included (bypass: § 3); wait with
+`gh pr checks <n> --watch`. None of them reviews code. Reading Copilot's
+silence (it stopped after #134) as approval once merged five unreviewed
+PRs (#156–#160).
 
 **A PR with no review is unreviewed, not approved.** Before merge, one holds:
 1. A human reviewed the diff; every comment is fixed or answered.
@@ -261,7 +260,7 @@ merged five unreviewed PRs (#156–#160).
 3. The operator waived review for a trivial change.
 
 No review available → leave the PR open. Green gates prove the tests pass,
-not that the code is right. Reply inline with
+not that the code is right. Reply inline:
 `gh api -X POST repos/<owner>/<repo>/pulls/<N>/comments/<id>/replies -f body="..."`.
 
 ### When to ask the user vs. just do it

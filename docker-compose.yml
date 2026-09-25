@@ -8,11 +8,13 @@ services:
   # to start it as a long-running service — it has no command, no
   # depends_on, and isn't meant to run. Build it explicitly with:
   #
-  #   docker compose --profile build build --no-cache --pull bot-image
+  #   GIT_SHA=$(git rev-parse HEAD) docker compose --profile build build --no-cache --pull bot-image
   #
   # or alongside dashboard rebuilds:
   #
-  #   docker compose --profile build build --no-cache --pull bot-image dashboard
+  #   GIT_SHA=$(git rev-parse HEAD) docker compose --profile build build --no-cache --pull bot-image dashboard
+  #
+  # (GIT_SHA is the version stamp; see the build args below.)
   bot-image:
     profiles: [build]
     build:

@@ -8,9 +8,10 @@ follow `CLAUDE.md` § 0 — never commit real values.
 `lib/auth-config.ts:resolveMode` answers `locked` when it can't tell how
 the installation authenticates: the stored `dashboard:auth:mode` is gone
 (Redis flushed, or the `redisdata` volume removed) and no basic user or
-OIDC config survived, or a stored/env mode is not a real mode. Every
-page redirects to `/login`, which explains this instead of rendering
-data. **`POST /api/auth/configure` cannot fix it** — while locked,
+OIDC config survived on a database that has tenants (or can't be read;
+an empty one is the fresh install below), or a stored/env mode is not a
+real mode. Every page redirects to `/login`, which explains this instead
+of rendering data. **`POST /api/auth/configure` cannot fix it** — while locked,
 `proxy.ts` redirects every non-public path to `/login`, that route
 included, even for a valid session — and there is **no env
 var for a basic user**: `getAuthConfig` reads only `AUTH_MODE` and
@@ -42,15 +43,32 @@ these gets you back in:
    `disabled`. Never prints the password or hash; no restart needed.
    Also the way to reset a forgotten basic password.
 
-**A fresh install boots `locked` too.** The resolver only answers
-`disabled` for a database with no tenants, and that never happens:
-alembic 0011 refuses to run without the operator tenant row, and before
-migrations the tenant probe fails, which counts as "tenants exist". So
-configure sign-in for the first boot the same way — `AUTH_MODE=oidc`
-plus the three `OIDC_*` values in Phase before the first `up` (sign in
-with the identity whose `sub` equals the operator row's
-`authentik_sub`), or path 3 once the stack is running. `.env.example`
-lists the variables.
+**A fresh install with nothing configured resolves to `disabled`, and
+nobody can sign in.** Since #182, alembic 0011 migrates an empty
+database without the operator tenant row (it used to fail and roll back,
+and the install booted `locked`). With no `AUTH_MODE`, no stored mode, no
+basic user or OIDC config and no tenant, `resolveMode` answers
+`disabled`. That is not an open first boot: there is no operator row
+for a page to resolve, so pages bounce to `/login`; its form is refused
+(`/api/auth/login` refuses in `disabled`); API routes answer 401 without
+a session; and `POST /api/auth/configure` needs a signed-in operator.
+Nothing in the dashboard gets you out, so bootstrap from outside it.
+Both of these, before the first sign-in:
+
+- **Configure sign-in:** `AUTH_MODE=oidc` plus the three `OIDC_*`
+  values in Phase before the first `up`, or path 3 once the stack is
+  running.
+- **Create the operator tenant row** after `alembic upgrade head`, with
+  `authentik_sub` set to the OIDC `sub` or the basic username you will
+  sign in with. `.env.example` has the `INSERT`. A first sign-in without
+  the row creates an ordinary, non-operator tenant for that identity,
+  and the `INSERT` then fails on the unique `authentik_sub`. For basic,
+  insert the row before running path 3, so `set-basic-auth.sh` offers
+  that username as its default.
+
+Once the row exists, the install counts as provisioned: with no sign-in
+configured it resolves to `locked`, not `disabled`, and paths 2 and 3
+above get you in.
 
 **Don't use `AUTH_MODE=disabled` as the way out.** It opens every page,
 the operator tenant's trades and positions included, to anyone who can
