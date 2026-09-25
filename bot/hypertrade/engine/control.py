@@ -14,13 +14,16 @@ State keys:
                                         bot has booted against this Redis.
                                         MISSING means the control state was
                                         lost (NU-2 guard 1, see
-                                        `EngineRunner._reconcile_hold_reason`).
+                                        `EngineRunner._check_control_state`).
 - hypertrade:<mode>[:t:<tenant_id>]:control:reconcile_hold -> present while
-                                        reconcile must not market-close any
-                                        exchange position (NU-2 guard 2).
-                                        Only a human clears it.
+                                        this bot opens nothing and
+                                        reconcile market-closes no exchange
+                                        position (NU-2). Only a human
+                                        clears it.
 The two NU-2 keys carry the tenant id whenever the bot has one, so one
-tenant's bot never reads or clears another's.
+tenant's bot never reads or clears another's. The dashboard seeds the
+sentinel when it creates a bot (`dashboard/src/lib/restore-sentinel.ts`
+builds the same key).
 """
 
 import logging
@@ -39,15 +42,9 @@ def _key(mode: str, suffix: str, tenant_id: str | None = None) -> str:
 
 
 class BotControl:
-    def __init__(
-        self,
-        redis_url: str | None = None,
-        mode: str | None = None,
-        tenant_id: str | None = None,
-    ) -> None:
+    def __init__(self, redis_url: str | None = None, mode: str | None = None) -> None:
         self._redis_url = redis_url or settings.redis_url
         self._mode = mode or settings.exchange_mode
-        tenant = tenant_id if tenant_id is not None else settings.tenant_id
         self._key_paused = _key(self._mode, "paused")
         self._key_disabled = _key(self._mode, "disabled")
         self._key_flat_req = _key(self._mode, "flat_request_id")
@@ -56,8 +53,8 @@ class BotControl:
         self._key_allow_multi = _key(self._mode, "allow_multi_coin")
         self._key_heartbeat = _key(self._mode, "heartbeat")
         self._key_kill_switch = _key(self._mode, "kill_switch")
-        self._key_sentinel = _key(self._mode, "sentinel", tenant)
-        self._key_reconcile_hold = _key(self._mode, "reconcile_hold", tenant)
+        self._key_sentinel = _key(self._mode, "sentinel", settings.tenant_id)
+        self.reconcile_hold_key = _key(self._mode, "reconcile_hold", settings.tenant_id)
         self._redis: redis.Redis | None = None
 
     async def connect(self) -> None:
@@ -268,15 +265,15 @@ class BotControl:
         Redis client means the hold cannot be read, so it counts as held."""
         if self._redis is None:
             return True
-        return await self._redis.get(self._key_reconcile_hold) is not None
+        return await self._redis.get(self.reconcile_hold_key) is not None
 
     async def set_reconcile_hold(self, active: bool) -> None:
         if self._redis is None:
             return
         if active:
-            await self._redis.set(self._key_reconcile_hold, str(int(time.time())))
+            await self._redis.set(self.reconcile_hold_key, str(int(time.time())))
         else:
-            await self._redis.delete(self._key_reconcile_hold)
+            await self._redis.delete(self.reconcile_hold_key)
         logger.warning("Reconcile hold %s", "SET" if active else "cleared")
 
     async def beat_heartbeat(self) -> None:

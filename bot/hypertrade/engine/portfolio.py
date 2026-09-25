@@ -51,6 +51,12 @@ class PortfolioManager:
         self._kill_switch_unreadable: bool = False
         self._persist_failure_logged: bool = False
         self._persist_alerted: bool = False
+        # NU-2: set by the runner on every tick and reconcile pass while
+        # this bot's reconcile hold stands (or could not be read or
+        # written). It blocks OPENS like a kill switch scoped to this
+        # bot — the kill switch key itself is shared by every tenant of
+        # the mode. Kept in memory so a hold whose write failed still holds.
+        self.opens_held: str | None = None
 
     async def _ensure_loaded(self) -> None:
         """Load today's PnL from Redis once per process start and once
@@ -222,6 +228,10 @@ class PortfolioManager:
         if await self._kill_switch_active():
             if not self._kill_switch_unreadable:
                 logger.warning("Kill switch active — new opens disabled")
+            return False
+
+        if self.opens_held:
+            logger.warning("New opens disabled — %s", self.opens_held)
             return False
 
         # Check daily loss limit (OPEN only — closing reduces risk)

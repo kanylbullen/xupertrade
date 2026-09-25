@@ -32,6 +32,7 @@ import {
   limitExceededResponse,
   reserveBotStart,
 } from "@/lib/admin/limits";
+import { seedRestoreSentinel } from "@/lib/restore-sentinel";
 import { requireTenant } from "@/lib/tenant";
 
 import { decryptAndStart } from "./_decrypt-and-start";
@@ -168,6 +169,13 @@ export async function POST(req: Request): Promise<Response> {
     }
     throw err;
   }
+
+  // A new bot has no Redis state to lose: without its sentinel it would
+  // boot holding opens (NU-2). Best effort — a failure leaves the bot
+  // holding, the safe side.
+  await seedRestoreSentinel(tenant.id, mode as BotMode).catch((err) =>
+    console.warn("seeding the restore sentinel failed", err),
+  );
 
   // Slot is ours. Decrypt + start. On ANY failure — a returned error
   // response or a thrown one (Redis down in the unlock check, a DB

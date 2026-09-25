@@ -44,12 +44,6 @@ logger = logging.getLogger(__name__)
 # degrading.
 _HL_FILL_PAGE_CAP = 2000
 
-# NU-2 guard 2: pass 2 closes an exchange orphan only once it has been
-# seen, same coin and side, in every pass for at least this long. The
-# memory is the runner's and lives in-process, so a restart restarts the
-# count — the conservative direction.
-ORPHAN_CONFIRM_SECONDS = 240.0
-
 
 # Tables that alembic is the sole authority for — `init_db()` skips
 # them so a fresh-bot start can't race-create them ahead of `alembic
@@ -91,10 +85,6 @@ class ReconcileResult:
     db_open: int = 0
     exchange_open: int = 0
 
-    exchange_orphans: list[tuple[str, str]] | None = None
-    """(symbol, side) of each exchange position pass 2 found without a DB
-    row; None when pass 2 did not look (paused, skipped)."""
-
     held_orphans: list[str] = field(default_factory=list)
     """Symbols pass 2 held for a human instead of closing (NU-2)."""
 
@@ -123,11 +113,9 @@ class _OrphanClosePrice:
 
 def _orphan_hold_reason(
     symbol: str,
-    side: str,
     orphan_count: int,
     hold_orphans: str | None,
     traded_symbols: set[str] | frozenset[str],
-    confirmed_orphans: set[tuple[str, str]] | frozenset[tuple[str, str]],
 ) -> str | None:
     """Why pass 2 must not market-close this exchange orphan, or None
     (roadmap NU-2 guard 2). A lone orphan is usually a leftover of our
@@ -140,11 +128,6 @@ def _orphan_hold_reason(
         return f"{orphan_count} exchange orphans in one pass"
     if symbol not in traded_symbols:
         return "no strategy in this bot trades this coin"
-    if (symbol, side) not in confirmed_orphans:
-        return (
-            f"first sighting; closed only if still there "
-            f"{ORPHAN_CONFIRM_SECONDS / 60:.0f}+ min later"
-        )
     return None
 
 
@@ -837,7 +820,6 @@ class Repository:
         dry_run: bool = False,
         hold_orphans: str | None = None,
         traded_symbols: set[str] | frozenset[str] = frozenset(),
-        confirmed_orphans: set[tuple[str, str]] | frozenset[tuple[str, str]] = frozenset(),
     ) -> "ReconcileResult":
         """Compare DB open positions vs exchange reality:
 
@@ -855,11 +837,12 @@ class Repository:
         4. Same-side size mismatch → logged only (ambiguous attribution).
 
         Case 3 is guarded (NU-2): an orphan is HELD — no order, an entry
-        in `failures` — while `hold_orphans` gives a reason, when the pass
-        finds more than one orphan, when no strategy in `traded_symbols`
-        trades its coin, or until the caller confirms it in
-        `confirmed_orphans` (seen for `ORPHAN_CONFIRM_SECONDS`). The
-        defaults hold everything, so a caller has to opt in to a close.
+        in `failures` and in `held_orphans` — while `hold_orphans` gives
+        a reason, when the pass finds more than one orphan, or when no
+        strategy in `traded_symbols` trades its coin. The defaults hold
+        everything, so a caller has to opt in to a close. A lone orphan
+        on a traded coin is still closed in the same pass, before any
+        strategy OPEN can net against it.
 
         Two invariants this function now keeps, both learned the hard way
         (`bot/reports/analysis-2026-09-15.md` § 2 — 31 % of testnet closes
@@ -1100,11 +1083,9 @@ class Repository:
                 (sym, p) for sym, p in ex_by_symbol.items()
                 if sym not in db_symbols and p.size >= 1e-6
             ]
-            result.exchange_orphans = [(sym, p.side) for sym, p in orphans]
             for sym, ex_pos in orphans:
                 why = _orphan_hold_reason(
-                    sym, ex_pos.side, len(orphans), hold_orphans,
-                    traded_symbols, confirmed_orphans,
+                    sym, len(orphans), hold_orphans, traded_symbols,
                 )
                 if why:
                     msg = (

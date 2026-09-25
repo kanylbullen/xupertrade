@@ -55,6 +55,10 @@ vi.mock("../_decrypt-and-start", () => ({
   decryptAndStart: vi.fn(),
 }));
 
+// The real seedRestoreSentinel runs against this client.
+const { redisSet } = vi.hoisted(() => ({ redisSet: vi.fn() }));
+vi.mock("@/lib/redis", () => ({ getRedisClient: () => ({ set: redisSet }) }));
+
 import {
   LimitExceededError,
   reserveBotStart,
@@ -120,6 +124,44 @@ describe("POST /api/tenant/me/bots", () => {
     // The insert only happens inside the reservation, which refused.
     expect(mockedInsert).not.toHaveBeenCalled();
     expect(mockedDecryptAndStart).not.toHaveBeenCalled();
+    expect(redisSet).not.toHaveBeenCalled();
+  });
+
+  it("seeds the new bot's restore sentinel, never overwriting one (NU-2)", async () => {
+    // Without it the bot's first boot reads as lost Redis state and it
+    // holds opens until an operator clears the hold by hand.
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(3));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    reserveRunsCallback();
+    mockedDecryptAndStart.mockResolvedValueOnce({
+      kind: "ok",
+      bot: { id: "bot-1" },
+    } as never);
+
+    const res = await POST(makeReq("paper"));
+    expect(res.status).toBe(200);
+    expect(redisSet).toHaveBeenCalledWith(
+      `hypertrade:paper:t:${TENANT_ID}:control:sentinel`,
+      expect.stringMatching(/^\d+$/),
+      "NX",
+    );
+  });
+
+  it("still starts the bot when seeding the sentinel fails", async () => {
+    mockedRequireTenant.mockResolvedValueOnce(makeTenant(3));
+    selectChain.where.mockResolvedValueOnce([{ count: 0 }]);
+    reserveRunsCallback();
+    redisSet.mockRejectedValueOnce(new Error("ECONNREFUSED redis"));
+    mockedDecryptAndStart.mockResolvedValueOnce({
+      kind: "ok",
+      bot: { id: "bot-1" },
+    } as never);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await POST(makeReq());
+    expect(res.status).toBe(200);
+    expect(mockedDecryptAndStart).toHaveBeenCalledOnce();
+    warn.mockRestore();
   });
 
   it("inserts the row already counted as running, inside the reservation", async () => {

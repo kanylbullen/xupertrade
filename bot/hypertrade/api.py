@@ -455,9 +455,10 @@ def _control_routes(
     async def reconcile_hold_set(request: web.Request) -> web.Response:
         """POST /api/control/reconcile-hold — roadmap NU-2. Body
         {"active": true|false}, strict JSON bool as for the kill switch.
-        While set, reconcile market-closes no exchange position; the bot
-        sets it itself when Redis lost its state, and only this (or a
-        `redis-cli DEL`) clears it."""
+        While set, this bot opens nothing and reconcile market-closes no
+        exchange position without a DB row; the bot sets it itself when
+        Redis lost its state or several such positions appear at once,
+        and only this (or a `redis-cli DEL`) clears it."""
         if (err := _require_auth(request)) is not None:
             return err
         try:

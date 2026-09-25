@@ -1,6 +1,6 @@
 """NU-2 guard 2: reconcile pass 2 holds an exchange orphan instead of
-market-closing it unless it is a lone, confirmed orphan on a coin a
-strategy in this bot trades.
+market-closing it unless it is a lone orphan on a coin a strategy in
+this bot trades.
 
 A restored (stale) DB, or a human's position on the account, both look
 like exchange positions with no DB row. Before the guard, pass 2
@@ -18,10 +18,7 @@ from hypertrade.exchange.base import Order, OrderStatus, OrderType, Position
 
 ETH = Position(symbol="ETH", side="long", size=2.0, entry_price=2000.0)
 SOL = Position(symbol="SOL", side="short", size=10.0, entry_price=150.0)
-CLOSEABLE = {
-    "traded_symbols": {"ETH", "SOL"},
-    "confirmed_orphans": {("ETH", "long"), ("SOL", "short")},
-}
+CLOSEABLE = {"traded_symbols": {"ETH", "SOL"}}
 
 
 class FakeExchange:
@@ -65,13 +62,13 @@ def _held(result, symbol):
     return [f for f in result.failures if f.startswith("HELD") and symbol in f]
 
 
-async def test_lone_confirmed_orphan_on_a_traded_coin_is_closed(repo):
-    """The one case pass 2 still closes, exactly as before the guard."""
+async def test_lone_orphan_on_a_traded_coin_is_closed_in_the_same_pass(repo):
+    """The one case pass 2 still closes, exactly as before the guard —
+    in this pass, before a strategy OPEN can net against it."""
     ex = FakeExchange([ETH])
     result = await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
     assert ex.orders == [("ETH", "sell", 2.0)]
     assert result.held_orphans == []
-    assert result.exchange_orphans == [("ETH", "long")]
     assert len(await _trades(repo)) == 1
 
 
@@ -116,52 +113,26 @@ async def test_dust_and_tracked_coins_do_not_count_as_orphans(repo):
     ex = FakeExchange([ETH, SOL, dust])
     result = await repo.reconcile_positions(ex, confirm_delay_seconds=0, **CLOSEABLE)
     assert ex.orders == [("ETH", "sell", 2.0)]
-    assert result.exchange_orphans == [("ETH", "long")]
+    assert result.held_orphans == []
 
 
 async def test_orphan_on_a_coin_no_strategy_trades_is_held(repo):
     """A manual position on some other coin is not ours to close."""
     ex = FakeExchange([ETH])
     result = await repo.reconcile_positions(
-        ex, confirm_delay_seconds=0,
-        traded_symbols={"BTC"}, confirmed_orphans={("ETH", "long")},
+        ex, confirm_delay_seconds=0, traded_symbols={"BTC"},
     )
     assert ex.orders == []
     assert "no strategy in this bot trades" in _held(result, "ETH")[0]
 
 
-async def test_unconfirmed_orphan_is_held(repo):
-    """First sighting: held, and reported so the runner can confirm it
-    on a later pass."""
-    ex = FakeExchange([ETH])
-    result = await repo.reconcile_positions(
-        ex, confirm_delay_seconds=0, traded_symbols={"ETH"},
-    )
-    assert ex.orders == []
-    assert "first sighting" in _held(result, "ETH")[0]
-    assert result.exchange_orphans == [("ETH", "long")]
-
-
-async def test_confirmation_is_per_side(repo):
-    """A long seen before does not confirm a short on the same coin."""
-    short = Position(symbol="ETH", side="short", size=2.0, entry_price=2000.0)
-    ex = FakeExchange([short])
-    result = await repo.reconcile_positions(
-        ex, confirm_delay_seconds=0,
-        traded_symbols={"ETH"}, confirmed_orphans={("ETH", "long")},
-    )
-    assert ex.orders == []
-    assert result.held_orphans == ["ETH"]
-
-
-async def test_paused_pass_does_not_look_at_orphans(repo):
-    """None, not [], so the runner restarts its sighting count."""
+async def test_paused_pass_holds_nothing_and_orders_nothing(repo):
     ex = FakeExchange([ETH])
     result = await repo.reconcile_positions(
         ex, confirm_delay_seconds=0, dry_run=True, **CLOSEABLE,
     )
     assert ex.orders == []
-    assert result.exchange_orphans is None
+    assert result.held_orphans == []
 
 
 async def test_held_orphan_writes_no_row(repo):

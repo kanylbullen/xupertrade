@@ -31,19 +31,22 @@ class EventBus:
         logger.info("EventBus connected to Redis")
 
     async def publish(self, event: Event) -> bool:
-        """Publish `event`. Never raises; returns whether Redis took it,
-        so a caller whose alert is about Redis itself can retry."""
+        """Publish `event`. Never raises; returns whether a subscriber got
+        it, so a caller whose alert must arrive can retry. Pub/sub drops
+        a message nobody is subscribed to — the Telegram notifier while it
+        re-subscribes after Redis came back, say — so Redis accepting the
+        PUBLISH is not enough."""
         if self._redis is None:
             logger.warning("EventBus not connected, skipping event: %s", event.type)
             return False
         try:
             event.mode = self._mode
-            await self._redis.publish(self._channel, event.to_json())
-            logger.debug("Published event: %s", event.type)
+            receivers = await self._redis.publish(self._channel, event.to_json())
         except Exception:
             logger.exception("Failed to publish event: %s", event.type)
             return False
-        return True
+        logger.debug("Published event: %s (%s receivers)", event.type, receivers)
+        return bool(receivers)
 
     async def close(self) -> None:
         if self._redis:

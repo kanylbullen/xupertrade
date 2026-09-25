@@ -464,13 +464,10 @@ async def test_on_strategy_close_not_called_for_unpriceable_rows(repo):
 # 4. Pass 2 — exchange orphans
 # ----------------------------------------------------------------------
 
-# What the runner passes for a lone orphan it has confirmed on a coin
-# its strategies trade: the one case the NU-2 guard lets pass 2 close
+# What the runner passes: the coins its strategies trade. A lone orphan
+# on one of them is the case the NU-2 guard lets pass 2 close
 # (tests/test_reconcile/test_orphan_guard.py covers the holds).
-CLOSEABLE = {
-    "traded_symbols": {"ETH", "BTC"},
-    "confirmed_orphans": {("ETH", "long"), ("BTC", "short")},
-}
+CLOSEABLE = {"traded_symbols": {"ETH", "BTC"}}
 
 
 @pytest.mark.asyncio
@@ -773,9 +770,10 @@ async def test_unbookkept_exchange_orphan_close_is_reported(repo, monkeypatch):
 @pytest.mark.asyncio
 async def test_pass_two_sees_a_symbol_freed_by_a_wrong_side_close(repo):
     """After pass 1 wrong-side-closes the only BTC row, the exchange's
-    BTC position is untracked, and pass 2 sees it in the SAME pass. It
-    closes it then once the NU-2 guard lets it (confirmed, lone, traded
-    coin); before that it is held and alerted, not missed."""
+    BTC position is untracked and must be closed NOW — not one cycle
+    later, after a strategy OPEN has already netted against it. The
+    NU-2 guard leaves this alone: one orphan, on a coin a strategy here
+    trades, and nothing the runner has to confirm first."""
     await _open_row(repo, side="long", size=1.0, entry=100.0)
     ex_short = Position(symbol="BTC", side="short", size=1.0, entry_price=108.0)
     ex = FakeExchange([[ex_short], [ex_short]], fills=[_sell_fill()], mid=108.0)
