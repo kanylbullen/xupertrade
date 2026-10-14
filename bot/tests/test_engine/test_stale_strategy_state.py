@@ -207,6 +207,7 @@ async def test_flat_all_resets_the_strategy_whose_row_it_closed():
         return_value=[_row(strat.name)],
     )
     runner.repo.record_trade_and_close_position = AsyncMock()
+    runner.repo.get_open_positions = AsyncMock(return_value=[])  # all closed
 
     status = await runner._flat_all_positions()
 

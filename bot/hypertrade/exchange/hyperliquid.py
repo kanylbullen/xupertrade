@@ -608,11 +608,17 @@ class HyperLiquidExchange(Exchange):
                 sent_ms=sent_ms,
             )
 
+        # What was sent, for every line below: a band rejection is only
+        # diagnosable with the limit price and the band (NU-5a).
+        sent = (
+            f"limit {limit_px}, {tif}, reduce_only={reduce_only}, "
+            f"band {slippage if order_type == OrderType.MARKET else '-'}"
+        )
         status_str = result.get("status", "")
         if status_str != "ok":
             logger.warning(
-                "HyperLiquid order rejected for %s %s %s: %s",
-                symbol, side, rounded_size, result,
+                "HyperLiquid order rejected for %s %s %s (%s): %s",
+                symbol, side, rounded_size, sent, result,
             )
             return self._rejected(
                 symbol, side, rounded_size, order_type, price, str(result)[:200],
@@ -660,9 +666,12 @@ class HyperLiquidExchange(Exchange):
                 )
                 error = "rested on the book instead of filling"
             elif "error" in entry:
-                logger.warning(
-                    "HyperLiquid per-order error for %s %s %s: %s",
-                    symbol, side, rounded_size, entry["error"],
+                # INFO: the runner logs every unfilled order with this
+                # error at the level its episode calls for; a close stuck
+                # for an hour was one WARNING here a minute (NU-5a).
+                logger.info(
+                    "HyperLiquid per-order error for %s %s %s (%s): %s",
+                    symbol, side, rounded_size, sent, entry["error"],
                 )
                 error = str(entry["error"])
             else:

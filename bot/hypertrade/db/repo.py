@@ -46,6 +46,26 @@ logger = logging.getLogger(__name__)
 # degrading.
 _HL_FILL_PAGE_CAP = 2000
 
+# NU-5a: an exit the engine owes an open row (its close was rejected,
+# filled short, or raised) is noted in the row's `state_json` under this
+# key, so a restart sends it again. It lives and dies with the row: no
+# migration, and unlike Redis it survives the control-state loss NU-2
+# guards against, which is exactly when exits must keep running.
+PENDING_CLOSE_KEY = "_engine_pending_close"
+
+
+def split_pending_close(state):
+    """`state` (a row's parsed `state_json`) without the engine's
+    pending-close marker, and the marker or None. A row that had no
+    state of its own before the marker comes back as None."""
+    if not isinstance(state, dict) or PENDING_CLOSE_KEY not in state:
+        return state, None
+    state = dict(state)
+    marker = state.pop(PENDING_CLOSE_KEY)
+    if not isinstance(marker, dict):
+        marker = {}
+    return (None if marker.get("only") else state), marker
+
 
 # Tables that alembic is the sole authority for — `init_db()` skips
 # them so a fresh-bot start can't race-create them ahead of `alembic
@@ -486,6 +506,42 @@ class Repository:
                 )
             )
             return result.scalar_one_or_none()
+
+    async def mark_pending_close(
+        self, strategy_name: str, symbol: str, side: str, marker: dict,
+    ) -> bool:
+        """NU-5a: note on the open `side` row that the engine owes it a
+        close (`PENDING_CLOSE_KEY`), keeping the strategy's own state
+        beside it. False when there is no such row, or its `state_json`
+        is not a JSON object to add the note to."""
+        import json  # noqa: PLC0415
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = (await session.execute(
+                    select(PositionRecord).where(
+                        PositionRecord.strategy_name == strategy_name,
+                        PositionRecord.symbol == symbol,
+                        PositionRecord.mode == self._mode,
+                        PositionRecord.is_open == True,
+                    )
+                )).scalar_one_or_none()
+                if row is None or row.side != side:
+                    return False
+                marker = dict(marker)
+                state: object = {}
+                if row.state_json:
+                    try:
+                        state = json.loads(row.state_json)
+                    except (TypeError, ValueError):
+                        return False
+                else:
+                    marker["only"] = True
+                if not isinstance(state, dict):
+                    return False
+                state[PENDING_CLOSE_KEY] = marker
+                row.state_json = json.dumps(state)
+        return True
 
     async def get_recent_trades(
         self, limit: int = 50, strategy_name: str | None = None
@@ -1239,10 +1295,14 @@ class Repository:
                 # still there. Reporting it as "closed" is how two live
                 # REJECTEDs got counted as cleanups.
                 if order.status != OrderStatus.FILLED:
+                    # Reduce-only: a refusal can mean the position went
+                    # since the read ("would increase position"), so say
+                    # why and let the next pass read it again.
                     msg = (
                         f"FAILED to close exchange-orphan {ex_pos.side} "
-                        f"{ex_pos.size} {sym}: order status "
-                        f"{order.status.value} — position still open"
+                        f"{ex_pos.size} {sym}: order {order.status.value}"
+                        f" ({getattr(order, 'error', None) or 'no reason given'})"
+                        " — the next pass reads it again"
                     )
                     result.failures.append(msg)
                     logger.error("Reconcile: %s", msg)

@@ -323,6 +323,8 @@ async def test_reconcile_close_without_pnl_only_resets_state():
 def _flat_runner(exchange):
     repo = MagicMock()
     repo.get_open_positions_for_symbol = AsyncMock(return_value=[])
+    # Flat-all checks that no open row is left once it has closed.
+    repo.get_open_positions = AsyncMock(return_value=[])
     repo.record_trade = AsyncMock()
     repo.record_trade_and_close_position = AsyncMock()
     control = MagicMock()

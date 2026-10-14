@@ -3,16 +3,15 @@ coexist on one coin, and a flip never leaves the strategy believing in a
 position the DB does not hold (`bot/reports/analysis-2026-09-15.md` § 4,
 plus the PR #172 review).
 
-- The synthesized flip-close used to run before the coin/family gate:
-  the strategy was closed first, the re-open could then be refused, and
-  the coin was left free for another strategy mid-tick. Now a flip whose
-  open a gate refuses (coin, family, opposite side, exposure, size
-  ceiling, leverage push, or a gate that could not be read) closes
-  nothing, and the strategy is re-synced to the position it keeps.
-- A risk-limit refusal (kill switch, daily-loss cap) is different:
-  closing reduces risk, and for hash_supertrend/kalman_breakout the flip
-  is the only exit. The close goes through, the open is refused, and the
-  strategy is reset to flat.
+- Every gate runs before the flip's synthesized close, so a refusal is
+  known before anything is sent. It refuses the open half only (NU-5a,
+  "exits are never blocked"): closing only reduces exposure, and for
+  hash_supertrend/kalman_breakout the flip is the only exit. Whatever
+  refuses the open — coin, family, opposite side, exposure, size ceiling,
+  leverage push, a gate that could not be read, or a risk limit (kill
+  switch, daily-loss cap) — the close goes through and the strategy is
+  reset to flat. A refusal that closed nothing used to keep the position
+  past its exit, and after the bar the edge-triggered flip was gone.
 - Every refusal is logged and published once per (category, bar), so an
   edge-triggered strategy re-emitting on the same bar does not spam.
 - The coin gate read one arbitrary row (`get_open_position_any`, a bare
@@ -181,8 +180,27 @@ def _no_exposure_cap(monkeypatch):
 
 
 # ----------------------------------------------------------------------
-# Gate refusals close nothing (allow_multi_coin=False)
+# Gate refusals refuse the open half; the close half still goes (NU-5a)
 # ----------------------------------------------------------------------
+
+
+def _closed_and_flat(exchange, repo, strat, close_side="buy"):
+    """The flip's close half went out reduce-only, no open followed, and
+    the strategy is reset to flat instead of re-armed on the old side."""
+    calls = exchange.place_order.await_args_list
+    assert [(c.args[1], c.kwargs.get("reduce_only")) for c in calls] == [
+        (close_side, True),
+    ]
+    repo.record_trade_and_close_position.assert_awaited_once()
+    repo.record_trade_and_open_position.assert_not_awaited()
+    assert strat.resets == 1 and strat.restored == []
+
+
+def _noted(caplog, text, level=logging.INFO):
+    return [
+        r for r in caplog.records
+        if text in r.getMessage() and r.levelno >= level
+    ]
 
 
 @pytest.mark.asyncio
@@ -200,7 +218,7 @@ async def test_flip_allowed_when_strategy_is_the_only_holder():
 
 
 @pytest.mark.asyncio
-async def test_flip_refused_closes_nothing_when_another_strategy_holds_the_coin(caplog):
+async def test_flip_refused_by_the_coin_gate_still_closes_and_ends_flat(caplog):
     own = _row("hash_supertrend", side="short")
     other = _row("daily_long_0830", side="long")
     runner, strat, exchange, repo, bus = _runner(own, [other], allow_multi=False)
@@ -209,17 +227,16 @@ async def test_flip_refused_closes_nothing_when_another_strategy_holds_the_coin(
         ok = await runner._execute_signal(_open_long(), current_price=50_000.0)
 
     assert ok is False
-    exchange.place_order.assert_not_awaited()
-    repo.record_trade_and_close_position.assert_not_awaited()
-    # The strategy asked for long; it is pointed back at the short it keeps.
-    assert strat.restored == [("short", 50_000.0)]
-    refusals = [r.message for r in caplog.records if "refused" in r.message]
-    assert len(refusals) == 1
-    assert "daily_long_0830" in refusals[0]
+    _closed_and_flat(exchange, repo, strat)
+    [note] = _noted(caplog, "already holds BTC")
+    assert "daily_long_0830" in note.getMessage()
+    assert "closed the short BTC half of a flip" in note.getMessage()
 
 
 @pytest.mark.asyncio
 async def test_repeated_refused_flip_is_logged_once(caplog):
+    """After the close the strategy is flat and re-emits the open on every
+    tick of the bar; the coin gate refuses it each time, noted once."""
     own = _row("hash_supertrend", side="short")
     other = _row("daily_long_0830", side="long")
     runner, strat, exchange, repo, bus = _runner(own, [other], allow_multi=False)
@@ -230,9 +247,8 @@ async def test_repeated_refused_flip_is_logged_once(caplog):
                 _open_long(), current_price=50_000.0, bar_time=BAR_1,
             )
 
-    refusals = [r for r in caplog.records if "refused" in r.message]
-    assert len(refusals) == 1
-    exchange.place_order.assert_not_awaited()
+    assert len(_noted(caplog, "already holds BTC")) == 1
+    assert exchange.place_order.await_count == 1, "the close, nothing else"
 
 
 @pytest.mark.asyncio
@@ -247,11 +263,9 @@ async def test_same_refusal_on_a_later_bar_is_logged_again(caplog):
                 _open_long(), current_price=50_000.0, bar_time=bar,
             )
 
-    refusals = [
-        r for r in caplog.records
-        if "refused" in r.message and r.levelno >= logging.WARNING
-    ]
-    assert len(refusals) == 2, "once for BAR_1, once more for BAR_2"
+    assert len(_noted(caplog, "already holds BTC")) == 2, (
+        "once for BAR_1, once more for BAR_2"
+    )
 
 
 @pytest.mark.asyncio
@@ -271,11 +285,7 @@ async def test_without_bar_time_a_note_expires(caplog, monkeypatch):
         clock["t"] += 2
         await runner._execute_signal(_open_long(), current_price=50_000.0)
 
-    refusals = [
-        r for r in caplog.records
-        if "refused" in r.message and r.levelno >= logging.WARNING
-    ]
-    assert len(refusals) == 2
+    assert len(_noted(caplog, "already holds BTC")) == 2
 
 
 @pytest.mark.asyncio
@@ -292,12 +302,8 @@ async def test_exposure_refusal_dedups_on_category_not_numbers(caplog, monkeypat
                 _open_long(), current_price=price, bar_time=BAR_1,
             )
 
-    refusals = [
-        r for r in caplog.records
-        if "exposure cap" in r.message and r.levelno >= logging.WARNING
-    ]
-    assert len(refusals) == 1
-    exchange.place_order.assert_not_awaited()
+    assert len(_noted(caplog, "exposure cap", logging.WARNING)) == 1
+    assert exchange.place_order.await_count == 1, "the close, no open"
 
 
 @pytest.mark.asyncio
@@ -316,9 +322,10 @@ async def test_coin_gate_sees_other_holder_even_behind_own_row():
 
 
 @pytest.mark.asyncio
-async def test_gate_read_failure_during_flip_resyncs_and_refuses(caplog):
-    """A DB/Redis read failing inside the gates must not strand the
-    strategy on the side it asked for while the old position is kept."""
+async def test_gate_read_failure_during_flip_still_closes(caplog):
+    """A DB/Redis read failing inside the gates refuses the open half; it
+    must not keep the old position past its exit, nor strand the strategy
+    on the side it asked for."""
     own = _row("hash_supertrend", side="short")
     runner, strat, exchange, repo, bus = _runner(own, [], allow_multi=False)
     runner.control.get_allow_multi_coin = AsyncMock(
@@ -329,8 +336,7 @@ async def test_gate_read_failure_during_flip_resyncs_and_refuses(caplog):
         ok = await runner._execute_signal(_open_long(), current_price=50_000.0)
 
     assert ok is False
-    exchange.place_order.assert_not_awaited()
-    assert strat.restored == [("short", 50_000.0)]
+    _closed_and_flat(exchange, repo, strat)
     assert any("gate read failed" in r.message for r in caplog.records)
 
 
@@ -345,9 +351,9 @@ async def test_gate_read_failure_on_plain_open_still_raises():
 
 
 @pytest.mark.asyncio
-async def test_leverage_push_failure_refuses_whole_flip():
-    """The push runs before the flip's close now: a failure closes
-    nothing and re-syncs, instead of leaving the book flat."""
+async def test_leverage_push_failure_refuses_only_the_flips_open():
+    """The push runs before the flip's close; a failure refuses the open
+    half, and the close half still goes."""
     own = _row("hash_supertrend", side="short")
     runner, strat, exchange, repo, bus = _runner(own, [], allow_multi=False)
     exchange.update_leverage = AsyncMock(return_value=False)
@@ -355,9 +361,7 @@ async def test_leverage_push_failure_refuses_whole_flip():
     ok = await runner._execute_signal(_open_long(), current_price=50_000.0)
 
     assert ok is False
-    exchange.place_order.assert_not_awaited()
-    repo.record_trade_and_close_position.assert_not_awaited()
-    assert strat.restored == [("short", 50_000.0)]
+    _closed_and_flat(exchange, repo, strat)
 
 
 # ----------------------------------------------------------------------
@@ -544,10 +548,11 @@ async def test_same_side_stacking_still_allowed_with_allow_multi():
 
 
 @pytest.mark.asyncio
-async def test_flip_into_another_strategys_opposite_side_is_refused():
+async def test_flip_into_another_strategys_opposite_side_opens_nothing():
     """allow_multi_coin=True: A holds long and flips to short while B also
-    holds long. The new short would net against B's long, so the flip is
-    refused before A's long is closed, and A is re-synced to its long."""
+    holds long. The new short would net against B's long, so its open is
+    refused; A's long is still closed (reduce-only: it takes A's size off
+    the netted long and nothing of B's), and A ends flat."""
     own = _row("hash_supertrend", side="long")
     other = _row("daily_long_0830", side="long")
     runner, strat, exchange, repo, bus = _runner(own, [other], allow_multi=True)
@@ -559,8 +564,8 @@ async def test_flip_into_another_strategys_opposite_side_is_refused():
     ok = await runner._execute_signal(sig, current_price=50_000.0)
 
     assert ok is False
-    exchange.place_order.assert_not_awaited()
-    assert strat.restored == [("long", 50_000.0)]
+    _closed_and_flat(exchange, repo, strat, close_side="sell")
+    assert exchange.place_order.await_args.args[2] == own.size
 
 
 @pytest.mark.asyncio
