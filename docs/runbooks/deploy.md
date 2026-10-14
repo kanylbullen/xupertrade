@@ -113,9 +113,23 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
 ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
   "cd /opt/hypertrade && echo \"HEAD: \$(git rev-parse HEAD)\" && \
    docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
+
+# 3. Migrate the database with that image, before any bot Start. Nothing
+#    else runs alembic: a bot on code whose migration is missing fails the
+#    statements that need it, and only its log says so (0017: the funding
+#    poll's ON CONFLICT). A no-op when nothing is pending. Bots still on
+#    the old image run on the new schema; a migration that breaks that
+#    says so in its PR. `current` must then end in `(head)`.
+ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
+  "cd /opt/hypertrade && phase run -- bash -c ' \
+   export DATABASE_URL=\"postgresql+asyncpg://postgres:\$POSTGRES_PASSWORD@postgres:5432/hypertrade\"; \
+   for cmd in \"upgrade head\" current; do \
+     docker run --rm --network hypertrade_default -e DATABASE_URL \
+       --entrypoint /app/.venv/bin/alembic xupertrade-bot:latest \$cmd || exit 1; \
+   done'"
 ```
 
-3. **Seed the restore sentinel of each running bot** (#186, NU-2). A bot
+4. **Seed the restore sentinel of each running bot** (#186, NU-2). A bot
    created before #186 has no sentinel, reads that as "Redis lost its
    control state", and boots on the new image holding: no opens until a
    human clears its reconcile hold. The dashboard writes one only when it
@@ -143,7 +157,7 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    `OK` means seeded, an empty answer that the bot already had one. A bot
    that is stopped now gets no sentinel here, boots holding at its next
    Start, and is cleared as in [health-check.md](health-check.md#reconcile-hold-nu-2).
-4. **Stop, then Start each running bot**, mainnet included. A running
+5. **Stop, then Start each running bot**, mainnet included. A running
    bot keeps the image it was started on, and the orchestrator does not
    restart bots when the tag moves. `/settings/bots` has a Stop and a
    Start button, no Restart. Start needs the tenant's passphrase
@@ -153,7 +167,7 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    while it is locked). When the services owner moves (the first
    deploy of NU-7 moves it from mainnet to paper), restart the old
    owner first: see [phase-secrets.md](phase-secrets.md#side-services-owner-and-the-vault-address-roadmap-nu-7).
-5. **Every bot card shows HEAD** (next paragraph), and **no bot holds**:
+6. **Every bot card shows HEAD** (next paragraph), and **no bot holds**:
    read each bot's reconcile hold as in
    [health-check.md](health-check.md#reconcile-hold-nu-2). Even with its
    sentinel, the first reconcile pass after a Start holds every exchange
@@ -174,7 +188,7 @@ again. A bot's `/api/version` needs no API key, so from the host:
 `docker exec <bot-container> python -c 'import urllib.request; print(urllib.request.urlopen("http://localhost:<port>/api/version").read().decode())'`
 (ports as in [health-check.md](health-check.md)).
 
-**An emergency bot fix outside the window** is the same five steps, and
+**An emergency bot fix outside the window** is the same six steps, and
 the build takes all of master: every bot PR merged since the last window
 ships with the fix. See what that is first, on the host:
 `git log --oneline <sha on the bot cards>..origin/master -- bot/`.

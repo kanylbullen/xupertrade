@@ -295,13 +295,21 @@ class FundingPayment(Base):
     """A single funding payment received or paid by the account.
 
     Pulled periodically from HL's user_funding_history. usdc is signed:
-    positive = received, negative = paid. Attribution to a strategy is
-    best-effort: at insertion time, we look up the open position on this
-    coin and tag with that strategy_name. NULL if no DB position covered
-    the payment time (rare — typically only for orphan positions).
+    positive = received, negative = paid. strategy_name is the strategy
+    of the position whose [opened_at, closed_at) covers the payment time
+    (`engine/funding.py:attribute`); NULL when none, or several, do.
+
+    One row per (tenant_id, mode, coin, timestamp) — HL settles funding
+    once per coin per hour per account (alembic 0017).
     """
 
     __tablename__ = "funding_payments"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "mode", "coin", "timestamp",
+            name="uq_funding_payments_event",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     tenant_id = Column(
@@ -312,9 +320,10 @@ class FundingPayment(Base):
     )
     # HL's funding event time (epoch ms → DateTime)
     timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
-    # HL hash for idempotency. user_funding_history can return overlapping
-    # ranges so we dedupe on this.
-    hash = Column(String(80), unique=True, nullable=False)
+    # HL's hash for the event. Not a key: userFunding sends the same
+    # all-zero hash for every event, and UNIQUE(hash) kept this table at
+    # one row until alembic 0017 moved the key to __table_args__.
+    hash = Column(String(80), nullable=False)
     coin = Column(String(16), nullable=False, index=True)
     usdc = Column(Float, nullable=False)
     szi = Column(Float, nullable=True)  # signed position size at funding time

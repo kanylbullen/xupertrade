@@ -35,8 +35,6 @@ import pandas as pd
 import pytest
 
 from hypertrade.config import settings
-from hypertrade.db import models
-from hypertrade.db.repo import Repository
 from hypertrade.engine.runner import EngineRunner
 from hypertrade.engine.signals import Signal, SignalAction
 from hypertrade.events.types import ErrorOccurred
@@ -300,7 +298,6 @@ async def test_coin_gate_sees_other_holder_even_behind_own_row():
     mine = _row("hash_supertrend", symbol="BTC", side="long")
     other = _row("daily_long_0830", symbol="BTC", side="long")
     runner, strat, exchange, repo, bus = _runner(None, [mine, other], allow_multi=False)
-    repo.get_open_position_any = AsyncMock(return_value=mine)
 
     ok = await runner._execute_signal(_open_long(), current_price=50_000.0)
 
@@ -565,38 +562,3 @@ async def test_no_control_means_allow_multi_coin_false():
 
     assert ok is False
     exchange.place_order.assert_not_awaited()
-
-
-# ----------------------------------------------------------------------
-# get_open_position_any is deterministic
-# ----------------------------------------------------------------------
-
-
-@pytest.fixture
-async def repo_db():
-    r = Repository("sqlite+aiosqlite:///:memory:")
-    r._mode = "testnet"
-    r._is_paper = False
-    await r.init_db()
-    yield r
-    await r._engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_get_open_position_any_returns_oldest(repo_db):
-    now = datetime.now(timezone.utc)
-    newer = await repo_db.open_position(
-        strategy_name="newer", symbol="BTC", side="long", size=1.0, entry_price=1.0,
-    )
-    older = await repo_db.open_position(
-        strategy_name="older", symbol="BTC", side="long", size=1.0, entry_price=1.0,
-    )
-    async with repo_db._session_factory() as session:
-        (await session.get(models.PositionRecord, newer.id)).opened_at = now
-        (await session.get(models.PositionRecord, older.id)).opened_at = (
-            now - timedelta(hours=2)
-        )
-        await session.commit()
-
-    got = await repo_db.get_open_position_any("BTC")
-    assert got.strategy_name == "older"

@@ -136,16 +136,16 @@ async def test_snapshot_equity_tags_tenant_id(tenanted_repo):
 @pytest.mark.asyncio
 async def test_funding_payment_tags_tenant_id(tenanted_repo):
     repo = tenanted_repo
-    inserted = await repo.upsert_funding_payment(
-        ts=datetime.now(timezone.utc),
-        h="hash-1",
-        coin="SOL",
-        usdc=-0.05,
-        szi=1.0,
-        funding_rate=0.0001,
-        strategy_name="bb_short",
-    )
-    assert inserted is True
+    inserted = await repo.insert_funding_payments([{
+        "timestamp": datetime.now(timezone.utc),
+        "hash": "hash-1",
+        "coin": "SOL",
+        "usdc": -0.05,
+        "szi": 1.0,
+        "funding_rate": 0.0001,
+        "strategy_name": "bb_short",
+    }])
+    assert len(inserted) == 1
     async with repo._session_factory() as session:
         rows = (await session.scalars(
             select(models.FundingPayment)
