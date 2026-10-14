@@ -1017,6 +1017,9 @@ Nästa har två delar:
   - Marginal och avstånd till likvidation övervakas på mainnet.
   - Multiplikatorn sätts till 1–2 på mainnet.
   - EWMA-kovarians, vol-target och beta-tak stryks tills mer än en validerad strategi har kapital.
+- **Ur CLAUDE.md § 5** (flyttade ordagrant 2026-10-14, eftersom planerade initiativ hör hemma här och § 5 bara listar fel). Två äldre förslag ur Kelly-diskussionen. Storleksfunktionen ovan är en bredare form av det första, med budgeten i procent av equity och stoppavståndet med i nämnaren. Brytaren ovan gäller hela kontot, medan det andra skalar ned en strategi i taget:
+  - [ ] **Volatility-adjusted sizing (option C from Kelly discussion).** Replace fixed `MAX_POSITION_SIZE_USD` with ATR-normalized sizing: `notional = RISK_BUDGET_USD / (atr × atr_mult)` so every trade has roughly the same dollar-risk regardless of asset volatility. Industry standard, no statistical estimation needed. Add `RISK_BUDGET_USD` config; keep `MAX_POSITION_SIZE_USD` as a hard cap. ~3-4h work, defensive change. *(Roadmap SE-2.)*
+  - [ ] **Drawdown-based auto-scaling (option B from Kelly discussion).** Add `MAX_STRATEGY_DRAWDOWN_PCT` per strategy. When 80% of cap reached → halve effective margin until 7-day rolling PnL > 0. Limits exposure on degrading strategies without requiring stationary distribution assumptions like Kelly does. *(Roadmap SE-2.)*
 - **Insats:** M (ROI: S för storlek och tak; HWM och marginal tillkommer för riktiga pengar) · **Påverkan:** 4/5 · **Beroenden:** NU-6, NA-1 och B1 = ja.
 - **Klart när:**
   - Dollarrisken vid stopp skiljer högst 2× mellan strategier.
