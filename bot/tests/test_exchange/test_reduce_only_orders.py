@@ -11,9 +11,11 @@ the timeout poll waits for the clamped amount, not the requested one.
 from __future__ import annotations
 
 import asyncio
+import time
 from unittest.mock import AsyncMock
 
 import pytest
+import requests
 
 from hypertrade.exchange.base import OrderStatus, OrderType, Position
 from hypertrade.exchange.hyperliquid import HyperLiquidExchange
@@ -175,6 +177,92 @@ async def test_a_late_close_with_no_fill_found_is_priced_at_the_mid(monkeypatch)
 
     assert order.status == OrderStatus.FILLED
     assert order.filled_price == pytest.approx(50_000.0), "never the limit"
+    assert order.late == "mid", "an estimate, and the order says so"
+
+
+async def test_a_fill_from_before_the_send_is_not_the_late_close(monkeypatch):
+    """booking-1, double-close-1. A sibling strategy's close on the coin
+    filled (and was booked) 2 s before this one was sent. The match used to
+    take the oldest closing fill since 5 s before the send — the sibling's:
+    its price, and its oid, which the UNIQUE `trades.order_id` then
+    refused. Only a fill from the send on is this order's."""
+    sibling = {**_close_fill("48000.0", oid=1111), "time": SENT_MS - 2_000}
+    order = await _poll_close(_stub([sibling, _close_fill("49990.0")]), monkeypatch)
+
+    assert (order.id, order.late) == ("4242", "fill")
+    assert order.filled_price == pytest.approx(49_990.0)
+
+
+async def test_a_fill_stamped_just_before_the_send_is_found_if_nothing_follows(
+    monkeypatch,
+):
+    """HL's clock against ours: with no fill from the send on, one stamped
+    up to 5 s before it is still this order's."""
+    early = {**_close_fill("49990.0"), "time": SENT_MS - 1_000}
+    order = await _poll_close(_stub([early]), monkeypatch)
+
+    assert (order.id, order.late) == ("4242", "fill")
+
+
+async def test_one_order_split_into_fills_is_one_late_close(monkeypatch):
+    order = await _poll_close(_stub([
+        _close_fill("49900.0", sz="0.01"), _close_fill("50100.0", sz="0.01"),
+    ]), monkeypatch)
+
+    assert (order.id, order.late) == ("4242", "fill")
+    assert order.filled_price == pytest.approx(50_000.0)
+
+
+async def test_two_orders_that_could_be_the_late_close_are_not_guessed(monkeypatch):
+    order = await _poll_close(_stub([
+        _close_fill("48000.0", oid=1111), _close_fill("49990.0", oid=4242),
+    ], mid=50_000.0), monkeypatch)
+
+    assert order.late == "mid" and order.filled_price == pytest.approx(50_000.0)
+    assert order.id not in ("1111", "4242")
+
+
+async def test_a_late_close_nothing_prices_is_an_unknown_outcome(monkeypatch):
+    """booking-5. No fill and no mid: it used to be booked at the limit —
+    up to 5 % off on the wide band — as a real fill. Unpriced, it is an
+    unknown outcome the caller classifies from a fresh read."""
+    order = await _poll_close(_stub(mid=0.0), monkeypatch)
+
+    assert order.status == OrderStatus.REJECTED
+    assert order.error.startswith("outcome unknown")
+
+
+async def test_a_timed_out_reduce_only_close_end_to_end(
+    hl_http, build_exchange, monkeypatch,
+):
+    """tests-real-2, through `place_order` and the real SDK: an oversized
+    reduce-only sell of 1.0 against a 0.4 long; the POST times out and HL
+    fills 0.4. The poll waits for the clamped 0.4 (not -0.6), and prices
+    it from this order's fill after the send — not the sibling's from
+    before it, which comes first."""
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    exchange = build_exchange()
+    now = int(time.time() * 1000)
+    hl_http.route("allMids", (200, {"BTC": "50000.0"}))
+    hl_http.route(
+        "clearinghouseState", (200, _account_with("BTC", "0.4")),
+        (200, EMPTY_ACCOUNT),
+    )
+    hl_http.route("order", requests.exceptions.ReadTimeout("read timed out"))
+    hl_http.route("userFillsByTime", (200, [
+        {"coin": "BTC", "side": "A", "sz": "0.4", "px": "48000.0",
+         "fee": "1.0", "time": now - 2_000, "oid": 1111},
+        {"coin": "BTC", "side": "A", "sz": "0.4", "px": "49990.0",
+         "fee": "1.0", "time": now + 60_000, "oid": 4242},
+    ]))
+
+    order = await exchange.place_order("BTC", "sell", 1.0, reduce_only=True)
+
+    assert order.status == OrderStatus.FILLED
+    assert order.size == pytest.approx(0.4)
+    assert (order.id, order.late) == ("4242", "fill")
+    assert order.filled_price == pytest.approx(49_990.0)
+    assert _wire_order(hl_http)["r"] is True
 
 
 async def test_a_timeout_with_no_fill_says_the_outcome_is_unknown(monkeypatch):

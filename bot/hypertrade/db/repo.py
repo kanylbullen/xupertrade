@@ -135,6 +135,9 @@ class _OrphanClosePrice:
     order_id: str | None
     reason: str
     estimated: bool
+    # The rest of a row a close that filled left behind, which no fill
+    # covers: the DB held more than the exchange (`close_row_externally`).
+    drift: bool = False
 
 
 def _orphan_hold_reason(
@@ -811,9 +814,14 @@ class Repository:
             )
             return {oid for oid in result.scalars().all() if oid}
 
+    async def order_id_booked(self, order_id: str) -> bool:
+        """Whether `order_id` is already a `trades` row in this mode."""
+        return bool(await self._recorded_order_ids({order_id}))
+
     async def _price_orphan_close(
         self, exchange, row: PositionRecord, ledger,
         mid_cache: dict[str, float], label: str = "orphan close",
+        drift_price: float | None = None,
     ) -> "_OrphanClosePrice | None":
         """Work out what a row that vanished from the exchange closed at.
 
@@ -829,6 +837,9 @@ class Repository:
            configured taker rate, since the close did cost one.
         3. Nothing. The row stays OPEN and is reported, rather than
            being closed at a fabricated PnL.
+
+        `drift_price` replaces 2 and 3 (`close_row_externally`): the
+        row is what a close that filled at that price left on it.
         """
         from hypertrade.reconcile.fills import realized_pnl  # noqa: PLC0415
 
@@ -851,6 +862,16 @@ class Repository:
                 order_id=summary.order_id,
                 reason=f"reconcile: {label} (fill)",
                 estimated=False,
+            )
+        if drift_price is not None:
+            # No fill closed it: the exchange never held it. Booked with no
+            # PnL and no fee — a mid would book a PnL on size that never
+            # existed, into the daily-loss counter (double-close-2).
+            return _OrphanClosePrice(
+                exit_price=float(drift_price), fee=0.0, pnl=0.0,
+                order_id=None,
+                reason="size drift: the row held more than the exchange; pnl 0",
+                estimated=False, drift=True,
             )
 
         mid = mid_cache.get(row.symbol)
@@ -914,7 +935,8 @@ class Repository:
         return db_row
 
     async def close_row_externally(
-        self, exchange, row: PositionRecord,
+        self, exchange, row: PositionRecord, *,
+        drift_price: float | None = None,
     ) -> "_OrphanClosePrice | None":
         """Book one row the exchange no longer holds as closed outside the
         bot (NU-5a: a strategy exit found it liquidated or closed by hand).
@@ -924,12 +946,20 @@ class Repository:
         already booked as a trade; else the mid, marked ESTIMATED; else
         nothing, and the row stays open. No order is placed. Returns the
         price used, or None when nothing was written.
+
+        `drift_price`: the row is the rest a close that DID fill (at that
+        price) left on it — clamped to the exchange, or filled less than
+        sent — and the exchange holds none of it. A rest no unbooked fill
+        covers was never on the exchange (the DB held more: a row written
+        from a requested size), so it is booked as size drift at that
+        price, pnl 0, no fee (`_OrphanClosePrice.drift`), not at the mid.
         """
         ledger = await self._fill_ledger(
             exchange, _to_epoch_ms(row.opened_at), "External close",
         )
         priced = await self._price_orphan_close(
             exchange, row, ledger, {}, label="external close",
+            drift_price=drift_price,
         )
         if priced is None:
             return None
@@ -1308,12 +1338,25 @@ class Repository:
                     logger.error("Reconcile: %s", msg)
                     continue
 
-                result.unresolved_orphans.remove(sym)
                 fill_price = float(order.filled_price or ex_pos.entry_price or 0.0)
                 # Reduce-only: a position cut since the read fills less,
                 # and what filled is what is booked and reported.
                 filled = float(order.size)
+                # Filled short by a whole szDecimals step: an IOC that ran
+                # out of book left the rest, or the read was stale — either
+                # way the pass cannot vouch for the coin, so it does not
+                # count (NU-2); the next pass reads it again.
+                try:
+                    step = 10 ** -int(exchange.get_size_precision(sym))
+                except Exception:
+                    step = 1e-9
+                short = ex_pos.size - filled >= step / 2
+                if not short:
+                    result.unresolved_orphans.remove(sym)
                 fee = fill_price * filled * float(settings.taker_fee_rate)
+                reason = "reconcile: exchange-orphan close"
+                if getattr(order, "late", None) == "mid":
+                    reason = f"ESTIMATED {reason} (filled after a timeout, @ mid)"
                 try:
                     await self.record_trade(
                         order_id=order.id,
@@ -1326,7 +1369,7 @@ class Repository:
                         # No DB row means no entry price, so there is no
                         # honest PnL to record. NULL, not 0.0.
                         pnl=None,
-                        reason="reconcile: exchange-orphan close",
+                        reason=reason,
                     )
                 except Exception as e:
                     # The close DID happen, so it stays an action — but
@@ -1351,6 +1394,14 @@ class Repository:
                 )
                 result.actions.append(msg)
                 logger.warning("Reconcile: %s", msg)
+                if short:
+                    fail = (
+                        f"exchange-orphan {ex_pos.side} {sym}: closed {filled} "
+                        f"of {ex_pos.size}; the rest may still be open — the "
+                        "next pass reads it again"
+                    )
+                    result.failures.append(fail)
+                    logger.warning("Reconcile: %s", fail)
 
         # --- 7. Always say the pass ran. -------------------------------
         if result.actions or result.failures:

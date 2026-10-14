@@ -47,6 +47,11 @@ class Order:
     # Why it was not filled, when known ("Reduce only order would
     # increase position.", "no mid price", an unknown outcome).
     error: str | None = None
+    # A close that filled only after its POST timed out has no price in a
+    # response; where `filled_price` came from instead: "fill" (HL's fills
+    # of one order since the send; `id` is its oid) or "mid" (an estimate:
+    # no such fill found). None: the order's own response priced it.
+    late: str | None = None
 
 
 @dataclass

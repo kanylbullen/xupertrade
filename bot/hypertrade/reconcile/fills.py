@@ -413,6 +413,33 @@ class FillLedger:
         return _consume(candidates, size, commit=True)
 
 
+def closing_orders(
+    fills: list[dict], *, symbol: str, position_side: str, since_ms: int,
+) -> list[ClosingFillSummary]:
+    """The orders whose fills on `symbol` reduce a `position_side`
+    position from `since_ms` on, one summary per oid: size-weighted price,
+    total size and fee. A fill with no id is left out — it cannot be told
+    apart from another order's."""
+    want = closing_side(position_side)
+    by_oid: dict[str, list[_LedgerEntry]] = {}
+    for e in _parse_entries(fills):
+        if (
+            e.coin == symbol and e.side == want and e.time_ms >= since_ms
+            and e.order_id is not None
+        ):
+            by_oid.setdefault(e.order_id, []).append(e)
+    out = []
+    for oid, entries in by_oid.items():
+        size = sum(e.size for e in entries)
+        out.append(ClosingFillSummary(
+            price=sum(e.price * e.size for e in entries) / size,
+            size=size,
+            fee=sum(e.fee for e in entries),
+            order_id=oid,
+        ))
+    return out
+
+
 def summarize_closing_fills(
     fills: list[dict], *, size: float,
 ) -> ClosingFillSummary | None:

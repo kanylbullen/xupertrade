@@ -818,8 +818,10 @@ class HyperLiquidExchange(Exchange):
         A reduce-only order fills at most the position it reduces, so the
         poll waits for that clamped amount; with nothing to reduce it
         cannot have filled at all. What is left of the position says
-        nothing about what a close filled at: it is priced from HL's own
-        closing fills since `sent_ms`, else the mid (`_late_close_price`).
+        nothing about what a close filled at: it is priced from the fills
+        of its own order since `sent_ms` (`Order.late` "fill", the oid as
+        `id`), else the mid ("mid"), else not at all — REJECTED, outcome
+        unknown, for the caller to classify (`_late_close_price`).
         """
         if pre_signed is None:
             logger.warning(
@@ -877,11 +879,28 @@ class HyperLiquidExchange(Exchange):
                     fill_px = float(pos.entry_price) if pos else float(limit_px)
                 except Exception:
                     fill_px = float(limit_px)
-                oid = None
+                oid = late = None
                 if reduce_only:  # what is left says nothing of a close's price
-                    fill_px, oid = await self._late_close_price(
-                        symbol, side, expected, sent_ms, limit_px,
+                    priced = await self._late_close_price(
+                        symbol, side, expected, sent_ms,
                     )
+                    if priced is None:
+                        # Never the limit (as far as 5 % off): unpriced, the
+                        # caller classifies it from a fresh read and books
+                        # it from fills when they come (NU-5a).
+                        logger.error(
+                            "Timeout-poll: %s %s %s filled after %.0fs, but "
+                            "no fill of its own and no mid price it — "
+                            "returning REJECTED (outcome unknown)",
+                            symbol, side, expected, elapsed,
+                        )
+                        return self._rejected(
+                            symbol, side, requested_rounded, order_type, price,
+                            "outcome unknown: it filled after the timeout, "
+                            "and no fill or mid prices it",
+                        )
+                    fill_px, oid = priced
+                    late = "fill" if oid else "mid"
                 logger.warning(
                     "Timeout-poll: detected delayed fill for %s %s %s "
                     "(requested %s) after %.0fs (price≈%.4f). Treating as "
@@ -893,7 +912,7 @@ class HyperLiquidExchange(Exchange):
                     id=oid or str(uuid.uuid4()), symbol=symbol, side=side,
                     size=expected, order_type=order_type,
                     price=price, filled_price=fill_px,
-                    status=OrderStatus.FILLED,
+                    status=OrderStatus.FILLED, late=late,
                 )
         logger.error(
             "Timeout-poll: no delayed fill for %s %s %s after %.0fs — "
@@ -906,34 +925,62 @@ class HyperLiquidExchange(Exchange):
             "(it may still fill late)",
         )
 
+    # How far before a send a fill of that order may be timestamped (HL's
+    # clock against ours); searched only when nothing is found after it.
+    _LATE_FILL_SKEW_MS = 5_000
+
     async def _late_close_price(
         self, symbol: str, side: str, size: float, sent_ms: int | None,
-        limit_px: float,
-    ) -> tuple[float, str | None]:
+    ) -> tuple[float, str | None] | None:
         """The price and oid of a close that filled after its POST timed
-        out: HL's closing fills for `size` since it was sent (less a
-        little clock skew). Else the mid, logged as an estimate; the limit
-        price (as far as 5 % off) only when there is no mid either."""
-        from hypertrade.reconcile.fills import FillLedger  # noqa: PLC0415
+        out: the fills of ONE order that closes this side, timestamped
+        from `sent_ms` on and adding up to `size` (an IOC fills once).
+        Fills of two such orders are ambiguous. A fill from before the
+        send is not this order's — a sibling strategy's close or a
+        flat-all, maybe booked already — so the window opens at the send;
+        `_LATE_FILL_SKEW_MS` earlier only when nothing is found after it.
 
-        since = None if sent_ms is None else sent_ms - 5_000
+        Else the mid, oid None: an estimate (`Order.late == "mid"`). None
+        when there is no mid either — never the limit, as far as 5 % off.
+        """
+        from hypertrade.reconcile.fills import closing_orders  # noqa: PLC0415
+
+        windows: tuple[int, ...] = ()
+        fills: list[dict] = []
+        if sent_ms is not None:
+            windows = (sent_ms, sent_ms - self._LATE_FILL_SKEW_MS)
+            fills = await self.fetch_user_fills(since_ms=windows[-1])  # [] on error
+        tolerance = max(10 ** (-self._sz_decimals[symbol]), 1e-9) / 2
+        for since in windows:
+            matches = [
+                o for o in closing_orders(
+                    fills, symbol=symbol, since_ms=since,
+                    position_side="long" if side == "sell" else "short",
+                )
+                if abs(o.size - size) <= tolerance
+            ]
+            if len(matches) == 1:
+                return matches[0].price, matches[0].order_id
+            if matches:
+                logger.warning(
+                    "Timeout-poll: %d orders' fills could be the late %s %s "
+                    "%s (oids %s) — not guessing which", len(matches),
+                    symbol, side, size,
+                    ", ".join(sorted(str(o.order_id) for o in matches)),
+                )
+                break
         try:
-            got = FillLedger(await self.fetch_user_fills(since_ms=since)).take(
-                symbol=symbol, size=size, since_ms=since,
-                position_side="long" if side == "sell" else "short",
-            )
-            if got is not None:
-                return got.price, got.order_id
             mid = await self.get_current_price(symbol)  # 0.0 on error
         except Exception:
-            logger.exception("Timeout-poll: pricing the late close failed")
+            logger.exception("Timeout-poll: the mid for %s could not be read", symbol)
             mid = 0.0
+        if mid <= 0:
+            return None
         logger.warning(
-            "Timeout-poll: no closing fill found for %s %s %s — priced "
-            "ESTIMATED at %s", symbol, side, size,
-            f"the mid {mid}" if mid > 0 else f"the limit {limit_px}",
+            "Timeout-poll: no fill of its own found for the late %s %s %s — "
+            "priced ESTIMATED at the mid %s", symbol, side, size, mid,
         )
-        return (mid if mid > 0 else float(limit_px)), None
+        return mid, None
 
     async def update_leverage(self, symbol: str, leverage: int, is_cross: bool = True) -> bool:
         try:

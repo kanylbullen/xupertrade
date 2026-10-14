@@ -62,19 +62,28 @@ class _Strat:
         self.leverage = 1
         self.restored: list[tuple] = []
         self.resets = 0
+        self.side: str | None = None
 
     def restore_state(self, side, entry_price):
         self.restored.append((side, entry_price))
+        self.side = side
 
     def restore_from_json(self, side, entry_price, state):
         self.restored.append((side, entry_price))
+        self.side = side
 
     def reset_state(self):
         self.resets += 1
+        self.side = None
 
     def reset_position(self):
         # The runner resets through reset_position (keeps cooldown).
         self.resets += 1
+        self.side = None
+
+    def holds_position(self):
+        # As the real strategies: the runner's pre-signal capture asks.
+        return self.side is not None
 
     def export_state(self):
         return None
