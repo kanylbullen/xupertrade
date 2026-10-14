@@ -150,7 +150,9 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    unlocked and opens the unlock dialog when it isn't. Through the API:
    `POST /api/tenant/me/bots/<bot_id>/stop`, then `/start`, from a
    signed-in session with the passphrase unlocked (`/start` answers 401
-   while it is locked).
+   while it is locked). When the services owner moves (the first
+   deploy of NU-7 moves it from mainnet to paper), restart the old
+   owner first: see [phase-secrets.md](phase-secrets.md#side-services-owner-and-the-vault-address-roadmap-nu-7).
 5. **Every bot card shows HEAD** (next paragraph), and **no bot holds**:
    read each bot's reconcile hold as in
    [health-check.md](health-check.md#reconcile-hold-nu-2). Even with its
