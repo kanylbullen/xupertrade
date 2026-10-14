@@ -83,6 +83,13 @@ export async function GET(req: Request) {
   // omit the claim entirely — accept both shapes, ignore the rest.
   // The session payload will use this in the tenant resolver to gate
   // autocreate against `OIDC_REQUIRED_GROUP`.
+  //
+  // `claims` are the ID token's, not userinfo's: Authentik's `profile`
+  // mapping puts `groups` there only while the provider's "Include
+  // claims in id_token" is on (its default). Off, the claim is absent
+  // and the gate refuses every new user — closed, not open. Names are
+  // kept verbatim (no case folding, no trim); the exact, case-sensitive
+  // match is `lib/oidc-group-gate.ts:hasRequiredGroup`.
   const groups = extractGroupsClaim(claims.groups);
 
   // Sign the session cookie. Secret comes from the API_KEY-gated bot

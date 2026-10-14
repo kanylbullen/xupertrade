@@ -26,12 +26,5 @@
     "fast_len": 7,
     "slow_len": 19,
     "sl_candles": 4
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1h EMA crossover, long & short)"
   }
 }
