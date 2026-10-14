@@ -15,15 +15,7 @@
   ],
   "weaknesses": [
     "No edge unless the chosen time window genuinely correlates with positive return.",
-    "No risk management — full overnight exposure.",
-    "Backtest shows -2.5% APR over 44d sample — not statistically significant either way."
+    "No risk management — full overnight exposure."
   ],
-  "params": {},
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Time-of-day long: enter 08:30 UTC, exit 08:00 UTC next day"
-  }
+  "params": {}
 }

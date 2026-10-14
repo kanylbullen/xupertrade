@@ -10,8 +10,7 @@
   ],
   "strengths": [
     "Multi-filter entry suppresses false signals.",
-    "Fibonacci confluence is a popular discretionary mark — encoding it removes hesitation.",
-    "180d backtest: ~0% APR, 57% win rate, 7 trades — break-even but consistent."
+    "Fibonacci confluence is a popular discretionary mark — encoding it removes hesitation."
   ],
   "weaknesses": [
     "No stop loss — a sustained downtrend post-entry can hold the position indefinitely.",
@@ -22,12 +21,5 @@
     "bb_mult": 2.0,
     "rsi_length": 14,
     "ema_length": 9
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (15m scalper, long only)"
   }
 }
