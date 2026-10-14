@@ -44,7 +44,7 @@ class FakeExchange:
     async def get_current_price(self, symbol):
         return 2100.0
 
-    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET):
+    async def place_order(self, symbol, side, size, order_type=OrderType.MARKET, **kw):
         self.orders.append((symbol, side, size))
         return Order(
             id=f"order-{len(self.orders)}", symbol=symbol, side=side,

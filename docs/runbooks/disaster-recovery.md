@@ -94,14 +94,23 @@ TP-exits, och före SE-1 finns inga stopp på börsen. Därför får pausen vara
 högst 30 minuter. Efter pausen tar kill switch över. Den blockerar öppningar
 men släpper igenom varje stängning (`check_risk_limits` i `portfolio.py`).
 
-En stängning är en vanlig marknadsorder, inte reduce-only (`place_order` i
-`hyperliquid.py`). Om HL saknar positionen, eller har den på andra sidan,
-skickas DB-radens storlek ändå (`_resolve_close_size` i `runner.py`).
-Strategierna återställs från de öppna DB-raderna när boten startar och körs
-från första tick efter unpause, men det första riktiga reconcile-passet kan
-dröja flera minuter. En strategi vars rad HL inte backar kan därför öppna en
-ny position, eller förstora en position på motsatt sida, trots kill switch.
-Steg 7 stänger av de strategierna före unpause.
+Från NU-5a är varje stängning reduce-only: strategins exit,
+flip-stängningen, flat-all och reconciles pass 2. En stängning kan bara
+minska en position, aldrig öppna eller vända en. Saknar HL positionen, eller
+har den på andra sidan, vägrar HL ordern. Bekräftar en andra läsning att
+sidan är borta bokförs raden som stängd utanför boten, prissatt från
+fill-historiken och annars till mid, markerad ESTIMATED (`_close_left_open`
+i `runner.py`). Har en annan öppen rad samma mynt lämnas raden åt reconcile,
+som förut.
+
+En bot från före NU-5a skickar en vanlig marknadsorder, inte reduce-only. Om
+HL saknar positionen, eller har den på andra sidan, skickas DB-radens storlek
+ändå (`_resolve_close_size` i `runner.py`). Strategierna återställs från de
+öppna DB-raderna när boten startar och körs från första tick efter unpause,
+men det första riktiga reconcile-passet kan dröja flera minuter. En strategi
+vars rad HL inte backar kan därför öppna en ny position, eller förstora en
+position på motsatt sida, trots kill switch. Steg 7 stänger av de
+strategierna före unpause.
 
 ### 1.5 Två saker går förbi pausen
 
