@@ -434,12 +434,17 @@ raden:
 docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
   "UPDATE positions SET state_json = CASE
        WHEN state_json::jsonb -> '_engine_pending_close' ->> 'only' = 'true'
+            AND NOT state_json::jsonb ? '_engine_drift_rest'
          THEN NULL
        ELSE (state_json::jsonb - '_engine_pending_close')::text END
     WHERE id = <id> AND is_open = true;"
 ```
 
 `only` betyder att raden inte hade något eget tillstånd före markeringen.
+En rad kan också bära `_engine_drift_rest`: priset på en stängning som
+fylldes men lämnade en rest som HL inte håller, i väntan på en komplett
+läsning av fills som avgör om resten är storleksdrift. Den lägger ingen
+order. Låt den stå.
 
 Bottarna som ska startas är de som databasen markerar som körande:
 

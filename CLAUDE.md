@@ -330,6 +330,7 @@ through the dashboard `/options` page or
 - **Allow_multi_coin:** Redis flag. False (default): one strategy per coin, at most one per `family` across coins (`cdc_macd`/`macd_zero`). Checked in `runner._open_refusal()`; families via `registry.get_strategy_family()`.
 - **Flip-detect:** OPEN_X while the strategy's DB row is the opposite side → the open is checked first, then a synthesized CLOSE precedes it.
 - **Export_state / restore_from_json:** SL/TP/trail/entry saved to `positions.state_json` and restored verbatim on restart (17 of 22 strategies).
+- **Engine markers in `state_json`:** beside the strategy's state, an open row can carry `_engine_pending_close`, a close the engine owes it (NU-5a): a durable latch, sent every tick and after restarts, also for a strategy not built, until the row closes; disable, the allowlist, the kill switch and a hold do not stop it, only a readable pause does. `_engine_drift_rest` keeps the price of a close whose rest awaits a complete fills read. Restore strips both.
 - **PUBLIC_URL / CADDY_HOST:** the dashboard's user-facing URL with scheme, the base of every redirect; the host Caddy's bootstrap cert is issued for.
 - **vvv_hedge:** in-house, mainnet-only VVV hedge: mandatory EMA-bearish filter plus 2 of 3 other indicators, fixed `holding_vvv` size, hard 10% SL.
 - **Backtest CLI:** `cd bot && uv run python -m hypertrade.backtest --strategy <name>`/`--all` needs `--tenant-id`/`TENANT_ID` or `--no-save`.

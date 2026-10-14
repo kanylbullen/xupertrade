@@ -370,28 +370,42 @@ async def test_one_flat_read_is_not_a_filled_close(monkeypatch):
     assert order.error.startswith("outcome unknown")
 
 
-@pytest.mark.parametrize("why", ["order refused", "no mid"])
+@pytest.mark.parametrize("why", [
+    "order refused", "no mid", "mid unreadable", "no szDecimals",
+    "order raises", "size rounds to 0",
+])
 async def test_a_refused_reduce_only_order_logs_at_info(
-    hl_http, build_exchange, caplog, why,
+    hl_http, build_exchange, caplog, monkeypatch, why,
 ):
-    """r1-tests-and-noise-5. The runner logs every close it sends again at
-    the level its episode calls for, HL's reason included; the wrapper's
-    own line for each attempt was one more WARNING a minute. INFO for a
-    reduce-only order; an open's stays WARNING."""
+    """r1-tests-and-noise-5, r2 lifecycle-2. The runner logs every close it
+    sends again at the level its episode calls for, HL's reason included;
+    the wrapper's own line for each attempt was one more WARNING or ERROR
+    a minute — a coin with no szDecimals, an order call that raised (a
+    4xx), and an all_mids read that failed (its traceback at ERROR before
+    the demoted "No mid price") still were. Nothing at WARNING or above for
+    a reduce-only order; an open's lines keep their level."""
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
     exchange = build_exchange()
-    hl_http.route("allMids", (200, {} if why == "no mid" else {"BTC": "50000.0"}))
+    mids = {"no mid": (200, {}), "mid unreadable": (429, "Too Many Requests")}
+    hl_http.route("allMids", mids.get(why, (200, {"BTC": "50000.0"})))
     hl_http.route("clearinghouseState", (200, _account_with("BTC", "0.01")))
-    hl_http.route("order", (200, {"status": "err", "response": "Too many requests"}))
-    line = "order rejected" if why == "order refused" else "No mid price"
+    hl_http.route("order", (400, "Bad Request") if why == "order raises" else (
+        200, {"status": "err", "response": "Too many requests"},
+    ))
+    coin = "DOGE" if why == "no szDecimals" else "BTC"
+    size = 0.000001 if why == "size rounds to 0" else 0.01
 
     with caplog.at_level(logging.INFO, logger="hypertrade"):
-        close = await exchange.place_order("BTC", "sell", 0.01, reduce_only=True)
-        opened = await exchange.place_order("BTC", "buy", 0.01)
+        close = await exchange.place_order(coin, "sell", size, reduce_only=True)
+        n = len(caplog.records)
+        opened = await exchange.place_order(coin, "buy", size)
 
     assert close.status == opened.status == OrderStatus.REJECTED
-    assert [r.levelno for r in caplog.records if line in r.getMessage()] == [
-        logging.INFO, logging.WARNING,
-    ]
+    assert caplog.records[:n], "the close still says why, at INFO"
+    assert [
+        r.getMessage() for r in caplog.records[:n] if r.levelno >= logging.WARNING
+    ] == []
+    assert any(r.levelno >= logging.WARNING for r in caplog.records[n:])
 
 
 async def test_a_strict_fills_read_raises_instead_of_answering_empty(

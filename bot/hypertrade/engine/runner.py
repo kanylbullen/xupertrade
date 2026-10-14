@@ -12,7 +12,12 @@ import aiohttp
 
 from hypertrade.config import settings
 from hypertrade.data.feed import fetch_candles
-from hypertrade.db.repo import ReconcileResult, Repository, split_pending_close
+from hypertrade.db.repo import (
+    ReconcileResult,
+    Repository,
+    drift_rest_of,
+    split_pending_close,
+)
 from hypertrade.engine import funding
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.portfolio import PortfolioManager
@@ -188,6 +193,11 @@ class _PendingClose:
     since: str = ""  # when the engine took it on (UTC, ISO)
     saved: bool = False  # the row carries its marker: a restart sends it
     save_failures: int = 0  # writes of the marker that failed in a row
+    # An attempt may have filled (its outcome came back unknown): from then
+    # on the close is sized to what the exchange holds beyond the coin's
+    # other rows on its side, and not sent when that is nothing — the rest
+    # of the netted position is theirs (r2 exits-money-3).
+    unsure: bool = False
 
 
 @dataclass
@@ -222,6 +232,16 @@ def _closes_side(signal: Signal | None, side: str) -> bool:
     if side == "long":
         return signal.action in (SignalAction.CLOSE_LONG, SignalAction.OPEN_SHORT)
     return signal.action in (SignalAction.CLOSE_SHORT, SignalAction.OPEN_LONG)
+
+
+def _may_have_filled(order) -> bool:
+    """Whether a close `order` that came back unfilled may have filled
+    after all: HL's wrapper could not tell (a timeout, "outcome unknown"),
+    or it is still on the book. Anything else is a definite no, which
+    moved nothing (r2 exits-money-2)."""
+    return order.status.value == "pending" or str(
+        getattr(order, "error", None) or "",
+    ).startswith("outcome unknown")
 
 
 def _holds(strategy) -> bool:
@@ -598,6 +618,7 @@ class EngineRunner:
             side=side, reason=str(marker.get("reason") or "exit"),
             misses=count("misses"), alerted=alerted, logged=alerted,
             since=str(marker.get("since") or ""), saved=True,
+            unsure=bool(marker.get("unsure")),
         )
 
     async def _restore_strategies(self, positions: list) -> None:
@@ -1844,7 +1865,10 @@ class EngineRunner:
         rest of a row whose coin's close filled on its side, as size drift
         at that fill; its strategy is reset. One it still holds, one that
         cannot be booked, or a coin now held on the other side fails the
-        attempt."""
+        attempt. The fills are read from the oldest row to be booked, not
+        the oldest in the book: a long-held row elsewhere widened the
+        window past HL's page cap, and a cut read books no drift rest
+        (r2 exits-money-1)."""
         if not self.repo:
             return
         try:
@@ -1853,7 +1877,7 @@ class EngineRunner:
             logger.exception("Flat-all: reading the open rows after the closes failed")
             failed["DB"] = f"open rows unreadable ({type(e).__name__})"
             return
-        ledger = None
+        gone = []
         for row in rows:
             if row.symbol in failed:
                 continue  # its coin's close failed: that is the reason
@@ -1868,13 +1892,20 @@ class EngineRunner:
                 )
                 failed[row.symbol] = "still held on the exchange"
                 continue
-            if ledger is None:
-                try:
-                    ledger = await self.repo.fill_ledger_for(
-                        self.exchange, rows, "Flat-all", strict=bool(filled_at),
-                    )
-                except Exception:
-                    logger.exception("Flat-all: reading the fills failed")
+            gone.append((row, ex_pos, exchange))
+        ledger = None
+        if gone:
+            try:
+                ledger = await self.repo.fill_ledger_for(
+                    self.exchange, [row for row, _, _ in gone], "Flat-all",
+                    strict=any(
+                        filled_at.get(row.symbol, ("",))[0] == row.side
+                        or drift_rest_of(row) for row, _, _ in gone
+                    ),
+                )
+            except Exception:
+                logger.exception("Flat-all: reading the fills failed")
+        for row, ex_pos, exchange in gone:
             side, price, before = filled_at.get(row.symbol, ("", None, None))
             drift = side == row.side
             if not await self._book_external_close(
@@ -2337,13 +2368,18 @@ class EngineRunner:
                     else {}
                 )
                 sent_ms = int(time.time() * 1000)
-                order = await self.exchange.place_order(
+                order = None if close_size <= 0 else await self.exchange.place_order(
                     signal.symbol, "sell" if held == "long" else "buy",
                     close_size, OrderType.MARKET, reduce_only=True, **band,
                 )
             except Exception as e:
                 await self._close_raised(signal, held, close_row, e)
                 raise
+            if order is None:
+                # Nothing of this row's to send after an attempt that may
+                # have filled (`_resolve_close_size`): classified, not sent.
+                await self._close_left_open(signal, None, close_row, unsent=True)
+                return False
             size = close_size
         else:
             return False
@@ -3601,7 +3637,10 @@ class EngineRunner:
         NU-5a: the close goes out reduce-only, so no size opens or flips
         anything. A flat or opposite exchange is sent the DB size and
         refuses it (`_close_left_open` classifies that); an unreadable one
-        is sent the DB size too.
+        is sent the DB size too. After an attempt that may have filled
+        (`_PendingClose.unsure`), the clamp is what the exchange holds
+        beyond the coin's other rows on the side, and 0.0 — not sent —
+        when that is nothing or the read fails.
         """
         if self.repo:
             db_pos = await self.repo.get_open_position(strategy_name, symbol)
@@ -3631,6 +3670,7 @@ class EngineRunner:
                 logging.INFO if pending is not None and pending.misses
                 else logging.WARNING
             )
+            unsure = pending is not None and pending.unsure
             # Sanity-clamp to the exchange's actual netted position size for
             # this side. If the DB thinks we own more than the exchange has
             # (could happen after partial reconcile), close only what exists.
@@ -3639,16 +3679,37 @@ class EngineRunner:
             except Exception as e:
                 # The clamp is a safety net, not the source of truth —
                 # whatever failed, we fall back to the DB size and say
-                # so. One handler; the type is in the message.
+                # so. One handler; the type is in the message. Not after
+                # an attempt that may have filled: unclamped, the close
+                # could take the other rows' position (r2 exits-money-3).
                 logger.log(
                     level,
-                    "[%s] CLOSE_%s for %s — exchange read failed (%s: %s); "
-                    "closing the DB size unclamped, reduce-only",
+                    "[%s] CLOSE_%s for %s — exchange read failed (%s: %s); %s",
                     strategy_name, expected_side.upper(), symbol,
                     type(e).__name__, e,
+                    "not sent after an attempt that may have filled" if unsure
+                    else "closing the DB size unclamped, reduce-only",
                 )
-                return db_pos.size, db_pos
+                return (0.0 if unsure else db_pos.size), db_pos
             held = _held_on_side(ex_pos, expected_side)
+            others = await self._others_on_side(db_pos) if unsure else 0.0
+            if others:
+                # An earlier attempt may have filled: what the other rows on
+                # the side hold is theirs, and only what is beyond it can be
+                # this row's (r2 exits-money-3). Nothing beyond: not sent,
+                # classified instead (`_close_left_open`).
+                beyond = self._unfilled(symbol, held, others)
+                if beyond <= 0:
+                    logger.log(
+                        level,
+                        "[%s] CLOSE_%s for %s not sent — after an attempt "
+                        "that may have filled, the exchange holds %s, all of "
+                        "it the other rows' on that side (%g)",
+                        strategy_name, expected_side.upper(), symbol,
+                        _exchange_text(ex_pos), others,
+                    )
+                    return 0.0, db_pos
+                held = beyond
             if held > 1e-9 and db_pos.size > held + 1e-9:
                 logger.log(
                     level,
@@ -3687,7 +3748,7 @@ class EngineRunner:
 
     async def _close_left_open(
         self, signal: Signal, order, row, *, filled_at: float | None = None,
-        fills_before_ms: int | None = None,
+        fills_before_ms: int | None = None, unsent: bool = False,
     ) -> str | None:
         """NU-5a: a close left `row` open — all of it (`order` rejected or
         zero-filled) or the rest (filled short at `filled_at`: `order`
@@ -3711,9 +3772,15 @@ class EngineRunner:
            (`_close_missed`).
 
         Other rows on the coin's side count against what the exchange
-        holds: the exchange nets them with this one, and read as this
-        row's, a close that filled but came back with its outcome unknown
-        was sent again and closed a sibling's position (r1-double-close-1).
+        holds when this close may have filled — the rest after a fill, an
+        outcome unknown, or an earlier attempt's (`_PendingClose.unsure`):
+        the exchange nets them with this one, and read as this row's, a
+        close that filled but came back with its outcome unknown was sent
+        again and closed a sibling's position (r1-double-close-1). A
+        definite refusal moved nothing, so anything held on the side is
+        still this row's: a sibling row the exchange does not back must not
+        hide it (r2 exits-money-2). `unsent`: `_resolve_close_size` found
+        nothing of this row's to send after an attempt that may have filled.
 
         Returns "external" (booked, the exchange flat), "external-held"
         (booked, the exchange on the other side with no row), "unpriced"
@@ -3724,7 +3791,8 @@ class EngineRunner:
         """
         key = (signal.strategy_name, signal.symbol)
         got = (
-            "filled short" if order is None
+            "was not sent (nothing held beyond the other rows)" if unsent
+            else "filled short" if order is None
             else "came back zero-filled" if order.status.value == "filled"
             else f"came back {order.status.value}"
             + (f" ({order.error})" if getattr(order, "error", None) else "")
@@ -3735,14 +3803,16 @@ class EngineRunner:
                 signal.strategy_name, signal.action.value, signal.symbol, got,
             )
             return None
+        unknown = order is not None and _may_have_filled(order)
+        pending = self._pending_closes.get(key)
         outcome: str | None = "retry"
         try:
             if order is None:  # what is left is the rest on the row
                 row = await self.repo.get_open_position(*key) or row
-            others = sum(
-                float(r.size)
-                for r in await self.repo.get_open_positions_for_symbol(row.symbol)
-                if r.side == row.side and r.id != row.id
+            others = (
+                await self._others_on_side(row)
+                if order is None or unknown or (pending and pending.unsure)
+                else 0.0
             )
             held, pos, exchange = await self._held_after_close(
                 row.symbol, row.side, others,
@@ -3771,7 +3841,7 @@ class EngineRunner:
                 self._resync_strategy_to_row(row)
                 outcome = await self._close_missed(
                     signal, row, f"{got}; exchange: {exchange}",
-                    rejected=order is not None,
+                    rejected=order is not None or unsent, unsure=unknown,
                 )
         except Exception:
             logger.exception(
@@ -3780,10 +3850,24 @@ class EngineRunner:
                 signal.strategy_name, signal.action.value, signal.symbol,
             )
             self._resync_strategy_to_row(row)
-            await self._pend_close(key, row.side, signal.reason)
+            pending = await self._pend_close(
+                key, row.side, signal.reason, save=not unknown,
+            )
+            if unknown:
+                pending.unsure = True
+                await self._save_pending(key, pending)
         if key in self._flip_closes:
             self._flip_closes[key] = outcome
         return outcome
+
+    async def _others_on_side(self, row) -> float:
+        """What the coin's other open rows on `row`'s side hold: the
+        exchange nets them with it into one position."""
+        return sum(
+            float(r.size)
+            for r in await self.repo.get_open_positions_for_symbol(row.symbol)
+            if r.side == row.side and r.id != row.id
+        )
 
     async def _held_after_close(
         self, symbol: str, side: str, others: float = 0.0,
@@ -3852,6 +3936,7 @@ class EngineRunner:
                     "since": pending.since,
                     "misses": pending.misses,
                     "alerted": pending.alerted,
+                    "unsure": pending.unsure,
                 },
             )
         except Exception as e:
@@ -3884,6 +3969,7 @@ class EngineRunner:
 
     async def _close_missed(
         self, signal: Signal, row, detail: str, *, rejected: bool,
+        unsure: bool = False,
     ) -> str:
         """Count one more attempt that left `row` open (rejected, filled
         zero, or — `rejected=False` — filled short) and write its one log
@@ -3894,10 +3980,12 @@ class EngineRunner:
         one line — an alert's text at ERROR the first time, everything
         else at INFO, but for the first miss of an episode that does not
         alert, at WARNING. "alerted" if an alert went out now. The count
-        and the alerts delivered go onto the row's marker."""
+        and the alerts delivered go onto the row's marker, and `unsure`
+        (this attempt may have filled) too, for the rest of the episode."""
         key = (signal.strategy_name, signal.symbol)
         pending = await self._pend_close(key, row.side, signal.reason, save=False)
         pending.misses += 1
+        pending.unsure = pending.unsure or unsure
         outcome = await self._count_miss(signal, row, detail, rejected, pending)
         await self._save_pending(key, pending)
         return outcome

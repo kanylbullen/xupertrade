@@ -53,22 +53,53 @@ _HL_FILL_PAGE_CAP = 2000
 # guards against, which is exactly when exits must keep running.
 PENDING_CLOSE_KEY = "_engine_pending_close"
 
+# NU-5a: the rest a close that filled left on a row, gone from the
+# exchange, whose fills read failed or was cut at HL's page cap: drift or
+# a close outside the bot, only a complete read can say. The close's price
+# (and its fills-before time) stays on the row under this key until one
+# does, so every later path books the rest as that close's drift, never at
+# the mid (r2 exits-money-1). It dies with the row, as the pending close.
+DRIFT_REST_KEY = "_engine_drift_rest"
+_ENGINE_KEYS = (PENDING_CLOSE_KEY, DRIFT_REST_KEY)
+
 # The reason of a trade row for size the DB held and the exchange never
 # did: the rest of a close no fill covers (`close_row_externally`).
 _DRIFT_REASON = "size drift: the row held more than the exchange; pnl 0"
 
 
 def split_pending_close(state):
-    """`state` (a row's parsed `state_json`) without the engine's
-    pending-close marker, and the marker or None. A row that had no
-    state of its own before the marker comes back as None."""
-    if not isinstance(state, dict) or PENDING_CLOSE_KEY not in state:
+    """`state` (a row's parsed `state_json`) without the engine's markers
+    (`PENDING_CLOSE_KEY`, `DRIFT_REST_KEY`), and the pending-close marker
+    or None. A row that had no state of its own before a marker comes
+    back as None."""
+    if not isinstance(state, dict) or not any(k in state for k in _ENGINE_KEYS):
         return state, None
     state = dict(state)
-    marker = state.pop(PENDING_CLOSE_KEY)
-    if not isinstance(marker, dict):
+    pending = PENDING_CLOSE_KEY in state
+    marker = state.pop(PENDING_CLOSE_KEY, None)
+    drift = state.pop(DRIFT_REST_KEY, None)
+    if pending and not isinstance(marker, dict):
         marker = {}
-    return (None if marker.get("only") else state), marker
+    only = any(isinstance(m, dict) and m.get("only") for m in (marker, drift))
+    return (None if only else state), marker
+
+
+def drift_rest_of(row) -> tuple[float, int | None] | None:
+    """The close price and fills-before time (epoch ms, or None) a row's
+    drift-rest marker keeps (`DRIFT_REST_KEY`), or None."""
+    import json  # noqa: PLC0415
+
+    try:
+        state = json.loads(row.state_json) if row.state_json else None
+        mark = state.get(DRIFT_REST_KEY) if isinstance(state, dict) else None
+        if not isinstance(mark, dict):
+            return None
+        price = float(mark["price"])
+        before = mark.get("before_ms")
+        before = int(before) if before is not None else None
+    except (TypeError, ValueError, KeyError):
+        return None
+    return (price, before) if price > 0 else None
 
 
 # Tables that alembic is the sole authority for — `init_db()` skips
@@ -526,6 +557,29 @@ class Repository:
         beside it; a second call replaces the note (its attempt count).
         False when there is no such row, or its `state_json` is not a
         JSON object to add the note to."""
+        return await self._mark_row(
+            strategy_name, symbol, side, PENDING_CLOSE_KEY, marker,
+        )
+
+    async def mark_drift_rest(
+        self, row, price: float, before_ms: int | None,
+    ) -> bool:
+        """Note on `row` (still open, same side) that its size is the rest
+        of a close that filled at `price` (`DRIFT_REST_KEY`): what no fill
+        stamped before `before_ms` covers is size drift (r2 exits-money-1).
+        False when the row is gone or its state is not a JSON object."""
+        return await self._mark_row(
+            row.strategy_name, row.symbol, row.side, DRIFT_REST_KEY,
+            {"price": float(price), "before_ms": before_ms},
+        )
+
+    async def _mark_row(
+        self, strategy_name: str, symbol: str, side: str, key: str,
+        marker: dict,
+    ) -> bool:
+        """Write the engine's `marker` under `key` into the open `side`
+        row's `state_json`, beside the strategy's own state; "only" when
+        the row has none of its own (`split_pending_close`)."""
         import json  # noqa: PLC0415
 
         async with self._session_factory() as session:
@@ -551,10 +605,12 @@ class Repository:
                     marker["only"] = True
                 if not isinstance(state, dict):
                     return False
-                old = state.get(PENDING_CLOSE_KEY)
-                if isinstance(old, dict) and old.get("only"):
-                    marker["only"] = True  # an update: still no state of its own
-                state[PENDING_CLOSE_KEY] = marker
+                if any(
+                    isinstance(old, dict) and old.get("only")
+                    for old in (state.get(k) for k in _ENGINE_KEYS)
+                ):
+                    marker["only"] = True  # still no state of its own
+                state[key] = marker
                 row.state_json = json.dumps(state)
         return True
 
@@ -916,10 +972,11 @@ class Repository:
         if drift_price is not None:
             if not getattr(ledger, "complete", True):
                 logger.warning(
-                    "External close: the fills read for %s %s %s %s failed or "
-                    "was cut at HL's page cap — what no fill seen covers is "
-                    "not called size drift; the row is left for reconcile",
-                    row.strategy_name, row.side, size, row.symbol,
+                    "%s: the fills read for %s %s %s %s failed or was cut at "
+                    "HL's page cap — the rest of a close @ %.6f is booked "
+                    "neither as size drift nor at the mid until a complete "
+                    "read decides; the row stays open", label.capitalize(),
+                    row.strategy_name, row.side, size, row.symbol, drift_price,
                 )
                 return None
             covered = ledger.take_upto(
@@ -1055,8 +1112,17 @@ class Repository:
         under an id that is not its oid (a late fill, r1-double-close-2).
 
         `ledger`: one shared by every row booked in one pass, so a fill
-        that covers part of one row is left for the next (r1-booking-5).
+        that covers part of one row is left for the next (r1-booking-5);
+        strict when a row it prices is a drift rest.
+
+        A drift rest no complete fills read has decided yet keeps that
+        close's price on the row (`DRIFT_REST_KEY`) and stays open; any
+        later call without `drift_price` takes it from there, as reconcile
+        does (r2 exits-money-1).
         """
+        marked = drift_price is None and drift_rest_of(row)
+        if marked:
+            drift_price, fills_before_ms = marked
         if ledger is None:
             ledger = await self.fill_ledger(
                 exchange, _to_epoch_ms(row.opened_at), "External close",
@@ -1067,6 +1133,15 @@ class Repository:
             drift_price=drift_price, until_ms=fills_before_ms,
         )
         if priced is None:
+            if drift_price is not None and not marked:
+                try:
+                    await self.mark_drift_rest(row, drift_price, fills_before_ms)
+                except Exception:
+                    logger.warning(
+                        "External close: keeping the close's price on %s %s "
+                        "%s failed — reconcile may book the rest at the mid",
+                        row.strategy_name, row.side, row.symbol, exc_info=True,
+                    )
             return None
         async with self._session_factory() as session:
             closed = await self._close_row_priced(
@@ -1323,18 +1398,37 @@ class Repository:
             since_ms = min(
                 (_to_epoch_ms(p.opened_at) or 0) for p, _ in to_close
             ) or None
-            ledger = await self.fill_ledger(exchange, since_ms, "Reconcile")
+            # A row a close left a drift rest on is priced as that close's
+            # drift, from a read known complete, never at the mid (r2
+            # exits-money-1); strict, so a failed read is not "no fills".
+            drift = {row.id: drift_rest_of(row) for row, _ in to_close}
+            ledger = await self.fill_ledger(
+                exchange, since_ms, "Reconcile", strict=any(drift.values()),
+            )
             mid_cache: dict[str, float] = {}
             for row, kind in to_close:
+                rest = drift[row.id]
                 priced = await self._price_orphan_close(
                     exchange, row, ledger, mid_cache,
+                    drift_price=rest[0] if rest else None,
+                    until_ms=rest[1] if rest else None,
                 )
-                if priced is None:
+                if priced is None and rest:
+                    msg = (
+                        f"LEFT OPEN (size drift unconfirmed): "
+                        f"{row.strategy_name} {row.side} {row.size} "
+                        f"{row.symbol} — the rest of a close @ {rest[0]:.6f}; "
+                        "the fills read failed or was cut at HL's page cap, "
+                        "and only a complete one can say drift or a close "
+                        "outside the bot"
+                    )
+                elif priced is None:
                     msg = (
                         f"LEFT OPEN (unpriceable): {row.strategy_name} "
                         f"{row.side} {row.size} {row.symbol} — no closing "
                         f"fill and no mid price; refusing to fabricate a close"
                     )
+                if priced is None:
                     result.failures.append(msg)
                     logger.error("Reconcile: %s", msg)
                     continue
@@ -1353,14 +1447,21 @@ class Repository:
                     if db_row is None:
                         continue
 
+                    # "ESTIMATED" in the action text so Telegram shows it:
+                    # the PnL is booked like a real one, but the price came
+                    # from the mid, not from a fill. Size drift moved no
+                    # money (r2 exits-money-1).
+                    how = (
+                        "ESTIMATED @ mid" if priced.estimated
+                        else "size drift" if priced.drift else "fill"
+                    ) + (
+                        f"; {priced.drift_size:g} size drift"
+                        if priced.drift_size else ""
+                    )
                     msg = (
                         f"closed {kind}: {db_row.strategy_name} "
                         f"{db_row.side} {db_row.size} {db_row.symbol} "
-                        f"@ {priced.exit_price:.6f} "
-                        # "ESTIMATED" in the action text so Telegram shows
-                        # it: the PnL is booked like a real one, but the
-                        # price came from the mid, not from a fill.
-                        f"({'ESTIMATED @ mid' if priced.estimated else 'fill'}), "
+                        f"@ {priced.exit_price:.6f} ({how}), "
                         f"pnl {priced.pnl:+.4f}"
                     )
                     result.actions.append(msg)

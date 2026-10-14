@@ -512,10 +512,18 @@ class HyperLiquidExchange(Exchange):
         """
         is_buy = side == "buy"
 
+        # A reduce-only order is a close: its caller logs every unfilled
+        # one, with the error it comes back with, at the level its episode
+        # calls for. The engine sends a stuck close every tick, so each line
+        # below for it would be one more WARNING or ERROR a minute
+        # (r1-tests-and-noise-5, r2 lifecycle-2): INFO for a close.
+        quiet = logging.INFO if reduce_only else None
+
         # Refuse a coin we have no szDecimals for rather than guess. The
         # old 4 dp fallback sent SOL (szDecimals 2) at 4 dp and HL 422'd it.
         if symbol not in self._sz_decimals:
-            logger.error(
+            logger.log(
+                quiet or logging.ERROR,
                 "Order REFUSED for %s %s %s: %s has no szDecimals in HL meta "
                 "(unknown or delisted coin?) — cannot round size or price",
                 symbol, side, size, symbol,
@@ -523,14 +531,13 @@ class HyperLiquidExchange(Exchange):
             return self._rejected(symbol, side, size, order_type, price, "no szDecimals")
 
         if order_type == OrderType.MARKET:
-            mid = await self.get_current_price(symbol)
+            mid = await (
+                self._mid_price(symbol, quiet) if reduce_only
+                else self.get_current_price(symbol)
+            )
             if mid <= 0:
-                # A reduce-only order is a close: its caller logs every
-                # unfilled one, with this error, at the level its episode
-                # calls for — a stuck close sent every tick was one more
-                # WARNING here a minute (r1-tests-and-noise-5).
                 logger.log(
-                    logging.INFO if reduce_only else logging.WARNING,
+                    quiet or logging.WARNING,
                     "No mid price for %s — cannot place market order %s %s",
                     symbol, side, size,
                 )
@@ -546,7 +553,8 @@ class HyperLiquidExchange(Exchange):
 
         rounded_size = self._round_size(symbol, float(size))
         if rounded_size <= 0:
-            logger.warning(
+            logger.log(
+                quiet or logging.WARNING,
                 "Rounded size for %s is zero (raw=%s, szDecimals=%s) — order skipped",
                 symbol, size, self._sz_decimals[symbol],
             )
@@ -579,9 +587,10 @@ class HyperLiquidExchange(Exchange):
             )
         except Exception as e:
             if not _order_outcome_unknown(e):
-                logger.exception(
+                logger.log(
+                    quiet or logging.ERROR,
                     "HyperLiquid order failed for %s %s %s @ %s",
-                    symbol, side, rounded_size, limit_px,
+                    symbol, side, rounded_size, limit_px, exc_info=True,
                 )
                 return self._rejected(symbol, side, rounded_size, order_type, price, repr(e))
             # The POST timed out or lost its connection — but HL may
@@ -622,7 +631,7 @@ class HyperLiquidExchange(Exchange):
         status_str = result.get("status", "")
         if status_str != "ok":
             logger.log(
-                logging.INFO if reduce_only else logging.WARNING,  # as above
+                quiet or logging.WARNING,  # as above
                 "HyperLiquid order rejected for %s %s %s (%s): %s",
                 symbol, side, rounded_size, sent, result,
             )
@@ -1213,11 +1222,19 @@ class HyperLiquidExchange(Exchange):
             return []
 
     async def get_current_price(self, symbol: str) -> float:
+        return await self._mid_price(symbol)
+
+    async def _mid_price(self, symbol: str, level: int | None = None) -> float:
+        """The mid, 0.0 when unreadable — logged at `level` (ERROR by
+        default, with the traceback; a close's order passes INFO)."""
         try:
             mids = await self._run_with_retry(
                 self._info.all_mids, validate=_check_mids,
             )
             return float(mids.get(symbol, 0))
         except Exception:
-            logger.exception("Failed to fetch mid price for %s", symbol)
+            logger.log(
+                level or logging.ERROR, "Failed to fetch mid price for %s",
+                symbol, exc_info=True,
+            )
             return 0.0
