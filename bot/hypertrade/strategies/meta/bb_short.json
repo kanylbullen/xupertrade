@@ -27,12 +27,5 @@
     "breakout_pct": 0.02,
     "take_profit_pct": 0.02,
     "use_high": true
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1h BB upper breakouts, short-only)"
   }
 }

@@ -24,12 +24,5 @@
   "params": {
     "ema_fast": 12,
     "ema_slow": 26
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1d EMA crossover, long only)"
   }
 }

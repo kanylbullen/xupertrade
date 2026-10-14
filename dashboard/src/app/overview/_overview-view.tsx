@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { StatCard } from "@/components/stat-card";
+import { OverviewStats } from "@/components/overview-stats";
 import { EquityChart } from "@/components/equity-chart";
 import { TradeTable } from "@/components/trade-table";
 import { TradingViewTicker } from "@/components/tv-chart";
@@ -14,7 +14,16 @@ import {
   getDailyPnl,
   getRealizedPnlTotal,
   getFundingTotal,
+  getFirstEquitySince,
 } from "@/lib/queries";
+import { formatDateTime } from "@/lib/format";
+import { requestNow } from "@/lib/now";
+import {
+  EQUITY_WINDOWS,
+  equityChange,
+  todayRow,
+  type EquityPoint,
+} from "@/lib/overview-numbers";
 import { requireTenantServer } from "@/lib/tenant-server";
 import { db, tenantBots } from "@/lib/db";
 import { getBotApiUrl } from "@/lib/bot-api";
@@ -65,9 +74,13 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
   let latestEquityRow: Awaited<ReturnType<typeof getLatestEquity>> | null = null;
   let strategyPnl: Awaited<ReturnType<typeof getStrategyPnlBreakdown>> = [];
   let dailyPnl: Awaited<ReturnType<typeof getDailyPnl>> = [];
-  let realizedTotal = { realizedPnl: 0, fees: 0, trades: 0 };
+  let realizedTotal = { realizedPnl: 0, fees: 0, entryFees: 0, trades: 0 };
   let fundingTotal = { totalUsdc: 0, count: 0 };
+  let equityBaselines: Array<Awaited<ReturnType<typeof getFirstEquitySince>>> = [];
   let dbConnected = false;
+
+  const nowMs = requestNow();
+  const DAILY_WINDOW_DAYS = 30;
 
   try {
     [
@@ -79,15 +92,21 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
       dailyPnl,
       realizedTotal,
       fundingTotal,
+      equityBaselines,
     ] = await Promise.all([
       getRecentTrades(tenant.id, 20, mode),
       getOpenPositions(tenant.id, mode),
       getEquityHistory(tenant.id, 200, mode),
       getLatestEquity(tenant.id, mode),
       getStrategyPnlBreakdown(tenant.id, mode),
-      getDailyPnl(tenant.id, mode, 30),
+      getDailyPnl(tenant.id, mode, DAILY_WINDOW_DAYS),
       getRealizedPnlTotal(tenant.id, mode),
       getFundingTotal(tenant.id, mode),
+      Promise.all(
+        EQUITY_WINDOWS.map((w) =>
+          getFirstEquitySince(tenant.id, mode, new Date(nowMs - w.ms)),
+        ),
+      ),
     ]);
     dbConnected = true;
   } catch {
@@ -150,14 +169,17 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
       totalEquity: e.totalEquity,
     }));
 
-  const totalEquity = latestEquityRow?.totalEquity ?? 10_000;
-  const startEquity = equityData.length > 0 ? equityData[0].totalEquity : 10_000;
-  const totalPnl = totalEquity - startEquity;
-  const totalPnlPct = startEquity > 0 ? (totalPnl / startEquity) * 100 : 0;
+  // No snapshot means no number: the cards show an empty state rather
+  // than a $10,000 placeholder.
+  const toPoint = (
+    row: { totalEquity: number; timestamp: Date | null } | null,
+  ): EquityPoint | null =>
+    row?.timestamp ? { equity: row.totalEquity, at: row.timestamp } : null;
+  const latestEquity = toPoint(latestEquityRow);
+  const equityChanges = EQUITY_WINDOWS.map((w, i) =>
+    equityChange(w.label, w.ms, latestEquity, toPoint(equityBaselines[i] ?? null), nowMs),
+  );
   const unrealizedPnl = positionRows.reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
-  const todayPnl = dailyPnl.length > 0
-    ? dailyPnl[dailyPnl.length - 1].realizedPnl
-    : 0;
 
   const tradeRows = trades.map((t) => ({
     id: t.id,
@@ -190,43 +212,31 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
         )}
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Total Equity"
-          value={`$${totalEquity.toLocaleString()}`}
-          subtitle={mode === "paper" ? "Paper trading" : mode === "testnet" ? "Testnet (live)" : "Mainnet (live)"}
-          trend="up"
-        />
-        <StatCard
-          title="Equity P&L"
-          value={`${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`}
-          subtitle={`${totalPnlPct >= 0 ? "+" : ""}${totalPnlPct.toFixed(2)}% (since first snapshot)`}
-          trend={totalPnl >= 0 ? "up" : "down"}
-        />
-        <StatCard
-          title="Realized P&L"
-          value={`${realizedTotal.realizedPnl >= 0 ? "+" : ""}$${realizedTotal.realizedPnl.toFixed(2)}`}
-          subtitle={`${realizedTotal.trades} trades, $${realizedTotal.fees.toFixed(2)} fees`}
-          trend={realizedTotal.realizedPnl >= 0 ? "up" : "down"}
-        />
-        <StatCard
-          title="Today's P&L"
-          value={`${todayPnl >= 0 ? "+" : ""}$${todayPnl.toFixed(2)}`}
-          subtitle={`Unrealized ${unrealizedPnl >= 0 ? "+" : ""}$${unrealizedPnl.toFixed(2)} | Funding ${fundingTotal.totalUsdc >= 0 ? "+" : ""}$${fundingTotal.totalUsdc.toFixed(2)}`}
-          trend={todayPnl >= 0 ? "up" : "down"}
-        />
-      </div>
+      <OverviewStats
+        modeLabel={mode === "paper" ? "Paper trading" : mode === "testnet" ? "Testnet (live)" : "Mainnet (live)"}
+        dbConnected={dbConnected}
+        latestEquity={latestEquity}
+        equityChanges={equityChanges}
+        realized={realizedTotal}
+        today={todayRow(dailyPnl, nowMs)}
+        nowMs={nowMs}
+      />
 
       <PnlSummary
         realized={realizedTotal.realizedPnl}
-        fees={realizedTotal.fees}
+        entryFees={realizedTotal.entryFees}
         funding={fundingTotal.totalUsdc}
         unrealized={unrealizedPnl}
+        dbConnected={dbConnected}
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <StrategyPnlTable rows={strategyPnl} />
-        <DailyPnlTable rows={dailyPnl} />
+        <StrategyPnlTable rows={strategyPnl} dbConnected={dbConnected} />
+        <DailyPnlTable
+          rows={dailyPnl}
+          windowDays={DAILY_WINDOW_DAYS}
+          dbConnected={dbConnected}
+        />
       </div>
 
       <div className="space-y-3">
@@ -237,6 +247,12 @@ export async function OverviewView({ mode }: { mode: OverviewMode }) {
       <Card>
         <CardHeader>
           <CardTitle>Equity Curve</CardTitle>
+          {equityData.length > 0 && equityData[0].timestamp && (
+            <p className="text-xs text-muted-foreground">
+              Latest {equityData.length} snapshots, since{" "}
+              {formatDateTime(equityData[0].timestamp)}
+            </p>
+          )}
         </CardHeader>
         <CardContent>
           <EquityChart data={equityData} />
