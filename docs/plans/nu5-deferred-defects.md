@@ -20,6 +20,11 @@ first review round, triaged in the message of A's commit `c4cc958`.
 **Source** names the #192 commits (branch `fix/reduce-only-closes`) that
 hold the code or tests to port, where one exists.
 
+Every deferred finding, or each part of one, has a home: a record's
+**Findings** line, or one of the three lists at the end (carried by a
+planned PR, accepted with no owner, process items). The lists have no
+§ 5 line.
+
 ---
 
 ## D1 · A refused edge exit is lost after its bar or a restart
@@ -64,7 +69,9 @@ hold the code or tests to port, where one exists.
 
 - **Severity:** Medium.
 - **Findings:** #192 failure-injection-2, double-close-2, booking-2,
-  flip-and-flat-1 (the pre-existing part), r1-booking-3, r1-booking-5,
+  flip-and-flat-1 (the pre-existing part), line-scan-3, cross-file-4,
+  exchange-semantics-2 and alerts-logs-5 (their flat-all part),
+  r1-booking-3 and its duplicate r1-flip-and-flat-3, r1-booking-5,
   r1-flip-and-flat-1, r1-tests-and-noise-1; A a-booking-and-money-1,
   a-booking-and-money-3.
 - **What:**
@@ -76,21 +83,24 @@ hold the code or tests to port, where one exists.
     never booked. A books such a rest only when the clamp read failed:
     the oversized reduce-only close fills what is there, and the refused
     retry books the rest.
-  - **Flat-all, one order id** (booking-2, a-booking-and-money-3). It
-    books every open row on the coin at its full size, at the order's
-    fill price and under the order's one id, whatever HL filled.
-    `trades.order_id` is unique, so with two rows on a coin
-    (allow_multi_coin) the second insert fails. Flat-all then reports a
-    failure on a flat book, and that row stays open with its strategy
-    not reset. A row whose part was liquidated is booked at the
-    flat-all price, not at its own fill.
+  - **Flat-all, one order id** (booking-2, a-booking-and-money-3, and
+    the flat-all part of line-scan-3, cross-file-4,
+    exchange-semantics-2 and alerts-logs-5). It books every open row on
+    the coin at its full size, at the order's fill price and under the
+    order's one id, whatever HL filled. `trades.order_id` is unique, so
+    with two rows on a coin (allow_multi_coin) the second insert fails.
+    Flat-all then reports a failure on a flat book, and that row stays
+    open with its strategy not reset. A row whose part was liquidated is
+    booked at the flat-all price, not at its own fill. A books the size
+    that filled only in reconcile pass 2 and for a coin with no row, the
+    other part of those four findings.
   - **Flat-all, rows the exchange does not back** (flip-and-flat-1,
-    r1-flip-and-flat-1, r1-booking-3). Flat-all walks the exchange's
-    positions, not the DB rows. An open row on a coin the exchange shows
-    flat is never settled, yet the request is acknowledged and the bot
-    paused. A row on the other side from the exchange's position (a flip
-    by hand) is booked with that position's close. Whatever filled
-    beyond the coin's rows is not booked.
+    r1-flip-and-flat-1, r1-booking-3, r1-flip-and-flat-3). Flat-all
+    walks the exchange's positions, not the DB rows. An open row on a
+    coin the exchange shows flat is never settled, yet the request is
+    acknowledged and the bot paused. A row on the other side from the
+    exchange's position (a flip by hand) is booked with that position's
+    close. Whatever filled beyond the coin's rows is not booked.
   - **The rule for a gap no fill covers** (double-close-2). #192 first
     booked such a gap at the mid, with PnL and a fee on size the
     exchange never held. It must be size drift instead.
@@ -121,13 +131,13 @@ hold the code or tests to port, where one exists.
 
 - **Severity:** Medium.
 - **Findings:** #192 booking-1, double-close-1, booking-5, tests-real-2,
-  r1-double-close-3, r1-booking-4; A a-reduce-only-semantics-1,
-  a-booking-and-money-2.
+  exchange-semantics-1, failure-injection-4, r1-double-close-3,
+  r1-booking-4; A a-reduce-only-semantics-1, a-booking-and-money-2.
 - **What:** when an order's POST times out, the audit-H2 poll
   (`_poll_for_delayed_fill`) watches the position. If it moves by the
   requested size, the order comes back FILLED under a fresh uuid.
   - On master the price is the position's entry, or the IOC limit when
-    the position is gone.
+    the position is gone (exchange-semantics-1, failure-injection-4).
   - After A, a reduce-only close is priced at the mid, else at the mid
     when it was sent. It carries no ESTIMATED marker, so the runner
     books it as the strategy's normal close (a-booking-and-money-2).
@@ -288,8 +298,82 @@ listed so this file shows where each one went.
 
 | PR | Findings |
 |---|---|
-| B (NU-5b) | exits-never-blocked-2, exits-never-blocked-4, r1-exits-never-blocked-3, flip-and-flat-2 (the pre-existing part), exits-never-blocked-6 (the notice part), r1-tests-and-noise-2, and master's DB-divergence auto-pause against decision 5.4 |
+| B (NU-5b) | exits-never-blocked-2, exits-never-blocked-4, r1-exits-never-blocked-3, flip-and-flat-2 (the pre-existing part), exits-never-blocked-6 (the notice part), r1-tests-and-noise-2, failure-injection-3 (a DB failure after a short fill, below), and master's DB-divergence auto-pause against decision 5.4 |
 | NU-5c | exits-never-blocked-3 (an open gate refuses the whole flip, the only exit of hash_supertrend and kalman_breakout) and the rest of exits-never-blocked-5 |
 | NU-5d | the restart part of tests-real-4 and r1-restart-and-state (a restart restores open-time state and rolls back a ratcheted stop) |
-| C | r1-exits-never-blocked-1, -2 and -4, r1-restart-and-state-1 to -5, exits-never-blocked-6 (the band part); exits-money-1, exits-money-3, r1-booking-1, r1-booking-2 and r1-double-close-2 are #192 regressions that the plan's rules (a) and (b) avoid |
-| none | tests-real-info (a suite count) and lifecycle-1 (the PR description) |
+| C | r1-exits-never-blocked-1, -2 and -4, r1-restart-and-state-1 to -5, exits-never-blocked-6 (the band part); exits-money-1, exits-money-3, r1-booking-1, r1-booking-2 and r1-double-close-2 are #192 regressions that the plan's rules (a) and (b) avoid; exits-money-2, the third, is moot: A's sibling guard never classifies a close beside another row, and rule (a) keeps that guard |
+
+**failure-injection-3 goes to B.** #192 fixed it in its first round
+with two tests. A keeps
+`test_a_failed_classification_still_re_arms_the_strategy` and drops
+`test_a_db_failure_after_a_short_fill_still_re_arms`, which failed the
+row's re-read after a short fill's write and asserted that the strategy
+is re-armed on the rest. A, like master, re-syncs a short
+fill to the row it read before the write, so there is no re-read to
+fail. What can still fail is that read or the write. Either way the
+strategy stays flat while the rest of the position is open, and a
+failed write also pauses the bot. B owns DB failures after a fill, and
+the split plans B to re-arm nothing after a fill. So B settles the
+short-fill case: re-arm on the rest, as the dropped test asserted, or
+say what manages it.
+
+## Accepted, no owner
+
+A behaves this way by choice. These are not § 5 records. A later PR
+that takes one says so here.
+
+- **A flip whose old side is already gone opens nothing.** #192
+  line-scan-2, cross-file-3, failure-injection-6 and
+  simplicity-scope-1. When a flip's close half finds its side gone and
+  books the row as an external close, A resets the strategy and sends
+  no open ("strategy flat, nothing opened", `_flip_close`). The split
+  gives the open going ahead after such a booking to no PR and accepts
+  the loss: it is an entry, not an exit, DB and exchange agree, and the
+  strategy's next signal opens through every gate. An edge-triggered
+  flip strategy (hash_supertrend, kalman_breakout) sits out the leg
+  until its next flip. Opening safely after a booking needs what #192
+  grew for it: a check that the exchange is flat and not holding an
+  unowned opposite position (flip-and-flat-4), a gate-refused open that
+  stays refused (r1-flip-and-flat-2), and D6's gate. The second notice
+  (alerts-logs-2) is avoided: the flip's own note is not published for
+  a close `_close_left_open` classified, so the external close's
+  PositionClosed is the only one.
+- **`_flip_refused` is moot on A** (r1-flip-and-flat-2). #192 kept a
+  gate-refused flip's refusal so that its open could not go ahead after
+  the close half was booked externally. A sends no open after an
+  external booking, and on A a gate-refused flip sends nothing at all.
+  The case returns only if the open above is ever let through.
+- **An unpriceable flip close re-aligns and is re-sent while the flip
+  fires** (r1-tests-and-noise-4). The flip's old side is gone, but no
+  fill and no mid can price the row, so `_book_external_close` leaves it
+  to reconcile. `_flip_close` then aligns as master does after any
+  refused flip close: the strategy is re-synced to the row, and each
+  tick the flip fires tries the reduce-only close again. It is
+  refused, and each try costs the 2 s confirm read and a WARNING, with
+  a "Flip-close failed" Telegram once per bar. A plain close in the
+  same case leaves the strategy flat
+  (`test_an_unpriceable_external_close_stays_open_for_reconcile`).
+  Accepted: it needs the fills read and the mid read to fail while the
+  position read works, and the first attempt that can price the row
+  books it as an external close. #192 fixed it with an "unpriced"
+  outcome and a 300 s retry throttle (`8d27bbe`,
+  `UNBOOKED_FLIP_RETRY_SECONDS`).
+
+## Process items, not defects
+
+- **tests-real-info and r1-tests-and-noise-0.** Suite counts that
+  #192's reviews reported.
+- **lifecycle-1.** #192's PR description, rewritten for `47f844e`.
+- **a-tests-real-6.** A's suite counts, and the roadmap's NU-5 "Klart
+  när" bullets that no test on A covers, each with its owner: "ett
+  Redis- eller DB-fel inte stoppar SL-exit" (B), "en avstängd strategi
+  som håller en position stänger enligt sin regel" (NU-5c), "en omstart
+  bevarar ett ratchetat SL" (NU-5d), and NU-5a's "mindre än raden" with
+  a readable clamp (the settlement PR, D2). `c4cc958` routes these
+  owners to A's PR Notes.
+- **a-scope-and-size-1.** A is over AGENTS.md's 600-added-line budget.
+  At `c4cc958` it adds 1,937 lines to the A0 base: 546 code, 17 docs
+  and 1,374 tests. The tests carry the excess, because NU-5a's "Klart
+  när" asks for fault-injection tests against the real Repository.
+  Waiving the budget is the operator's call, argued in A's PR Notes
+  (item 4).
