@@ -5,6 +5,10 @@
  * via `lib/auth.ts`) to a row in the `tenants` table. Auto-creates
  * a tenant on first sight so users don't need a separate "register"
  * flow — the Authentik group membership IS the registration.
+ *
+ * A new tenant starts with no bot allowance (`max_active_bots = 0`):
+ * signing in gives a tenant, the operator raising the cap in /admin
+ * gives bots. See `NEW_TENANT_MAX_ACTIVE_BOTS`.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -19,6 +23,7 @@ import {
   verifySession,
 } from "./auth";
 import { loadKey } from "./crypto/k-cache";
+import { getRequiredOidcGroup, hasRequiredGroup } from "./oidc-group-gate";
 import { isSessionRevoked } from "./session-store";
 
 export type Tenant = typeof tenants.$inferSelect;
@@ -59,14 +64,17 @@ export const OIDC_GROUP_DENIED = "group-denied" as const;
 export type OidcGroupDenied = typeof OIDC_GROUP_DENIED;
 
 /**
- * Read the operator-configured required Authentik group from env.
- * Empty/unset = no enforcement (back-compat — autocreate behaves as
- * pre-M-3). When set, autocreate requires the OIDC `groups` claim to
- * contain this exact value.
+ * The `max_active_bots` a tenant row gets when autocreate makes it
+ * (roadmap NU-8 point 2). 0 = no bot may start until the operator
+ * raises the cap in /admin. Before this, new rows got the column's
+ * NULL ("no cap"), so every new sign-in could start bots at once.
+ *
+ * Set here rather than as a column default on purpose: existing rows
+ * keep whatever they have (NULL for the operator and every tenant from
+ * before), and only this code path creates tenants — the operator row
+ * comes from the alembic 0011 backfill, not from autocreate.
  */
-export function getRequiredOidcGroup(): string {
-  return (process.env.OIDC_REQUIRED_GROUP || "").trim();
-}
+export const NEW_TENANT_MAX_ACTIVE_BOTS = 0;
 
 /**
  * Stable session-id derived from the signed cookie value: sha256
@@ -137,26 +145,32 @@ export async function getCurrentTenant(
     return existing[0];
   }
 
-  // M-3: gate autocreate on the operator-configured Authentik group.
-  // Existing tenants above are NOT re-checked — group enforcement is
-  // autocreate-only by design (see OIDC_GROUP_DENIED docstring).
-  // Default-empty `OIDC_REQUIRED_GROUP` preserves pre-M-3 behavior.
+  return autocreateTenant(session);
+}
+
+/**
+ * First sight of a `sub`: create its tenant row, or refuse. The one
+ * place tenants are created — both `getCurrentTenant` (API routes) and
+ * `requireTenantServer` (pages) call it, so the group gate and the
+ * starting bot cap cannot drift apart between the two.
+ *
+ * Returns `OIDC_GROUP_DENIED` without touching the DB when
+ * `OIDC_REQUIRED_GROUP` is set and the session's `groups` claim lacks
+ * it (M-3). Only reached for a sub with no row: existing tenants are
+ * NOT re-checked, by design (see OIDC_GROUP_DENIED). Returns
+ * `TENANT_DISABLED` when a concurrent request's disabled row won the
+ * insert race.
+ */
+export async function autocreateTenant(
+  session: SessionPayload,
+): Promise<Tenant | TenantDisabled | OidcGroupDenied> {
   const requiredGroup = getRequiredOidcGroup();
-  if (requiredGroup) {
-    // Copilot review fix on PR #94: explicit Array.isArray guard.
-    // verifySession() doesn't runtime-validate payload shape — if
-    // `groups` came across as a string (legacy cookie / future bug),
-    // `.includes(requiredGroup)` would do a substring match and
-    // "not-admin".includes("admin") would silently pass the gate.
-    const groups = Array.isArray(session.groups) ? session.groups : [];
-    if (!groups.includes(requiredGroup)) {
-      return OIDC_GROUP_DENIED;
-    }
+  if (requiredGroup && !hasRequiredGroup(session.groups, requiredGroup)) {
+    return OIDC_GROUP_DENIED;
   }
 
-  // First time we see this sub — create a tenant. Email defaults to
-  // the sub itself (Authentik's sub is typically email-shaped already);
-  // a richer profile sync can update it later.
+  // Email defaults to the sub itself (Authentik's sub is typically
+  // email-shaped already); a richer profile sync can update it later.
   //
   // Concurrency: two parallel requests for a brand-new sub can both
   // miss the SELECT, then collide on the unique index when both try
@@ -169,6 +183,7 @@ export async function getCurrentTenant(
       authentikSub: session.sub,
       email: session.sub,
       displayName: session.sub,
+      maxActiveBots: NEW_TENANT_MAX_ACTIVE_BOTS,
     })
     .onConflictDoNothing({ target: tenants.authentikSub });
 

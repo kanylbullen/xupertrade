@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1265,6 +1266,112 @@ async def test_an_api_clear_ends_a_hold_whose_write_failed(repo):
     assert HOLD not in redis.data
     await runner._run_reconcile("Periodic")
     assert await _opens_allowed(runner) is True
+
+
+async def test_a_clear_acts_on_the_runners_next_tick_not_at_the_clear(repo):
+    """The runbooks (health-check.md "Clearing", disaster-recovery.md
+    step 8): a clear only deletes the key, so a GET right after it says
+    false even when the pass the next tick runs sets the hold straight
+    back. Read the hold again only after that pass."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    ex = FakeExchange([ETH, SOL])
+    runner, _ = _runner(repo, redis, ex, symbols=("ETH", "SOL"))
+    await runner._run_reconcile("Periodic")
+    assert HOLD in redis.data
+
+    app = _app(runner.control)  # both orphans still open: nobody closed one
+    with patch.object(api_module.settings, "api_key", "k"):
+        assert (await _call(
+            app, "POST", HOLD_PATH, headers=AUTH, json={"active": False},
+        ))[0] == 200
+        assert (await _call(app, "GET", HOLD_PATH, headers=AUTH))[1] == {
+            "reconcile_hold": False,
+        }
+    assert ex.orders == []
+
+    runner._last_reconcile = time.time()  # periodic pass not due
+    runner._last_funding_poll = time.time()
+    runner._run_strategy = AsyncMock()
+    await runner.tick()
+
+    assert HOLD in redis.data and ex.orders == []
+    assert await runner.control.is_reconcile_hold_active() is True
+
+
+async def test_no_clear_ends_a_hold_while_redis_refuses_writes(repo):
+    """health-check.md "Clearing": the API needs Redis writes as much as
+    a DEL does. While Redis refuses them the POST answers 503 and the
+    hold the bot has only in memory stays."""
+    redis = FakeRedis()
+    redis.data[SENTINEL] = "1"
+    redis.fail_set.add(HOLD)
+    ex = FakeExchange([ETH, SOL])
+    runner, _ = _runner(repo, redis, ex, symbols=("ETH", "SOL"))
+    await runner._run_reconcile("Periodic")
+    assert runner.control.hold_unwritten
+
+    redis.fail_set.add(SENTINEL)
+    redis.fail_delete.add(HOLD)
+    app = _app(runner.control)
+    with patch.object(api_module.settings, "api_key", "k"):
+        assert await _call(
+            app, "POST", HOLD_PATH, headers=AUTH, json={"active": False},
+        ) == (503, {"error": "Redis error: ConnectionError"})
+        assert await _call(app, "GET", HOLD_PATH, headers=AUTH) == (
+            200, {"reconcile_hold": True},
+        )
+    assert runner.control.hold_unwritten
+    assert await runner._check_control_state() is not None
+
+
+@pytest.mark.parametrize("lost", ["hold write", "sentinel write"])
+async def test_a_del_ends_neither_lost_write_and_the_next_tick_holds_again(
+    repo, lost,
+):
+    """health-check.md "Clearing": prefer the API. Once Redis takes
+    writes again, a DEL neither ends a hold the bot has only in memory
+    nor acknowledges a sentinel it saw missing: the next tick holds
+    again. The API clear ends both, see
+    `test_an_api_clear_ends_a_hold_whose_write_failed` and
+    `test_a_clear_acknowledges_a_loss_whose_sentinel_write_failed`."""
+    redis = FakeRedis()
+    ex = FakeExchange([ETH, SOL])
+    if lost == "hold write":
+        redis.data[SENTINEL] = "1"
+        redis.fail_set.add(HOLD)
+        runner, _ = _runner(repo, redis, ex, symbols=("ETH", "SOL"))
+        await runner._run_reconcile("Periodic")
+        assert HOLD not in redis.data and runner.control.hold_unwritten
+    else:
+        redis.fail_set.add(SENTINEL)
+        runner, _ = _runner(repo, redis, ex, symbols=("ETH", "SOL"))
+        await runner._check_control_state()
+        assert HOLD in redis.data and SENTINEL not in redis.data
+
+    redis.fail_set.clear()
+    await redis.delete(HOLD)  # redis-cli DEL
+    assert await runner._check_control_state() is not None
+    assert HOLD in redis.data
+
+
+def test_the_restore_runbooks_image_check_still_finds_the_guard():
+    """disaster-recovery.md step 7 tells a container created before #186
+    from one with it by grepping `reconcile_hold` out of
+    /app/hypertrade/engine/control.py with `docker cp` (stopped
+    containers cannot answer the API). Moving the file or renaming the
+    key would report every container as pre-#186."""
+    root = Path(__file__).resolve().parents[3]
+    runbook = (root / "docs/runbooks/disaster-recovery.md").read_text()
+    assert (
+        'docker cp "$c:/app/hypertrade/engine/control.py" - 2>/dev/null '
+        "| grep -ac reconcile_hold" in runbook
+    )
+    dockerfile = (root / "bot/Dockerfile").read_text()
+    assert "WORKDIR /app" in dockerfile
+    assert "COPY hypertrade/ hypertrade/" in dockerfile
+    control = (root / "bot/hypertrade/engine/control.py").read_text()
+    assert 'reconcile_hold_key = _key(self._mode, "reconcile_hold"' in control
 
 
 async def test_a_queued_alert_says_so_once_the_hold_was_cleared(repo):

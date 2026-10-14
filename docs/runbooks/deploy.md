@@ -115,7 +115,35 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    docker image inspect xupertrade-bot:latest -f 'built: {{.Created}}  rev: {{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
 ```
 
-3. **Stop, then Start each running bot**, mainnet included. A running
+3. **Seed the restore sentinel of each running bot** (#186, NU-2). A bot
+   created before #186 has no sentinel, reads that as "Redis lost its
+   control state", and boots on the new image holding: no opens until a
+   human clears its reconcile hold. The dashboard writes one only when it
+   creates a bot, so seed them here, before Stop (which deletes the API
+   key the loop checks). `SET … NX` never touches an existing sentinel, so
+   a repeat is harmless; a bot whose API key is missing from Redis is
+   skipped, because then Redis may really have lost its state and the hold
+   is what you want:
+
+   ```bash
+   ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST bash -s <<'EOF'
+   r() { docker exec hypertrade-redis-1 redis-cli "$@"; }
+   for row in $(docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -tA -F , \
+                  -c "SELECT id, tenant_id, mode FROM tenant_bots WHERE is_running"); do
+     IFS=, read -r bot tenant mode <<<"$row"
+     if [ "$(r EXISTS "tenant:bot:$bot:api_key")" != 1 ]; then
+       echo "SKIP $mode $bot: its API key is not in Redis; it will boot holding"
+       continue
+     fi
+     echo "$mode $bot: $(r SET "hypertrade:$mode:t:$tenant:control:sentinel" "$(date +%s)" NX)"
+   done
+   EOF
+   ```
+
+   `OK` means seeded, an empty answer that the bot already had one. A bot
+   that is stopped now gets no sentinel here, boots holding at its next
+   Start, and is cleared as in [health-check.md](health-check.md#reconcile-hold-nu-2).
+4. **Stop, then Start each running bot**, mainnet included. A running
    bot keeps the image it was started on, and the orchestrator does not
    restart bots when the tag moves. `/settings/bots` has a Stop and a
    Start button, no Restart. Start needs the tenant's passphrase
@@ -123,7 +151,12 @@ ssh -i ~/.ssh/hypertrade root@$DEPLOY_HOST \
    `POST /api/tenant/me/bots/<bot_id>/stop`, then `/start`, from a
    signed-in session with the passphrase unlocked (`/start` answers 401
    while it is locked).
-4. **Every bot card shows HEAD** (next paragraph).
+5. **Every bot card shows HEAD** (next paragraph), and **no bot holds**:
+   read each bot's reconcile hold as in
+   [health-check.md](health-check.md#reconcile-hold-nu-2). Even with its
+   sentinel, the first reconcile pass after a Start holds every exchange
+   position without a DB row, and one on a coin the bot trades sets the
+   hold.
 
 A dashboard change waiting for deploy can go in the same session: run
 the dashboard deploy as well.
@@ -139,7 +172,7 @@ again. A bot's `/api/version` needs no API key, so from the host:
 `docker exec <bot-container> python -c 'import urllib.request; print(urllib.request.urlopen("http://localhost:<port>/api/version").read().decode())'`
 (ports as in [health-check.md](health-check.md)).
 
-**An emergency bot fix outside the window** is the same four steps, and
+**An emergency bot fix outside the window** is the same five steps, and
 the build takes all of master: every bot PR merged since the last window
 ships with the fix. See what that is first, on the host:
 `git log --oneline <sha on the bot cards>..origin/master -- bot/`.
