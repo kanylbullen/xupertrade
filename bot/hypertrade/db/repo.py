@@ -757,7 +757,7 @@ class Repository:
 
     async def _price_orphan_close(
         self, exchange, row: PositionRecord, ledger,
-        mid_cache: dict[str, float],
+        mid_cache: dict[str, float], label: str = "orphan close",
     ) -> "_OrphanClosePrice | None":
         """Work out what a row that vanished from the exchange closed at.
 
@@ -793,7 +793,7 @@ class Repository:
                     exit_price=summary.price, size=size, fee=summary.fee,
                 ),
                 order_id=summary.order_id,
-                reason="reconcile: orphan close (fill)",
+                reason=f"reconcile: {label} (fill)",
                 estimated=False,
             )
 
@@ -821,10 +821,72 @@ class Repository:
                 # visible in a trades listing: this PnL is booked like a
                 # real one (the money did move) but was priced from the
                 # mid, not from a fill.
-                reason="ESTIMATED reconcile: orphan close @ mid",
+                reason=f"ESTIMATED reconcile: {label} @ mid",
                 estimated=True,
             )
         return None
+
+    async def _close_row_priced(
+        self, session: AsyncSession, row_id: int,
+        priced: "_OrphanClosePrice", now: datetime,
+    ) -> PositionRecord | None:
+        """Close one open row at `priced` and write its `Trade` row, in
+        `session` (the caller commits). None when the row is gone or
+        already closed — the normal signal path got there between the
+        caller's read and this write — and then nothing is written."""
+        db_row = await session.get(PositionRecord, row_id)
+        if db_row is None or not db_row.is_open:
+            return None
+        db_row.is_open = False
+        db_row.exit_price = priced.exit_price
+        db_row.pnl = priced.pnl
+        db_row.closed_at = now
+        await session.flush()
+        await self._insert_reconcile_trade(
+            session,
+            preferred_order_id=priced.order_id,
+            strategy_name=db_row.strategy_name,
+            symbol=db_row.symbol,
+            side="sell" if db_row.side == "long" else "buy",
+            size=float(db_row.size),
+            price=priced.exit_price,
+            fee=priced.fee,
+            pnl=priced.pnl,
+            reason=priced.reason,
+            timestamp=now,
+        )
+        return db_row
+
+    async def _fill_ledger(self, exchange, since_ms, who: str) -> FillLedger:
+        """The exchange's fills since `since_ms`, each spendable once and
+        none already booked as a trade (#167); empty when the fetch
+        fails, so every close prices at the mid."""
+        fills: list[dict] = []
+        try:
+            fills = list(await exchange.fetch_user_fills(since_ms=since_ms) or [])
+        except Exception:
+            logger.exception(
+                "%s: fetch_user_fills failed — falling back to mid price", who,
+            )
+        if len(fills) >= _HL_FILL_PAGE_CAP:
+            logger.warning(
+                "%s: fetch_user_fills returned %d records (HL caps a page at "
+                "%d) — the window from %s may be truncated and a close older "
+                "than the newest %d fills would price at the mid instead",
+                who, len(fills), _HL_FILL_PAGE_CAP, since_ms, _HL_FILL_PAGE_CAP,
+            )
+        ledger = FillLedger(
+            fills,
+            exclude_order_ids=await self._recorded_order_ids(fill_order_ids(fills)),
+        )
+        if ledger.excluded_count:
+            logger.info(
+                "%s: %d of %d fill(s) are already booked as trades rows and "
+                "are not available to price an orphan", who,
+                ledger.excluded_count,
+                ledger.excluded_count + ledger.usable_count,
+            )
+        return ledger
 
     @staticmethod
     def _classify_closes(
@@ -1019,34 +1081,7 @@ class Repository:
             since_ms = min(
                 (_to_epoch_ms(p.opened_at) or 0) for p, _ in to_close
             ) or None
-            fills: list[dict] = []
-            try:
-                fills = list(await exchange.fetch_user_fills(since_ms=since_ms) or [])
-            except Exception:
-                logger.exception(
-                    "Reconcile: fetch_user_fills failed — falling back to mid price",
-                )
-            if len(fills) >= _HL_FILL_PAGE_CAP:
-                logger.warning(
-                    "Reconcile: fetch_user_fills returned %d records (HL caps "
-                    "a page at %d) — the window from %s may be truncated and "
-                    "a close older than the newest %d fills would price at "
-                    "the mid instead",
-                    len(fills), _HL_FILL_PAGE_CAP, since_ms, _HL_FILL_PAGE_CAP,
-                )
-            ledger = FillLedger(
-                fills,
-                exclude_order_ids=await self._recorded_order_ids(
-                    fill_order_ids(fills)
-                ),
-            )
-            if ledger.excluded_count:
-                logger.info(
-                    "Reconcile: %d of %d fill(s) are already booked as trades "
-                    "rows and are not available to price an orphan",
-                    ledger.excluded_count,
-                    ledger.excluded_count + ledger.usable_count,
-                )
+            ledger = await self._fill_ledger(exchange, since_ms, "Reconcile")
             mid_cache: dict[str, float] = {}
             for row, kind in to_close:
                 priced = await self._price_orphan_close(
@@ -1070,31 +1105,11 @@ class Repository:
             now = datetime.now(timezone.utc)
             async with self._session_factory() as session:
                 for row, kind, priced in planned:
-                    db_row = await session.get(PositionRecord, row.id)
-                    if db_row is None or not db_row.is_open:
-                        # Closed by the normal signal path between our
-                        # read and this write. Leave it alone.
-                        continue
-                    db_row.is_open = False
-                    db_row.exit_price = priced.exit_price
-                    db_row.pnl = priced.pnl
-                    db_row.closed_at = now
-                    await session.flush()
-
-                    close_side = "sell" if db_row.side == "long" else "buy"
-                    await self._insert_reconcile_trade(
-                        session,
-                        preferred_order_id=priced.order_id,
-                        strategy_name=db_row.strategy_name,
-                        symbol=db_row.symbol,
-                        side=close_side,
-                        size=float(db_row.size),
-                        price=priced.exit_price,
-                        fee=priced.fee,
-                        pnl=priced.pnl,
-                        reason=priced.reason,
-                        timestamp=now,
+                    db_row = await self._close_row_priced(
+                        session, row.id, priced, now,
                     )
+                    if db_row is None:
+                        continue
 
                     msg = (
                         f"closed {kind}: {db_row.strategy_name} "
