@@ -142,8 +142,10 @@ class Exchange(ABC):
 
     async def fetch_user_fills(
         self, address: str | None = None, since_ms: int | None = None,
+        *, strict: bool = False,
     ) -> list[dict]:
-        """Fetch raw exchange fill records. Default no-op for paper."""
+        """Fetch raw exchange fill records. Default no-op for paper.
+        `strict`: a failed read raises instead of answering `[]`."""
         return []
 
     def get_size_precision(self, symbol: str) -> int:

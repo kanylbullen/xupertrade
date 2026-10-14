@@ -11,11 +11,13 @@ the timeout poll waits for the clamped amount, not the requested one.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from unittest.mock import AsyncMock
 
 import pytest
 import requests
+from hyperliquid.utils.error import ClientError
 
 from hypertrade.exchange.base import OrderStatus, OrderType, Position
 from hypertrade.exchange.hyperliquid import HyperLiquidExchange
@@ -344,3 +346,63 @@ async def test_paper_without_reduce_only_still_nets_through():
 
     pos = await ex.get_position("ETH")
     assert (pos.side, pos.size) == ("short", pytest.approx(2.0))
+
+
+async def test_one_flat_read_is_not_a_filled_close(monkeypatch):
+    """r1-double-close-3. A full reduce-only close timed out and never
+    reached HL, and the first poll read misses the coin (a well-formed but
+    empty `assetPositions`). One read at the target — flat — booked the
+    close and reset its strategy with the long still open. It takes two
+    reads in a row; the next finds the long, and the outcome stays unknown
+    for the caller's confirmed read (`_held_after_close`)."""
+    ex = _stub(mid=50_000.0)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    ex._signed_position_size = AsyncMock(side_effect=[0.0] + [0.02] * 20)
+
+    order = await ex._poll_for_delayed_fill(
+        symbol="BTC", side="sell", requested_size=0.02,
+        requested_rounded=0.02, order_type=OrderType.MARKET, price=None,
+        pre_signed=0.02, limit_px=49_750.0, reduce_only=True,
+        sent_ms=SENT_MS,
+    )
+
+    assert order.status == OrderStatus.REJECTED
+    assert order.error.startswith("outcome unknown")
+
+
+@pytest.mark.parametrize("why", ["order refused", "no mid"])
+async def test_a_refused_reduce_only_order_logs_at_info(
+    hl_http, build_exchange, caplog, why,
+):
+    """r1-tests-and-noise-5. The runner logs every close it sends again at
+    the level its episode calls for, HL's reason included; the wrapper's
+    own line for each attempt was one more WARNING a minute. INFO for a
+    reduce-only order; an open's stays WARNING."""
+    exchange = build_exchange()
+    hl_http.route("allMids", (200, {} if why == "no mid" else {"BTC": "50000.0"}))
+    hl_http.route("clearinghouseState", (200, _account_with("BTC", "0.01")))
+    hl_http.route("order", (200, {"status": "err", "response": "Too many requests"}))
+    line = "order rejected" if why == "order refused" else "No mid price"
+
+    with caplog.at_level(logging.INFO, logger="hypertrade"):
+        close = await exchange.place_order("BTC", "sell", 0.01, reduce_only=True)
+        opened = await exchange.place_order("BTC", "buy", 0.01)
+
+    assert close.status == opened.status == OrderStatus.REJECTED
+    assert [r.levelno for r in caplog.records if line in r.getMessage()] == [
+        logging.INFO, logging.WARNING,
+    ]
+
+
+async def test_a_strict_fills_read_raises_instead_of_answering_empty(
+    hl_http, build_exchange, monkeypatch,
+):
+    """r1-booking-1. `[]` on a failed read cannot be told from "no fills";
+    a caller that books what no fill covers as size drift asks `strict`."""
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+    exchange = build_exchange()
+    hl_http.route("userFillsByTime", (429, "Too Many Requests"))
+
+    assert await exchange.fetch_user_fills(since_ms=1) == []
+    with pytest.raises(ClientError):
+        await exchange.fetch_user_fills(since_ms=1, strict=True)

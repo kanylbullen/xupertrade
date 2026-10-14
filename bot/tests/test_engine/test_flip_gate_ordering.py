@@ -115,8 +115,14 @@ def _runner(own_row, others, *, allow_multi, fills=None, strategy=None):
     async def _book_open(**kw):
         state["own"] = _row(kw["strategy_name"], side=kw["position_side"])
 
+    async def _get_open_positions_for_symbol(symbol):
+        return [r for r in await _get_open_positions() if r.symbol == symbol]
+
     repo.get_open_position = AsyncMock(side_effect=_get_open_position)
     repo.get_open_positions = AsyncMock(side_effect=_get_open_positions)
+    repo.get_open_positions_for_symbol = AsyncMock(
+        side_effect=_get_open_positions_for_symbol,
+    )
     repo.record_trade_and_close_position = AsyncMock(side_effect=_book_close)
     repo.record_trade_and_open_position = AsyncMock(side_effect=_book_open)
 

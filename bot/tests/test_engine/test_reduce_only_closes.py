@@ -32,6 +32,7 @@ as paper mode runs it — with injected faults.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
@@ -85,10 +86,14 @@ class HLLike(PaperExchange):
     `read_errors` makes the next N `get_position` reads raise, `blind`
     makes them answer flat while the coin is held (a read that misses
     it); `stale` is what `get_positions` answers instead of the book;
-    `fills` is the fill history. `no_mid` makes the mid unreadable (HL's
-    wrapper answers 0.0); `late = (source, oid)` reports the next fills as
-    HL's wrapper reports a close that filled after its POST timed out
-    (`Order.late`, and the oid it matched, if any).
+    `fills` is the fill history, `fills_error` makes reading it fail (HL's
+    wrapper answers `[]`, or raises when asked `strict`). `no_mid` makes
+    the mid unreadable (HL's wrapper answers 0.0); `late = (source, oid)`
+    reports the next fills as HL's wrapper reports a close that filled
+    after its POST timed out (`Order.late`, and the oid it matched, if
+    any); `lost` fills the next N orders and answers them REJECTED with
+    the outcome unknown (a timeout whose fill the wrapper saw but could
+    not price).
     """
 
     def __init__(self, *positions: Position):
@@ -103,7 +108,9 @@ class HLLike(PaperExchange):
         self.refuse_symbols: set[str] = set()
         self.cap: float | None = None
         self.no_mid = False
+        self.fills_error = False
         self.late: tuple[str, str | None] | None = None
+        self.lost = 0
 
     async def get_current_price(self, symbol):
         return 0.0 if self.no_mid else await super().get_current_price(symbol)
@@ -127,7 +134,11 @@ class HLLike(PaperExchange):
         # Copies, as HL answers: a fill must not change what was read.
         return [replace(p) for p in await super().get_positions()]
 
-    async def fetch_user_fills(self, address=None, since_ms=None):
+    async def fetch_user_fills(self, address=None, since_ms=None, *, strict=False):
+        if self.fills_error:  # HL's wrapper: [] on a failed read, unless strict
+            if strict:
+                raise ExchangeReadError("userFillsByTime: 429 Too Many Requests")
+            return []
         return list(self.fills)
 
     async def update_leverage(self, symbol, leverage, is_cross=True):
@@ -161,6 +172,14 @@ class HLLike(PaperExchange):
             symbol, side, size, order_type, price,
             reduce_only=reduce_only, slippage=slippage,
         )
+        if self.lost and order.status == OrderStatus.FILLED:
+            self.lost -= 1
+            return Order(
+                id=order.id, symbol=symbol, side=side, size=size,
+                order_type=order_type, status=OrderStatus.REJECTED,
+                error="outcome unknown: it filled after the timeout, and no "
+                      "fill or mid prices it",
+            )
         if self.late and order.status == OrderStatus.FILLED:
             order.late, oid = self.late
             order.id = oid or order.id
@@ -707,15 +726,18 @@ async def test_a_pending_close_survives_a_restart(repo, monkeypatch):
 async def test_the_marker_is_not_the_strategys_state(repo, caplog):
     """A row opened without state of its own gets the marker alone; on
     restore the strategy is recomputed from the row, as before the note,
-    not handed the engine's marker as its state."""
+    not handed the engine's marker as its state — also after the marker
+    was updated with a later attempt's count."""
     strat = Exit()
     ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
-    ex.refuse = 1
+    ex.refuse = 2
     runner, _ = _runner(repo, ex, strat)
     await _hold(repo, strat)  # no state_json
-    await runner._run_strategy(strat)
+    for _ in range(2):
+        await runner._run_strategy(strat)
     [row] = await repo.get_open_positions()
-    assert json.loads(row.state_json)[PENDING_CLOSE_KEY]["only"] is True
+    marker = json.loads(row.state_json)[PENDING_CLOSE_KEY]
+    assert marker["only"] is True and marker["misses"] == 2
 
     fresh = Exit()
     runner2, _ = _runner(repo, ex, fresh)
@@ -726,10 +748,15 @@ async def test_the_marker_is_not_the_strategys_state(repo, caplog):
     assert fresh.side == "long" and ("s_ETH", "ETH") in runner2._pending_closes
 
 
-@pytest.mark.parametrize("trouble", ["on_candle raises", "no candles"])
+@pytest.mark.parametrize("trouble", [
+    "on_candle raises", "no candles", "fetch raises", "malformed candles",
+])
 async def test_the_close_the_engine_owes_needs_no_signal(repo, monkeypatch, trouble):
     """Neither a strategy that raises nor a candle fetch that comes back
-    empty holds back the close the engine owes."""
+    empty, raises (aiohttp's timeout is a plain TimeoutError, re-raised
+    after the feed's retries) or brings a frame with no close column holds
+    back the close the engine owes (r1-exits-never-blocked-2); the error
+    still reaches the tick's handler."""
     strat = Exit()
     ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
     ex.refuse = 1
@@ -743,6 +770,18 @@ async def test_the_close_the_engine_owes_needs_no_signal(repo, monkeypatch, trou
 
         monkeypatch.setattr(runner_mod, "fetch_candles", _empty)
         await runner._run_strategy(strat)
+    elif trouble == "fetch raises":
+        monkeypatch.setattr(runner_mod, "fetch_candles", AsyncMock(
+            side_effect=asyncio.TimeoutError(),
+        ))
+        with pytest.raises(asyncio.TimeoutError):
+            await runner._run_strategy(strat)
+    elif trouble == "malformed candles":
+        monkeypatch.setattr(runner_mod, "fetch_candles", AsyncMock(
+            return_value=pd.DataFrame({"open": [1.0]}),
+        ))
+        with pytest.raises(KeyError):
+            await runner._run_strategy(strat)
     else:
         strat.on_candle = AsyncMock(side_effect=ValueError("indicator bug"))
         with pytest.raises(ValueError):
@@ -1396,31 +1435,39 @@ async def test_a_flip_close_refused_across_bars_alerts_twice(repo):
     assert all(o["side"] == "buy" and o["reduce_only"] for o in ex.orders)
 
 
-@pytest.mark.parametrize("deliver", [True, False])
-async def test_a_stuck_close_logs_one_line_per_attempt(repo, caplog, deliver):
+@pytest.mark.parametrize("case", ["delivered", "undelivered", "unreadable", "clamped"])
+async def test_a_stuck_close_logs_one_line_per_attempt(repo, caplog, case):
     """noise-and-logs-2. Each refused attempt logged 3-4 WARNING/ERROR
     lines, every tick (the ERROR alert text every tick while undelivered).
     Now one line per attempt carries count, band, HL's reason and the
-    exchange; only the alert and the critical one log above INFO."""
+    exchange; only the alert and the critical one log above INFO. An
+    exchange that cannot be read, or holds less than the row, says so at
+    WARNING on the first attempt and at INFO after: the close goes out
+    every tick (r1-tests-and-noise-5). Every `hypertrade` logger counts."""
     strat = Exit()
-    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    held = 0.5 if case == "clamped" else 1.0
+    ex = HLLike(Position(symbol="ETH", side="long", size=held, entry_price=ENTRY))
     ex.refuse = 100
+    ex.read_errors = 1000 if case == "unreadable" else 0
     runner, bus = _runner(repo, ex, strat)
     await _hold(repo, strat)
-    bus.deliver = deliver
+    bus.deliver = case != "undelivered"
     loud, per_attempt = [], []
 
     for _ in range(7):
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="hypertrade.engine.runner"):
+        with caplog.at_level(logging.INFO, logger="hypertrade"):
             await runner._run_strategy(strat)
-        records = [r for r in caplog.records if r.name == "hypertrade.engine.runner"]
-        loud += [r.levelno for r in records if r.levelno >= logging.WARNING]
+        records = [r for r in caplog.records if r.name.startswith("hypertrade")]
+        loud.append([r.levelno for r in records if r.levelno >= logging.WARNING])
         per_attempt.append(sum(
             "Order could not immediately match" in r.getMessage() for r in records
         ))
 
-    assert loud == [logging.ERROR, logging.ERROR]
+    first = [logging.ERROR]
+    if case in ("unreadable", "clamped"):
+        first = [logging.WARNING, logging.ERROR]
+    assert loud == [first, [], [], [logging.ERROR], [], [], []]
     assert per_attempt == [1] * 7
 
 
@@ -1471,19 +1518,23 @@ async def test_a_failed_flip_open_says_why(repo):
 
 
 async def test_a_flip_into_an_unowned_opposite_position_does_not_stack(repo):
-    """flip-and-flat-4. The long row is gone from the exchange, which is
-    short 1.0 that no row owns. The reduce-only sell is refused and the
-    long is booked; the flip's open used to go out too, stacking 0.476
-    onto the unowned short under a DB that saw only 0.476. It is not sent;
-    the short stays reconcile's."""
+    """flip-and-flat-4, r1-tests-and-noise-3. The long row is gone from the
+    exchange, which is short 1.0 that no row owns. The reduce-only sell is
+    refused and the long is booked; the flip's open used to go out too,
+    stacking 0.476 onto the unowned short under a DB that saw only 0.476.
+    It is not sent, and not on the next tick either, when a level-triggered
+    flip (flat by then) fires again as a plain open: opens on the coin wait
+    until the short is gone. Then they go."""
     strat = Flip()
+    strat.sticky = True
     short = Position(symbol="ETH", side="short", size=1.0, entry_price=MID)
     ex = HLLike(short)
     runner, bus = _runner(repo, ex, strat)
     await _hold(repo, strat)
     strat.flip_to = "short"
 
-    await runner._run_strategy(strat)
+    for _ in range(3):
+        await runner._run_strategy(strat)
 
     assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)]
     assert ex.book == {"ETH": short} and short.size == 1.0
@@ -1491,6 +1542,13 @@ async def test_a_flip_into_an_unowned_opposite_position_does_not_stack(repo):
     assert strat.side is None
     [notice] = bus.errors(strat.name)
     assert "no row owns" in notice and "open is not sent" in notice
+
+    ex.book.clear()  # reconcile (or a human) closed the short
+    await runner._run_strategy(strat)
+
+    assert [(o["side"], o["reduce_only"]) for o in ex.orders][1:] == [("sell", False)]
+    [row] = await repo.get_open_positions()
+    assert row.side == "short" and ex.book["ETH"].size == pytest.approx(row.size)
 
 
 # ----------------------------------------------------------------------
@@ -1630,7 +1688,8 @@ async def test_flat_all_marks_a_late_close_at_the_mid_estimated(repo):
 
     [trade] = await _trades(repo)
     assert trade.reason == (
-        "ESTIMATED Flat-all from dashboard (filled after a timeout, @ mid)"
+        "ESTIMATED Flat-all from dashboard (filled after a timeout; no fill "
+        "of its own found, @ mid)"
     )
 
 
@@ -1644,7 +1703,8 @@ async def test_reconcile_marks_a_late_orphan_close_at_the_mid_estimated(repo):
 
     [trade] = await _trades(repo)
     assert trade.reason == (
-        "ESTIMATED reconcile: exchange-orphan close (filled after a timeout, @ mid)"
+        "ESTIMATED reconcile: exchange-orphan close (filled after a timeout; "
+        "no fill of its own found, @ mid)"
     )
 
 
@@ -1711,30 +1771,56 @@ async def test_an_unpriceable_external_close_stays_open_for_reconcile(repo, capl
     assert "could not be priced" in line.getMessage()
 
 
-async def test_a_flip_whose_old_side_cannot_be_priced_does_not_open(repo):
-    """tests-real-1 (b). The flip's long was liquidated and nothing prices
-    it. The long row stays open, so the short must not be opened under it
-    (audit H1): only the refused reduce-only sell goes out, and the
-    strategy is re-synced to the row the DB still holds."""
+def _hourly(clock: dict):
+    """A candle feed whose last closed bar is `clock["bar"]` (an int)."""
+    async def _fetch(symbol, timeframe, *a, **kw):
+        end = pd.Timestamp("2026-09-25", tz="UTC") + pd.Timedelta(hours=clock["bar"] + 1)
+        return _candles().assign(
+            timestamp=pd.date_range(end=end, periods=3, freq="1h"),
+        )
+
+    return _fetch
+
+
+async def test_a_flip_whose_old_side_cannot_be_priced_does_not_open(
+    repo, monkeypatch, caplog,
+):
+    """tests-real-1 (b), r1-tests-and-noise-4. The flip's long was
+    liquidated and nothing prices it (no fill readable, no mid). The long
+    row stays open, so the short must not be opened under it (audit H1).
+    The strategy used to be re-armed on that row: a level-triggered flip
+    then sent a refused reduce-only sell every tick, with a "Flip-close
+    failed" Telegram every bar. The exchange holds nothing for it to
+    manage, so it is flat, and the flip is not tried on that row again for
+    a reconcile interval: one refused sell, one line a bar, no Telegram."""
+    clock = {"bar": 0}
+    monkeypatch.setattr(runner_mod, "fetch_candles", _hourly(clock))
     strat = Flip()
+    strat.sticky = True
     ex = HLLike()
     ex.no_mid = True
     runner, bus = _runner(repo, ex, strat)
     await _hold(repo, strat)
-    strat.side = "short"  # it switched when it emitted the flip
+    strat.flip_to = "short"
 
-    ok = await runner._execute_signal(Signal(
-        action=SignalAction.OPEN_SHORT, symbol="ETH",
-        strategy_name=strat.name, reason="flip",
-    ), MID)
+    with caplog.at_level(logging.WARNING, logger="hypertrade.engine.runner"):
+        for bar in range(3):
+            clock["bar"] = bar
+            for _ in range(3):
+                await runner._run_strategy(strat)
 
-    assert ok is False
     assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)]
     assert ex.book == {}
     [row] = await repo.get_open_positions()
     assert row.side == "long"
     assert await _trades(repo) == []
-    assert strat.side == "long"
+    assert strat.side is None and runner._pending_closes == {}
+    assert bus.errors(strat.name) == []
+    assert sum("open not sent" in r.getMessage() for r in caplog.records) == 3
+
+    runner.UNBOOKED_FLIP_RETRY_SECONDS = 0  # a reconcile interval later
+    await runner._run_strategy(strat)
+    assert len(ex.orders) == 2, "tried again, once"
 
 
 # ----------------------------------------------------------------------
@@ -1902,3 +1988,582 @@ async def test_a_short_fill_re_arms_a_real_strategy_live(repo, monkeypatch):
 
     assert ex.book == {} and await repo.get_open_positions() == []
     assert [t.reason[:14] for t in await _trades(repo)] == ["Trail stop hit"] * 2
+
+
+# ----------------------------------------------------------------------
+# Review round 1 (r1-*): a close that is lost, late, or one of several
+# ----------------------------------------------------------------------
+
+
+def _own_fill(size, px=MID, oid=7777):
+    """HL's fill of this bot's own ETH sell, stamped after it was sent."""
+    return {
+        "coin": "ETH", "side": "A", "sz": str(size), "px": str(px),
+        "fee": "0.5", "time": int(time.time() * 1000) + 60_000, "oid": oid,
+    }
+
+
+async def test_a_lost_close_beside_a_sibling_row_is_not_sent_twice(repo):
+    """r1-double-close-1. A and B each hold a 1.0 ETH long
+    (allow_multi_coin), the exchange 2.0. A's reduce-only sell fills but
+    comes back REJECTED with its outcome unknown (a timeout whose fill no
+    price was found for). The read after it found B's 1.0 and took it for
+    A's: A's close became the engine's, went again next tick sized from
+    A's row, and closed B's position. What the other rows on the side hold
+    counts against the read: A's row is booked from its own fill, and B's
+    position and row are untouched."""
+    a, b = Exit(), Exit()
+    b.name = "s_ETH_b"
+    ex = HLLike(Position(symbol="ETH", side="long", size=2.0, entry_price=ENTRY))
+    ex.lost = 1
+    ex.fills = [_own_fill(1.0, oid=5151)]
+    runner, bus = _runner(repo, ex, a, b)
+    await _hold(repo, a)
+    await _hold(repo, b)
+
+    await runner._run_strategy(a)
+    await runner._run_strategy(a)  # the next tick: nothing is owed
+
+    assert [(o["side"], o["size"]) for o in ex.orders] == [("sell", 1.0)]
+    assert ex.book["ETH"].size == pytest.approx(1.0)
+    [row] = await repo.get_open_positions()
+    assert (row.strategy_name, row.size) == (b.name, pytest.approx(1.0))
+    [trade] = await _trades(repo)
+    assert (trade.strategy_name, trade.order_id) == (a.name, "5151")
+    assert trade.reason == "reconcile: external close (fill)"
+    assert a.side is None and b.side == "long"
+    assert runner._pending_closes == {}
+
+
+@pytest.mark.parametrize("path", ["close", "flat-all"])
+async def test_the_rest_of_a_late_close_is_not_priced_from_its_own_fill(repo, path):
+    """r1-double-close-2, r1-booking-2. The row is long 1.0, the exchange
+    0.8 (0.2 of drift). The 0.8 close times out and fills, and no fill of
+    its own is found yet: it is booked ESTIMATED @ mid under a fresh id,
+    and its real fill (oid 7777) stays unbooked. By the time the 0.2 rest
+    is priced, that fill is readable, and it priced the rest too — one 0.8
+    fill booked as 1.0, a PnL on the 0.2 and an "External close" notice.
+    Fills from the close's send on are its own: the rest is size drift,
+    pnl 0, no notice."""
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=0.8, entry_price=ENTRY))
+    ex.set_price("ETH", 1900.0)
+    ex.late = ("mid", None)
+    ex.fills = [_own_fill(0.8, px=1900.0)]
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat, size=1.0)
+
+    if path == "close":
+        await runner._execute_signal(_close(strat), MID)
+    else:
+        assert (await runner._flat_all_positions()).ok
+
+    assert ex.book == {} and await repo.get_open_positions() == []
+    fill, rest = sorted(await _trades(repo), key=lambda t: -t.size)
+    assert fill.size == pytest.approx(0.8) and fill.reason.startswith("ESTIMATED")
+    assert (rest.size, rest.pnl, rest.fee) == (pytest.approx(0.2), 0.0, 0.0)
+    assert rest.reason.startswith("size drift") and rest.order_id != "7777"
+    assert runner.portfolio._daily_pnl == pytest.approx(fill.pnl)
+    assert bus.errors(strat.name) == []
+
+
+async def test_a_failed_marker_write_is_retried_with_the_next_attempt(
+    repo, monkeypatch,
+):
+    """r1-exits-never-blocked-1, r1-restart-and-state-2. daily_long_0830
+    exits on the 08:00 bar, HL refuses the close, and writing the marker
+    fails (a DB blip). It was written once per episode, so the close lived
+    in memory only: the next restart forgot it, and the long rode to 08:00
+    the next day. The next attempt writes it, and a restart sends it."""
+    strat, ex, runner, bus, clock = await _daily_long(repo, monkeypatch, refuse=2)
+    real, calls = repo.mark_pending_close, []
+
+    async def _mark(*a, **kw):
+        calls.append(a)
+        if len(calls) == 1:
+            raise ConnectionError("db blip")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(repo, "mark_pending_close", _mark)
+    await runner._run_strategy(strat)  # 08:00: refused, the write fails
+    [row] = await repo.get_open_positions()
+    assert PENDING_CLOSE_KEY not in json.loads(row.state_json)
+    clock["bar"] = "08:15"
+    await runner._run_strategy(strat)  # refused again: the marker lands
+    [row] = await repo.get_open_positions()
+    assert json.loads(row.state_json)[PENDING_CLOSE_KEY]["misses"] == 2
+
+    fresh = DailyLong0830Strategy()  # the bot restarts
+    runner2, _ = _runner(repo, ex, fresh)
+    assert await runner2._restore_from_db(())
+    await runner2._run_strategy(fresh)
+
+    assert ex.book == {} and await repo.get_open_positions() == []
+    assert len(ex.orders) == 3
+
+
+async def test_a_failed_marker_write_is_retried_when_the_close_raises_again(
+    repo, monkeypatch,
+):
+    """The same through a close that raises (`_close_raised`): the marker
+    write fails with the first, and the next one that raises writes it."""
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+    ex.place_order = AsyncMock(side_effect=ConnectionError("HL down"))
+    real, calls = repo.mark_pending_close, []
+
+    async def _mark(*a, **kw):
+        calls.append(a)
+        if len(calls) == 1:
+            raise ConnectionError("db blip")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(repo, "mark_pending_close", _mark)
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            await runner._run_strategy(strat)
+
+    [row] = await repo.get_open_positions()
+    assert PENDING_CLOSE_KEY in json.loads(row.state_json)
+
+
+async def test_a_row_read_that_fails_after_a_short_fill_books_and_re_arms(repo):
+    """r1-exits-never-blocked-3. The close filled 0.4 of 1.0, and the read
+    of its row that prices the fill raised (a DB blip). That read sat
+    outside every guard: the fill was not booked, the strategy, which had
+    dropped the position, was not re-armed, and nothing owed the 0.6 — it
+    stayed open with no exit. The fill is booked against the row read
+    before the order, the strategy re-armed, and its exit closes the rest."""
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    ex.cap = 0.4
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+    real_get, calls = repo.get_open_position, []
+
+    async def _get(*a, **kw):
+        calls.append(a)
+        if len(calls) == 2:  # the read that prices the fill
+            raise ConnectionError("db blip")
+        return await real_get(*a, **kw)
+
+    repo.get_open_position = _get
+
+    await runner._run_strategy(strat)
+
+    [row] = await repo.get_open_positions()
+    assert row.size == pytest.approx(0.6)
+    [trade] = await _trades(repo)
+    assert trade.size == pytest.approx(0.4)
+    assert strat.side == "long"
+
+    ex.cap = None
+    await runner._run_strategy(strat)
+    assert ex.book == {} and await repo.get_open_positions() == []
+
+
+async def test_a_db_write_failure_stops_the_tick(repo, monkeypatch):
+    """r1-exits-never-blocked-4. The ETH close fills and its DB write
+    fails: the bot pauses itself. The tick went on, and the BTC close went
+    out and failed its write the same way — every further fill widened the
+    divergence the pause is there to stop. Nothing more goes this tick."""
+    eth, btc = Exit("ETH"), Exit("BTC")
+    ex = HLLike(
+        Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY),
+        Position(symbol="BTC", side="long", size=1.0, entry_price=ENTRY),
+    )
+    runner, bus = _runner(repo, ex, eth, btc)
+    await _hold(repo, eth)
+    await _hold(repo, btc)
+    await _ready_for_ticks(runner, monkeypatch)
+    repo.record_trade_and_close_position = AsyncMock(
+        side_effect=ConnectionError("db down"),
+    )
+
+    await runner.tick()
+
+    assert [o["symbol"] for o in ex.orders] == ["ETH"]
+    assert await runner.control.is_paused()
+    assert ex.book["BTC"].size == pytest.approx(1.0)
+
+
+async def test_a_rest_is_not_drift_when_the_fills_cannot_be_read(repo):
+    """r1-booking-1. Row long 1.0 @ 2000; 0.6 was liquidated @ 1800. The
+    exit is clamped to the 0.4 left and fills. HL's fill history answers
+    429, and an unreadable history looked like an empty one: the 0.6 was
+    booked as size drift — pnl 0, no notice — the liquidation's loss never
+    reached the daily counter, and with the row gone nothing looked again.
+    It stays open for reconcile, which prices it from the fill once HL
+    answers."""
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=0.4, entry_price=ENTRY))
+    ex.fills = [_liquidation(size="0.6")]
+    ex.fills_error = True
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat, size=1.0)
+
+    await runner._run_strategy(strat)
+
+    assert ex.book == {}
+    [row] = await repo.get_open_positions()
+    assert row.size == pytest.approx(0.6)
+    [trade] = await _trades(repo)
+    assert (trade.size, trade.reason) == (pytest.approx(0.4), "stop hit")
+
+    ex.fills_error = False
+    await repo.reconcile_positions(
+        ex, confirm_delay_seconds=0, on_strategy_close=runner._on_reconcile_close,
+    )
+
+    assert await repo.get_open_positions() == []
+    liquidation = next(t for t in await _trades(repo) if t.order_id == "9001")
+    assert liquidation.size == pytest.approx(0.6)
+    assert liquidation.pnl == pytest.approx((1800.0 - ENTRY) * 0.6 - 0.9)
+    assert runner.portfolio._daily_pnl == pytest.approx(
+        sum(t.pnl for t in await _trades(repo)),
+    )
+
+
+async def test_a_partial_liquidation_and_drift_are_booked_apart(repo):
+    """r1-booking-1. Row long 1.0 @ 2000. 0.4 was liquidated @ 1500 (its
+    fill is readable), and 0.2 of the row the exchange never held; 0.4 is
+    left. The exit is clamped to 0.4 and fills. Fills had to cover all of
+    the 0.6 rest, so it was all drift and the liquidation's ~200 loss was
+    dropped. The 0.4 is booked from its fill, only the 0.2 as drift."""
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=0.4, entry_price=ENTRY))
+    ex.fills = [_liquidation(size="0.4", px="1500.0")]
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat, size=1.0)
+
+    await runner._run_strategy(strat)
+
+    assert ex.book == {} and await repo.get_open_positions() == []
+    trades = {t.reason: t for t in await _trades(repo)}
+    liquidation = trades["reconcile: external close (fill)"]
+    assert (liquidation.size, liquidation.order_id) == (pytest.approx(0.4), "9001")
+    assert liquidation.pnl == pytest.approx((1500.0 - ENTRY) * 0.4 - 0.9)
+    drift = trades["size drift: the row held more than the exchange; pnl 0"]
+    assert (drift.size, drift.pnl, drift.fee) == (pytest.approx(0.2), 0.0, 0.0)
+    assert trades["stop hit"].size == pytest.approx(0.4)
+    assert runner.portfolio._daily_pnl == pytest.approx(
+        sum(t.pnl for t in trades.values()),
+    )
+    [notice] = bus.errors(strat.name)
+    assert notice.startswith("External close") and "size drift" in notice
+
+
+async def test_flat_all_books_what_filled_beyond_the_rows(repo):
+    """r1-booking-3, r1-flip-and-flat-3. The exchange holds long 2.0, the
+    only row long 1.0. Flat-all sells 2.0 and it fills; only the row's 1.0
+    was booked — the other 1.0, its fee and its PnL appeared nowhere, and
+    the oid on the row kept any ledger from pricing it later. It is booked
+    as a fill with no row is, under `<oid>-surplus`."""
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=2.0, entry_price=1900.0))
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+
+    status = await runner._flat_all_positions()
+
+    assert status.ok and ex.book == {} and await repo.get_open_positions() == []
+    trades = {t.strategy_name: t for t in await _trades(repo)}
+    row, surplus = trades[strat.name], trades["manual_flat"]
+    assert row.size == pytest.approx(1.0) and surplus.size == pytest.approx(1.0)
+    assert surplus.order_id == f"{row.order_id}-surplus"
+    fee = MID * 1.0 * settings.taker_fee_rate
+    assert surplus.fee == pytest.approx(fee)
+    assert surplus.pnl == pytest.approx((MID - 1900.0) - fee)
+    assert runner.portfolio._daily_pnl == pytest.approx(row.pnl + surplus.pnl)
+
+
+@pytest.mark.parametrize("path", ["flat-all", "reconcile"])
+async def test_a_late_fill_matched_to_a_booked_oid_gets_a_fresh_id(repo, path):
+    """r1-booking-4. A close timed out and filled, and the late-fill match
+    handed it oid 777, already a trade row (a sibling's close seconds
+    before). Flat-all and reconcile's pass 2 wrote it straight into the
+    UNIQUE `trades.order_id`: flat-all failed the coin with its row open
+    on a flat exchange, pass 2 reported the close UNBOOKKEPT. It is booked
+    ESTIMATED under a fresh id, as the strategy path books it."""
+    await repo.record_trade(
+        order_id="777", strategy_name="sibling", symbol="ETH", side="sell",
+        size=0.1, price=MID, reason="stop hit",
+    )
+    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    ex.late = ("fill", "777")
+    if path == "flat-all":
+        strat = Exit()
+        runner, bus = _runner(repo, ex, strat)
+        await _hold(repo, strat)
+        assert (await runner._flat_all_positions()).ok
+    else:
+        result = await repo.reconcile_positions(
+            ex, confirm_delay_seconds=0, hold_orphans=None,
+            traded_symbols={"ETH"},
+        )
+        assert not any("UNBOOKKEPT" in f for f in result.failures)
+
+    assert ex.book == {} and await repo.get_open_positions() == []
+    [late] = [t for t in await _trades(repo) if t.order_id != "777"]
+    assert late.reason.startswith("ESTIMATED")
+    assert "the fill matched was order 777's, already booked" in late.reason
+
+
+async def test_flat_all_prices_two_rows_from_one_fill(repo):
+    """r1-booking-5. Two strategies hold 0.5 ETH long each; one liquidation
+    fill of 0.4 @ 1500 left 0.6. Flat-all closes the 0.6, and each row
+    keeps 0.2. Each rest got a ledger of its own, which left out a fill
+    already booked under its oid — so once the first row had taken part of
+    it, the second row's 0.2 was booked as drift, pnl 0, ~100 of loss
+    dropped. One ledger for the pass prices both from the fill."""
+    a, b = Exit(), Exit()
+    b.name = "s_ETH_b"
+    ex = HLLike(Position(symbol="ETH", side="long", size=0.6, entry_price=ENTRY))
+    ex.fills = [_liquidation(size="0.4", px="1500.0")]
+    runner, bus = _runner(repo, ex, a, b)
+    await _hold(repo, a, size=0.5)
+    await _hold(repo, b, size=0.5)
+
+    status = await runner._flat_all_positions()
+
+    assert status.ok and ex.book == {} and await repo.get_open_positions() == []
+    trades = await _trades(repo)
+    liquidation = [t for t in trades if t.reason == "reconcile: external close (fill)"]
+    assert sorted(t.strategy_name for t in liquidation) == [a.name, b.name]
+    assert all(
+        (t.size, t.price) == (pytest.approx(0.2), pytest.approx(1500.0))
+        for t in liquidation
+    )
+    assert not any(t.reason.startswith("size drift") for t in trades)
+
+
+@pytest.mark.parametrize("case", ["hand flip", "hand flip, no row", "missed coin"])
+async def test_flat_all_is_not_done_while_the_other_side_is_open(
+    repo, monkeypatch, case,
+):
+    """r1-flip-and-flat-1. ETH long was flipped to a short by hand. The
+    flat-all read still shows the long (its reduce-only sell is refused:
+    "would increase position"), or it misses the coin. Both called the
+    coin done: the request was acknowledged and the bot paused with the
+    short open and reconcile in dry run. The request stays pending; the
+    next attempt reads the short and closes it, and only then pauses."""
+    strat = Exit()
+    strat.quiet = True
+    short = Position(symbol="ETH", side="short", size=1.0, entry_price=MID)
+    ex = HLLike(short)
+    ex.stale = [] if case == "missed coin" else [
+        Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY),
+    ]
+    runner, bus = _runner(repo, ex, strat)
+    if case != "hand flip, no row":
+        await _hold(repo, strat)
+    await _ready_for_ticks(runner, monkeypatch)
+    await runner.control.request_flat_all("tok-1")
+
+    await runner.tick()
+
+    assert ex.book == {"ETH": short}
+    assert not await runner.control.is_paused()
+    assert await runner.control.get_pending_flat_request() == "tok-1"
+    [notice] = bus.errors("flat-all")
+    assert "ETH: the other side is open on the exchange now" in notice
+
+    ex.stale = None
+    await runner.tick()
+
+    assert ex.book == {} and await repo.get_open_positions() == []
+    assert await runner.control.is_paused()
+    assert await runner.control.get_pending_flat_request() is None
+
+
+async def test_a_refused_flip_whose_old_side_is_gone_says_its_open_is_refused(
+    repo, monkeypatch,
+):
+    """r1-flip-and-flat-2. The long row was liquidated, and the strategy
+    flips to short while a gate (the exposure cap) refuses the open. The
+    close half still goes, is refused, and the row is booked from the
+    liquidation's fill — with "The flip's open goes ahead." in the notice,
+    while no open was ever sent. It says the open is refused, and why."""
+    strat = Flip()
+    ex = HLLike()
+    ex.fills = [_liquidation()]
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+    monkeypatch.setattr(settings, "max_total_exposure_usd", 1)
+    strat.flip_to = "short"
+
+    await runner._run_strategy(strat)
+
+    assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)]
+    assert ex.book == {} and await repo.get_open_positions() == []
+    assert strat.side is None
+    [notice] = bus.errors(strat.name)
+    assert notice.startswith("External close")
+    assert "goes ahead" not in notice
+    assert "The flip's open is refused (exposure cap): flat." in notice
+
+
+async def test_two_failed_reads_keep_the_close_the_engine_owes(repo):
+    """r1-restart-and-state-1. A strategy holding ETH long flips to short
+    while its row cannot be read (DB down): nothing is sent, it is reset,
+    and the engine owes the long a close. Next tick, still down, the flat
+    strategy fires its flip again as a plain open; that read raises too,
+    and its reset dropped the owed close for good — with the DB back and
+    the flip quiet, nothing would ever close the long. The close is kept,
+    and goes."""
+    strat = Flip()
+    strat.sticky = True
+    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+    strat.flip_to = "short"
+    real = repo.get_open_position
+    repo.get_open_position = AsyncMock(side_effect=ConnectionError("db down"))
+
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            await runner._run_strategy(strat)
+    assert ex.orders == [] and strat.side is None
+
+    repo.get_open_position = real
+    strat.flip_to = None  # its condition has lapsed
+    await runner._run_strategy(strat)
+
+    assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)]
+    assert ex.book == {} and await repo.get_open_positions() == []
+
+
+async def test_a_restart_keeps_the_band_and_the_alerts_delivered(repo):
+    """r1-restart-and-state-3. Five refused closes: the band is wide and the
+    critical alert went out. A restart rebuilt the pending close at zero —
+    three more attempts at the default band, and both alerts again, on
+    every boot of a crash loop. The marker carries the count and the
+    alerts delivered."""
+    k = CLOSE_REJECTS_BEFORE_WIDE_BAND
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    ex.refuse = 100
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+    for _ in range(k + 2):
+        await runner._run_strategy(strat)
+    assert len(bus.errors(strat.name)) == 2
+
+    fresh = Exit()  # the bot restarts
+    runner2, bus2 = _runner(repo, ex, fresh)
+    assert await runner2._restore_from_db(())
+    fresh.quiet = True  # its own rule is quiet; the engine's close goes
+    for _ in range(2):
+        await runner2._run_strategy(fresh)
+
+    assert [o["slippage"] for o in ex.orders][k + 2:] == [WIDE_CLOSE_BAND] * 2
+    assert bus2.errors(fresh.name) == []
+    assert runner2._pending_closes[(fresh.name, "ETH")].misses == k + 4
+
+
+async def test_a_pending_close_still_goes_after_its_strategy_is_dropped(
+    repo, monkeypatch,
+):
+    """r1-restart-and-state-4. A refused close is owed and noted on its row;
+    the operator then takes the strategy off the tenant's allowlist, and
+    the bot restarts without it. The close was abandoned with one alert,
+    the position left with no exit. It needs only the row: it still goes,
+    every tick, until it fills."""
+    strat = Exit()
+    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    ex.refuse = 2
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+    await runner._run_strategy(strat)  # refused: owed, and noted
+
+    runner2, bus2 = _runner(repo, ex, Exit("BTC"))  # restarted without it
+    assert await runner2._restore_from_db(())
+    await _ready_for_ticks(runner2, monkeypatch)
+    for _ in range(2):  # refused once more, then it fills
+        await runner2.tick()
+
+    assert [(o["symbol"], o["reduce_only"]) for o in ex.orders] == [("ETH", True)] * 3
+    assert ex.book == {} and await repo.get_open_positions() == []
+    [trade] = await _trades(repo)
+    assert trade.reason == "stop hit (pending close, attempt 3; strategy not running)"
+    [unmanaged] = bus2.errors("state-restore")
+    assert "(its pending close is still sent)" in unmanaged
+    assert bus2.errors(strat.name) == [], "its alert went out before the restart"
+
+
+async def test_flat_all_is_not_done_while_a_row_the_read_missed_is_held(
+    repo, monkeypatch,
+):
+    """r1-tests-and-noise-1 (1). The flat-all read misses ETH while the
+    long and its row are there: the row is "still held on the exchange",
+    so the request stays pending and the bot is not paused."""
+    strat = Exit()
+    strat.quiet = True
+    ex = HLLike(Position(symbol="ETH", side="long", size=1.0, entry_price=ENTRY))
+    ex.stale = []
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+    await _ready_for_ticks(runner, monkeypatch)
+    await runner.control.request_flat_all("tok-1")
+
+    status = await runner._flat_all_positions()
+    assert not status.ok and status.reason == "ETH: still held on the exchange"
+    await runner.tick()
+
+    assert await runner.control.get_pending_flat_request() == "tok-1"
+    assert not await runner.control.is_paused()
+    assert ex.orders == [] and len(await repo.get_open_positions()) == 1
+
+
+async def test_flat_all_is_not_done_while_a_gone_row_cannot_be_booked(repo):
+    """r1-tests-and-noise-1 (2). The exchange is flat and nothing prices
+    the row (no fill, no mid): it "could not be booked" and stays open."""
+    strat = Exit()
+    ex = HLLike()
+    ex.no_mid = True
+    runner, bus = _runner(repo, ex, strat)
+    await _hold(repo, strat)
+
+    status = await runner._flat_all_positions()
+
+    assert not status.ok
+    assert status.reason == (
+        "ETH: a row the exchange no longer holds could not be booked"
+    )
+    assert len(await repo.get_open_positions()) == 1
+
+
+async def test_a_flat_all_whose_reason_changes_says_so_once(repo, monkeypatch):
+    """r1-tests-and-noise-2. A thin book: BTC's close is refused on one
+    tick and fills 0.1 on the next. "Did not complete" was keyed on the
+    reason, each coin's outcome word in it, so it went to Telegram every
+    tick. It is said once per request and set of coins left open."""
+    btc = Exit("BTC")
+    btc.quiet = True
+    ex = HLLike(Position(symbol="BTC", side="long", size=1.0, entry_price=ENTRY))
+    runner, bus = _runner(repo, ex, btc)
+    await _hold(repo, btc)
+    await _ready_for_ticks(runner, monkeypatch)
+    await runner.control.request_flat_all("tok-1")
+    real = ex.place_order
+
+    async def _thin(*a, **kw):
+        if len(ex.orders) % 2 == 0:
+            ex.refuse = 1
+        else:
+            ex.cap = 0.1
+        try:
+            return await real(*a, **kw)
+        finally:
+            ex.cap = None
+
+    ex.place_order = _thin
+    for _ in range(6):
+        await runner.tick()
+
+    assert len(ex.orders) == 6
+    assert ex.book["BTC"].size == pytest.approx(0.7)
+    [notice] = bus.errors("flat-all")
+    assert notice.startswith("Flat-all did not complete: BTC: rejected")

@@ -94,14 +94,31 @@ TP-exits, och före SE-1 finns inga stopp på börsen. Därför får pausen vara
 högst 30 minuter. Efter pausen tar kill switch över. Den blockerar öppningar
 men släpper igenom varje stängning (`check_risk_limits` i `portfolio.py`).
 
-En stängning är en vanlig marknadsorder, inte reduce-only (`place_order` i
-`hyperliquid.py`). Om HL saknar positionen, eller har den på andra sidan,
-skickas DB-radens storlek ändå (`_resolve_close_size` i `runner.py`).
-Strategierna återställs från de öppna DB-raderna när boten startar och körs
-från första tick efter unpause, men det första riktiga reconcile-passet kan
-dröja flera minuter. En strategi vars rad HL inte backar kan därför öppna en
-ny position, eller förstora en position på motsatt sida, trots kill switch.
-Steg 7 stänger av de strategierna före unpause.
+Från #192 (NU-5a) är varje stängning reduce-only: strategins exit,
+flip-stängningen, flat-all och reconciles pass 2. En stängning kan bara
+minska en position, aldrig öppna eller vända en. Saknar HL positionen, eller
+har den på andra sidan, vägrar HL ordern, och raden bokförs som stängd
+utanför boten, prissatt från fill-historiken (`_close_left_open` i
+`runner.py`).
+
+En bot från före #192 skickar en vanlig marknadsorder, inte reduce-only. Om
+HL saknar positionen, eller har den på andra sidan, skickas DB-radens storlek
+ändå (`_resolve_close_size` i `runner.py`). Strategierna återställs från de
+öppna DB-raderna när boten startar och körs från första tick efter unpause,
+men det första riktiga reconcile-passet kan dröja flera minuter. En strategi
+vars rad HL inte backar kan därför öppna en ny position, eller förstora en
+position på motsatt sida, trots kill switch. Steg 7 stänger av de
+strategierna före unpause.
+
+Från #192 finns också väntande stängningar. En stängning som HL vägrade, som
+fylldes bara delvis eller som kastade ett fel blir motorns: den skickas varje
+tick tills den går igenom, oavsett vad strategins regel säger då. Det gäller
+även när strategin är avstängd, utanför allowlistan eller inte körs i boten
+alls. Hold och kill switch stoppar den inte heller. Bara en läsbar paus gör
+det. Stängningen står i radens `state_json` under nyckeln
+`_engine_pending_close`, så den överlever en omstart, och därmed också en
+återställning: en markering i backupen kan gälla en stängning som gick
+igenom efter backupen. Steg 7 listar markeringarna.
 
 ### 1.5 Två saker går förbi pausen
 
@@ -382,7 +399,9 @@ docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
 
 Stäng av strategin för varje rad som HL inte backar, alltså för raderna
 "motsatt sida" och "Ingen position / Öppen rad". En avstängd strategi körs
-inte alls (`filter_strategies_for_tick`), så den kan inte lägga någon order:
+inte alls (`filter_strategies_for_tick`), så den lägger ingen order av sig
+själv. Med #192 kan dess exit ändå inte öppna något (avsnitt 1.4), men
+avstängningen skadar inte:
 
 ```sh
 docker exec hypertrade-redis-1 redis-cli SADD hypertrade:<mode>:control:disabled <strategy_name>
@@ -390,6 +409,37 @@ docker exec hypertrade-redis-1 redis-cli SAVE
 ```
 
 Skriv ner vilka du lade till. Steg 8 slår på dem igen.
+
+Avstängningen stoppar inte en väntande stängning (avsnitt 1.4). En bot med
+#192 skickar den vid första opausade tick, reduce-only och med radens
+storlek, för varje öppen rad som bär markeringen. Lista dem:
+
+```sh
+docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
+  "SELECT id, mode, strategy_name, symbol, side, size,
+          state_json::jsonb -> '_engine_pending_close' AS pending
+     FROM positions
+    WHERE is_open = true AND state_json LIKE '%_engine_pending_close%'
+    ORDER BY mode, symbol;"
+```
+
+Bestäm för varje rad innan bottarna startar. `since` säger när stängningen
+blev motorns, och den kan ligga före backupen. Ska positionen stängas: låt
+markeringen stå. Ska den behållas, till exempel en position som öppnades
+efter backupen och som du har valt att behålla i tabellen ovan: ta bort
+markeringen. Annars stänger boten positionen och bokför den mot den gamla
+raden:
+
+```sh
+docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
+  "UPDATE positions SET state_json = CASE
+       WHEN state_json::jsonb -> '_engine_pending_close' ->> 'only' = 'true'
+         THEN NULL
+       ELSE (state_json::jsonb - '_engine_pending_close')::text END
+    WHERE id = <id> AND is_open = true;"
+```
+
+`only` betyder att raden inte hade något eget tillstånd före markeringen.
 
 Bottarna som ska startas är de som databasen markerar som körande:
 
@@ -474,7 +524,8 @@ docker exec hypertrade-redis-1 redis-cli SET hypertrade:<mode>:control:paused 0
   du själv lade till:
   `docker exec hypertrade-redis-1 redis-cli SREM hypertrade:<mode>:control:disabled <strategy_name>`.
 - Kill switch är fortfarande på. Den blockerar öppningar men inte exits, och
-  en exit är en riktig order (avsnitt 1.4).
+  en exit är en riktig order (avsnitt 1.4). Det gäller också de väntande
+  stängningar som steg 7 listade och lät stå.
 - Om besluten inte hinner fattas inom 30 minuter: stäng hellre de oklara
   positionerna för hand på HL än att låta dem ligga pausade utan stopp.
 

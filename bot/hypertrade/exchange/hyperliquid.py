@@ -525,7 +525,12 @@ class HyperLiquidExchange(Exchange):
         if order_type == OrderType.MARKET:
             mid = await self.get_current_price(symbol)
             if mid <= 0:
-                logger.warning(
+                # A reduce-only order is a close: its caller logs every
+                # unfilled one, with this error, at the level its episode
+                # calls for — a stuck close sent every tick was one more
+                # WARNING here a minute (r1-tests-and-noise-5).
+                logger.log(
+                    logging.INFO if reduce_only else logging.WARNING,
                     "No mid price for %s — cannot place market order %s %s",
                     symbol, side, size,
                 )
@@ -616,7 +621,8 @@ class HyperLiquidExchange(Exchange):
         )
         status_str = result.get("status", "")
         if status_str != "ok":
-            logger.warning(
+            logger.log(
+                logging.INFO if reduce_only else logging.WARNING,  # as above
                 "HyperLiquid order rejected for %s %s %s (%s): %s",
                 symbol, side, rounded_size, sent, result,
             )
@@ -816,8 +822,8 @@ class HyperLiquidExchange(Exchange):
         misclassify an unrelated existing position as a fresh fill.
 
         A reduce-only order fills at most the position it reduces, so the
-        poll waits for that clamped amount; with nothing to reduce it
-        cannot have filled at all. What is left of the position says
+        poll waits for that clamped amount, seen on two reads in a row;
+        with nothing to reduce it cannot have filled at all. What is left of the position says
         nothing about what a close filled at: it is priced from the fills
         of its own order since `sent_ms` (`Order.late` "fill", the oid as
         `id`), else the mid ("mid"), else not at all — REJECTED, outcome
@@ -859,6 +865,11 @@ class HyperLiquidExchange(Exchange):
         # backs off so we don't hammer HL during a wider outage.
         delays = [1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 5.0, 5.0, 8.0]
         elapsed = 0.0
+        # A reduce-only close is FILLED only on two reads in a row at the
+        # target: a full close's target is flat, and one read that misses
+        # the coin would book a close that never reached HL and reset its
+        # strategy (r1-double-close-3; `_held_after_close`'s rule).
+        seen = 0
         for delay in delays:
             await asyncio.sleep(delay)
             elapsed += delay
@@ -870,7 +881,10 @@ class HyperLiquidExchange(Exchange):
                     elapsed,
                 )
                 continue
-            if abs(current - target) <= tolerance:
+            seen = seen + 1 if abs(current - target) <= tolerance else 0
+            if seen and reduce_only and seen < 2:
+                continue
+            if seen:
                 # Match — the order filled while we were waiting.
                 # Read the actual entry from the position so the runner
                 # records the real fill price, not our limit_px guess.
@@ -914,14 +928,18 @@ class HyperLiquidExchange(Exchange):
                     price=price, filled_price=fill_px,
                     status=OrderStatus.FILLED, late=late,
                 )
+        seen_text = (
+            "the last read only was at the target, unconfirmed" if seen
+            else "no fill seen"
+        )
         logger.error(
-            "Timeout-poll: no delayed fill for %s %s %s after %.0fs — "
+            "Timeout-poll: no delayed fill for %s %s %s after %.0fs (%s) — "
             "returning REJECTED. Reconcile will catch it if HL fills late.",
-            symbol, side, requested_rounded, elapsed,
+            symbol, side, requested_rounded, elapsed, seen_text,
         )
         return self._rejected(
             symbol, side, requested_rounded, order_type, price,
-            f"outcome unknown: timed out, no fill seen in {elapsed:.0f}s "
+            f"outcome unknown: timed out, {seen_text} in {elapsed:.0f}s "
             "(it may still fill late)",
         )
 
@@ -1167,13 +1185,16 @@ class HyperLiquidExchange(Exchange):
 
     async def fetch_user_fills(
         self, address: str | None = None, since_ms: int | None = None,
+        *, strict: bool = False,
     ) -> list[dict]:
         """Return raw HL fill records for the trading account.
 
         When `since_ms` is provided, uses the SDK's time-bounded
         `user_fills_by_time(address, start_time)`. Without it, returns
         the recent default window from `user_fills(address)`. Empty
-        list on any error so the reconcile caller can continue.
+        list on any error so the reconcile caller can continue; `strict`
+        raises instead, for a caller that must not read "no fills" into
+        a read that failed (NU-5a size drift, r1-booking-1).
         """
         addr = (address or self._account_address)
         try:
@@ -1186,6 +1207,8 @@ class HyperLiquidExchange(Exchange):
                 self._info.user_fills, addr, validate=_check_list,
             ) or []
         except Exception:
+            if strict:
+                raise
             logger.exception("Failed to fetch user fills for %s", addr)
             return []
 

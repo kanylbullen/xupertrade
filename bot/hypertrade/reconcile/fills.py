@@ -392,6 +392,23 @@ class FillLedger:
         ]
         self.excluded_count = len(parsed) - len(self._entries)
         self.usable_count = len(self._entries)
+        # False when the fetch behind it failed or hit HL's page cap: a
+        # fill missing from it may still exist (`Repository.fill_ledger`).
+        self.complete = True
+
+    def _candidates(
+        self, symbol: str, position_side: str,
+        since_ms: int | None, until_ms: int | None,
+    ) -> list[_LedgerEntry]:
+        want = closing_side(position_side)
+        return [
+            e for e in self._entries
+            if e.coin == symbol
+            and e.side == want
+            and e.remaining > 0
+            and (since_ms is None or e.time_ms >= since_ms)
+            and (until_ms is None or e.time_ms < until_ms)
+        ]
 
     def take(
         self,
@@ -400,17 +417,31 @@ class FillLedger:
         position_side: str,
         size: float,
         since_ms: int | None = None,
+        until_ms: int | None = None,
     ) -> ClosingFillSummary | None:
-        """Spend `size` of unspent fills that close `position_side`."""
-        want = closing_side(position_side)
-        candidates = [
-            e for e in self._entries
-            if e.coin == symbol
-            and e.side == want
-            and e.remaining > 0
-            and (since_ms is None or e.time_ms >= since_ms)
-        ]
-        return _consume(candidates, size, commit=True)
+        """Spend `size` of unspent fills that close `position_side`,
+        stamped from `since_ms` and before `until_ms`."""
+        return _consume(
+            self._candidates(symbol, position_side, since_ms, until_ms),
+            size, commit=True,
+        )
+
+    def take_upto(
+        self,
+        *,
+        symbol: str,
+        position_side: str,
+        size: float,
+        since_ms: int | None = None,
+        until_ms: int | None = None,
+    ) -> ClosingFillSummary | None:
+        """Like `take`, but spend what there is when it is less than
+        `size`: the summary's `size` says how much. None when nothing."""
+        candidates = self._candidates(symbol, position_side, since_ms, until_ms)
+        available = sum(e.remaining for e in candidates)
+        if available <= _COVER_EPS:
+            return None
+        return _consume(candidates, min(float(size), available), commit=True)
 
 
 def closing_orders(

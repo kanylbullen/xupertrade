@@ -53,6 +53,10 @@ _HL_FILL_PAGE_CAP = 2000
 # guards against, which is exactly when exits must keep running.
 PENDING_CLOSE_KEY = "_engine_pending_close"
 
+# The reason of a trade row for size the DB held and the exchange never
+# did: the rest of a close no fill covers (`close_row_externally`).
+_DRIFT_REASON = "size drift: the row held more than the exchange; pnl 0"
+
 
 def split_pending_close(state):
     """`state` (a row's parsed `state_json`) without the engine's
@@ -138,6 +142,10 @@ class _OrphanClosePrice:
     # The rest of a row a close that filled left behind, which no fill
     # covers: the DB held more than the exchange (`close_row_externally`).
     drift: bool = False
+    # With a fill price: how much of the row no fill covers, booked as
+    # drift at `drift_price` in a trade of its own (pnl 0, no fee).
+    drift_size: float = 0.0
+    drift_price: float | None = None
 
 
 def _orphan_hold_reason(
@@ -515,8 +523,9 @@ class Repository:
     ) -> bool:
         """NU-5a: note on the open `side` row that the engine owes it a
         close (`PENDING_CLOSE_KEY`), keeping the strategy's own state
-        beside it. False when there is no such row, or its `state_json`
-        is not a JSON object to add the note to."""
+        beside it; a second call replaces the note (its attempt count).
+        False when there is no such row, or its `state_json` is not a
+        JSON object to add the note to."""
         import json  # noqa: PLC0415
 
         async with self._session_factory() as session:
@@ -542,6 +551,9 @@ class Repository:
                     marker["only"] = True
                 if not isinstance(state, dict):
                     return False
+                old = state.get(PENDING_CLOSE_KEY)
+                if isinstance(old, dict) and old.get("only"):
+                    marker["only"] = True  # an update: still no state of its own
                 state[PENDING_CLOSE_KEY] = marker
                 row.state_json = json.dumps(state)
         return True
@@ -818,10 +830,43 @@ class Repository:
         """Whether `order_id` is already a `trades` row in this mode."""
         return bool(await self._recorded_order_ids({order_id}))
 
+    async def late_close_id(
+        self, order, reason: str,
+    ) -> tuple[str, str, str | None]:
+        """The trade row's order id and reason for a close `order`, and why
+        it is booked ESTIMATED (None: it is not). Only a close that filled
+        after its POST timed out (`Order.late`) can be: priced at the mid
+        it is an estimate, and the reason says so first (#167's
+        convention). Matched to an oid that is already a trade row, it
+        was another order's fill — a sibling's close, a flat-all — so its
+        price is not this close's either, and its id would trip the
+        UNIQUE `order_id`: estimated too, under a fresh id. Every close
+        path books through this (r1-booking-4). Never raises."""
+        oid = order.id
+        late = getattr(order, "late", None)
+        if not late:
+            return oid, reason, None
+        if late == "fill":
+            try:
+                taken = await self.order_id_booked(oid)
+            except Exception:
+                logger.warning(
+                    "could not check whether order id %s is booked", oid,
+                    exc_info=True,
+                )
+                taken = False
+            if not taken:
+                return oid, reason, None
+            why = f"the fill matched was order {oid}'s, already booked"
+            oid = str(uuid.uuid4())
+        else:
+            why = "no fill of its own found, @ mid"
+        return oid, f"ESTIMATED {reason} (filled after a timeout; {why})", why
+
     async def _price_orphan_close(
         self, exchange, row: PositionRecord, ledger,
         mid_cache: dict[str, float], label: str = "orphan close",
-        drift_price: float | None = None,
+        drift_price: float | None = None, until_ms: int | None = None,
     ) -> "_OrphanClosePrice | None":
         """Work out what a row that vanished from the exchange closed at.
 
@@ -839,7 +884,12 @@ class Repository:
            being closed at a fabricated PnL.
 
         `drift_price` replaces 2 and 3 (`close_row_externally`): the
-        row is what a close that filled at that price left on it.
+        row is what a close that filled at that price left on it. What
+        fills cover of it is booked from them, and only the rest as size
+        drift — and only from a fill read known complete: a failed or
+        capped read cannot tell "no fill" from "fill not seen", and the
+        row is left open for reconcile (r1-booking-1). `until_ms` leaves
+        out fills from then on (the close's own: r1-double-close-2).
         """
         from hypertrade.reconcile.fills import realized_pnl  # noqa: PLC0415
 
@@ -849,7 +899,7 @@ class Repository:
 
         summary = ledger.take(
             symbol=row.symbol, position_side=row.side,
-            size=size, since_ms=opened_ms,
+            size=size, since_ms=opened_ms, until_ms=until_ms,
         )
         if summary is not None:
             return _OrphanClosePrice(
@@ -864,13 +914,42 @@ class Repository:
                 estimated=False,
             )
         if drift_price is not None:
+            if not getattr(ledger, "complete", True):
+                logger.warning(
+                    "External close: the fills read for %s %s %s %s failed or "
+                    "was cut at HL's page cap — what no fill seen covers is "
+                    "not called size drift; the row is left for reconcile",
+                    row.strategy_name, row.side, size, row.symbol,
+                )
+                return None
+            covered = ledger.take_upto(
+                symbol=row.symbol, position_side=row.side,
+                size=size, since_ms=opened_ms, until_ms=until_ms,
+            )
+            if covered is not None:
+                # Part of it was closed by a fill (a partial liquidation):
+                # that part from the fill, the rest drift (pnl 0).
+                return _OrphanClosePrice(
+                    exit_price=covered.price,
+                    fee=covered.fee,
+                    pnl=realized_pnl(
+                        side=row.side, entry_price=entry,
+                        exit_price=covered.price, size=covered.size,
+                        fee=covered.fee,
+                    ),
+                    order_id=covered.order_id,
+                    reason=f"reconcile: {label} (fill)",
+                    estimated=False,
+                    drift_size=size - covered.size,
+                    drift_price=float(drift_price),
+                )
             # No fill closed it: the exchange never held it. Booked with no
             # PnL and no fee — a mid would book a PnL on size that never
             # existed, into the daily-loss counter (double-close-2).
             return _OrphanClosePrice(
                 exit_price=float(drift_price), fee=0.0, pnl=0.0,
                 order_id=None,
-                reason="size drift: the row held more than the exchange; pnl 0",
+                reason=_DRIFT_REASON,
                 estimated=False, drift=True,
             )
 
@@ -919,24 +998,42 @@ class Repository:
         db_row.pnl = priced.pnl
         db_row.closed_at = now
         await session.flush()
+        side = "sell" if db_row.side == "long" else "buy"
+        drift = priced.drift_size if not priced.drift else 0.0
         await self._insert_reconcile_trade(
             session,
             preferred_order_id=priced.order_id,
             strategy_name=db_row.strategy_name,
             symbol=db_row.symbol,
-            side="sell" if db_row.side == "long" else "buy",
-            size=float(db_row.size),
+            side=side,
+            size=float(db_row.size) - drift,
             price=priced.exit_price,
             fee=priced.fee,
             pnl=priced.pnl,
             reason=priced.reason,
             timestamp=now,
         )
+        if drift > 0:
+            await self._insert_reconcile_trade(
+                session,
+                preferred_order_id=None,
+                strategy_name=db_row.strategy_name,
+                symbol=db_row.symbol,
+                side=side,
+                size=drift,
+                price=float(priced.drift_price or priced.exit_price),
+                fee=0.0,
+                pnl=0.0,
+                reason=_DRIFT_REASON,
+                timestamp=now,
+            )
         return db_row
 
     async def close_row_externally(
         self, exchange, row: PositionRecord, *,
         drift_price: float | None = None,
+        fills_before_ms: int | None = None,
+        ledger: FillLedger | None = None,
     ) -> "_OrphanClosePrice | None":
         """Book one row the exchange no longer holds as closed outside the
         bot (NU-5a: a strategy exit found it liquidated or closed by hand).
@@ -953,13 +1050,21 @@ class Repository:
         covers was never on the exchange (the DB held more: a row written
         from a requested size), so it is booked as size drift at that
         price, pnl 0, no fee (`_OrphanClosePrice.drift`), not at the mid.
+        Only fills stamped before `fills_before_ms` count then: from that
+        time on a closing fill is that close's own, when it was booked
+        under an id that is not its oid (a late fill, r1-double-close-2).
+
+        `ledger`: one shared by every row booked in one pass, so a fill
+        that covers part of one row is left for the next (r1-booking-5).
         """
-        ledger = await self._fill_ledger(
-            exchange, _to_epoch_ms(row.opened_at), "External close",
-        )
+        if ledger is None:
+            ledger = await self.fill_ledger(
+                exchange, _to_epoch_ms(row.opened_at), "External close",
+                strict=drift_price is not None,
+            )
         priced = await self._price_orphan_close(
             exchange, row, ledger, {}, label="external close",
-            drift_price=drift_price,
+            drift_price=drift_price, until_ms=fills_before_ms,
         )
         if priced is None:
             return None
@@ -972,18 +1077,39 @@ class Repository:
             await session.commit()
         return priced
 
-    async def _fill_ledger(self, exchange, since_ms, who: str) -> FillLedger:
+    async def fill_ledger_for(
+        self, exchange, rows: list, who: str, *, strict: bool = False,
+    ) -> FillLedger:
+        """`fill_ledger` from the oldest of `rows`' open times: one ledger
+        to price several rows from in one pass (`close_row_externally`)."""
+        since_ms = min(
+            (_to_epoch_ms(r.opened_at) or 0 for r in rows), default=0,
+        ) or None
+        return await self.fill_ledger(exchange, since_ms, who, strict=strict)
+
+    async def fill_ledger(
+        self, exchange, since_ms, who: str, *, strict: bool = False,
+    ) -> FillLedger:
         """The exchange's fills since `since_ms`, each spendable once and
         none already booked as a trade (#167); empty when the fetch
-        fails, so every close prices at the mid."""
+        fails, so every close prices at the mid. `strict` asks the
+        exchange to raise instead of answering a failed read with `[]`,
+        so `ledger.complete` can tell the two apart (False also when HL's
+        page cap may have cut the window)."""
         fills: list[dict] = []
+        complete = True
         try:
-            fills = list(await exchange.fetch_user_fills(since_ms=since_ms) or [])
+            fills = list(await (
+                exchange.fetch_user_fills(since_ms=since_ms, strict=True)
+                if strict else exchange.fetch_user_fills(since_ms=since_ms)
+            ) or [])
         except Exception:
+            complete = False
             logger.exception(
                 "%s: fetch_user_fills failed — falling back to mid price", who,
             )
         if len(fills) >= _HL_FILL_PAGE_CAP:
+            complete = False
             logger.warning(
                 "%s: fetch_user_fills returned %d records (HL caps a page at "
                 "%d) — the window from %s may be truncated and a close older "
@@ -994,6 +1120,7 @@ class Repository:
             fills,
             exclude_order_ids=await self._recorded_order_ids(fill_order_ids(fills)),
         )
+        ledger.complete = complete
         if ledger.excluded_count:
             logger.info(
                 "%s: %d of %d fill(s) are already booked as trades rows and "
@@ -1196,7 +1323,7 @@ class Repository:
             since_ms = min(
                 (_to_epoch_ms(p.opened_at) or 0) for p, _ in to_close
             ) or None
-            ledger = await self._fill_ledger(exchange, since_ms, "Reconcile")
+            ledger = await self.fill_ledger(exchange, since_ms, "Reconcile")
             mid_cache: dict[str, float] = {}
             for row, kind in to_close:
                 priced = await self._price_orphan_close(
@@ -1354,12 +1481,12 @@ class Repository:
                 if not short:
                     result.unresolved_orphans.remove(sym)
                 fee = fill_price * filled * float(settings.taker_fee_rate)
-                reason = "reconcile: exchange-orphan close"
-                if getattr(order, "late", None) == "mid":
-                    reason = f"ESTIMATED {reason} (filled after a timeout, @ mid)"
+                order_id, reason, _ = await self.late_close_id(
+                    order, "reconcile: exchange-orphan close",
+                )
                 try:
                     await self.record_trade(
-                        order_id=order.id,
+                        order_id=order_id,
                         strategy_name="reconcile",
                         symbol=sym,
                         side=close_side,

@@ -5,7 +5,6 @@ import json
 import logging
 import socket
 import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -59,6 +58,9 @@ class FlatAllStatus:
     closed: int = 0
     failed: int = 0
     reason: str = ""
+    # The coins it left open (or "DB", "exchange"): what "did not
+    # complete" is announced once for, whatever each coin's outcome word.
+    coins: tuple[str, ...] = ()
 
 
 class TradeDbDivergence(Exception):
@@ -174,7 +176,8 @@ class _PendingClose:
     next bar whether or not its condition still holds; an edge-triggered
     exit (a crossunder, a Supertrend flip, a time of day) fires on one bar
     only, and used to be dropped when that bar ended. The row carries a
-    marker (`repo.PENDING_CLOSE_KEY`), so a restart sends it again.
+    marker (`repo.PENDING_CLOSE_KEY`), so a restart sends it again, with
+    its attempt count and the alerts already delivered.
     """
 
     side: str  # the row's side
@@ -182,6 +185,9 @@ class _PendingClose:
     misses: int = 0  # attempts in a row that left the row open
     alerted: int = 0  # highest alert delivered: 1, or 2 the critical
     logged: int = 0  # highest alert logged at ERROR; redelivery logs at INFO
+    since: str = ""  # when the engine took it on (UTC, ISO)
+    saved: bool = False  # the row carries its marker: a restart sends it
+    save_failures: int = 0  # writes of the marker that failed in a row
 
 
 @dataclass
@@ -231,6 +237,10 @@ class EngineRunner:
     # NU-5a: a read that finds a close's position gone is confirmed by a
     # second read this much later (reconcile's rule: a read can miss a coin).
     CLOSE_CONFIRM_DELAY_SECONDS = 2.0
+    # NU-5a: a flip whose old row is gone from the exchange but could not
+    # be priced is not tried again on that row for this long (the
+    # reconcile interval, which books the row once it can).
+    UNBOOKED_FLIP_RETRY_SECONDS = 300.0
 
     def __init__(
         self,
@@ -338,12 +348,29 @@ class EngineRunner:
         # NU-5a: a flip's (strategy, coin) while its close is in flight ->
         # how `_close_left_open` settled that close, if it ran.
         self._flip_closes: dict[tuple[str, str], str | None] = {}
+        # ... and, while it is in flight, why the flip's open is refused
+        # if it is: its close goes out alone (`_close_half_of_refused_flip`).
+        self._flip_refused: dict[tuple[str, str], str] = {}
         # Why opens are held for this tick only (a flat-all request, a
         # control read that failed), on top of the NU-2 hold; exits run.
         self._tick_hold: str | None = None
-        # (request token, reason) of the last "Flat-all did not complete"
-        # delivered: once per request and reason, not once per tick.
-        self._flat_all_notice: tuple[str, str] | None = None
+        # (request token, coins still open) of the last "Flat-all did not
+        # complete" delivered: once per request and set of coins, not once
+        # per tick — nor once per change of a coin's outcome word.
+        self._flat_all_notice: tuple[str, tuple[str, ...]] | None = None
+        # Set by a TradeDbDivergence in this tick: the bot paused itself,
+        # and nothing more is sent until the next tick reads the pause.
+        self._diverged = False
+        # Coin -> what the exchange held there that no row owned, when a
+        # close found its own side gone (NU-5a "external-held"): opens on
+        # the coin wait until the exchange is flat there, or a flip that
+        # fires again next tick stacks onto it (r1-tests-and-noise-3).
+        self._unowned: dict[str, str] = {}
+        # (strategy, coin) -> (row id, monotonic time) of a flip whose old
+        # row was found gone from the exchange and could not be priced: the
+        # flip is not tried again on that row for a reconcile interval
+        # (r1-tests-and-noise-4).
+        self._unbooked_flips: dict[tuple[str, str], tuple[int, float]] = {}
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -557,6 +584,22 @@ class EngineRunner:
             return None
         return split_pending_close(state)[1]
 
+    @staticmethod
+    def _pending_from_marker(side: str, marker: dict) -> _PendingClose:
+        """The `_PendingClose` a row's marker describes (`_save_pending`)."""
+        def count(name: str) -> int:
+            try:
+                return max(int(marker.get(name) or 0), 0)
+            except (TypeError, ValueError):
+                return 0
+
+        alerted = min(count("alerted"), 2)
+        return _PendingClose(
+            side=side, reason=str(marker.get("reason") or "exit"),
+            misses=count("misses"), alerted=alerted, logged=alerted,
+            since=str(marker.get("since") or ""), saved=True,
+        )
+
     async def _restore_strategies(self, positions: list) -> None:
         """Restore every strategy from the open DB rows (plus the Redis
         cooldown snapshot for strategies that are flat)."""
@@ -566,36 +609,39 @@ class EngineRunner:
         for pos in positions:
             strat = strat_by_name.get(pos.strategy_name)
             pending = self._pending_close_marker(pos)
+            if pending is not None:
+                # Sent from the first tick, whether or not its strategy
+                # runs in this bot: the close needs only the row
+                # (r1-restart-and-state-4), and it carries on where it was
+                # — the same band, no alert delivered twice (-3).
+                self._pending_closes[(pos.strategy_name, pos.symbol)] = (
+                    self._pending_from_marker(pos.side, pending)
+                )
+                logger.warning(
+                    "[%s] a close of its %s %s %s was pending before the "
+                    "restart (since %s, %s attempt(s)) — sent again from the "
+                    "first tick%s", pos.strategy_name, pos.side, pos.size,
+                    pos.symbol, pending.get("since", "?"),
+                    pending.get("misses", 0),
+                    "" if strat else ", although the strategy does not run here",
+                )
             if strat is None:
                 # The strategy is not running in this bot (allowlist,
                 # mainnet opt-in, a strategy cap). Nothing will manage this
-                # position: no SL, no exit signal — and no pending close.
+                # position: no SL, no exit signal — only a pending close.
                 logger.warning(
                     "State restore: open %s %s row of %s has no running "
                     "strategy — the position is UNMANAGED%s",
                     pos.symbol, pos.side, pos.strategy_name,
-                    " and its pending close is abandoned" if pending else "",
+                    "; its pending close is still sent" if pending else "",
                 )
                 unmanaged.append(
                     f"{pos.strategy_name} {pos.symbol} {pos.side}"
-                    + (" (its close was pending)" if pending else "")
+                    + (" (its pending close is still sent)" if pending else "")
                 )
                 continue
             self._restore_strategy_from_row(strat, pos)
             restored += 1
-            if pending is not None:
-                self._pending_closes[(pos.strategy_name, pos.symbol)] = (
-                    _PendingClose(
-                        side=pos.side,
-                        reason=str(pending.get("reason") or "exit"),
-                    )
-                )
-                logger.warning(
-                    "[%s] a close of its %s %s %s was pending before the "
-                    "restart (since %s) — sent again from the first tick",
-                    pos.strategy_name, pos.side, pos.size, pos.symbol,
-                    pending.get("since", "?"),
-                )
         if unmanaged:
             await self._publish_error(
                 "state-restore",
@@ -983,6 +1029,7 @@ class EngineRunner:
 
     async def _reset_strategy_state(
         self, strategy_name: str, why: str, *, quiet: bool = False,
+        keep_pending: bool = False,
     ) -> None:
         """Reset a strategy to flat, in memory AND in its Redis snapshot.
 
@@ -1002,9 +1049,14 @@ class EngineRunner:
         had just started when that CLOSE was then ignored.
 
         Every caller has found the strategy's row closed (or never open),
-        so a pending close of it has nothing left to close and ends too.
+        so a pending close of it has nothing left to close and ends too —
+        but for `keep_pending`: a caller that could not read the row
+        (`_open_unchecked`) keeps the close the engine owes it.
         """
-        for key in [k for k in self._pending_closes if k[0] == strategy_name]:
+        for key in [
+            k for k in self._pending_closes
+            if k[0] == strategy_name and not keep_pending
+        ]:
             del self._pending_closes[key]
         for s in self.strategies:
             if s.name == strategy_name:
@@ -1157,18 +1209,36 @@ class EngineRunner:
                 ),
                 f"; opens held: {tick_hold}" if tick_hold else "",
             )
+            # A fill whose DB write failed paused the bot (TradeDbDivergence):
+            # nothing more is sent this tick either, or every further fill
+            # would widen the divergence the pause is there to stop
+            # (r1-exits-never-blocked-4).
+            self._diverged = False
             for strategy in active:
                 await self._run_one(strategy)
+                if self._diverged:
+                    break
             # NU-5a: a close the engine owes goes out whether or not its
             # strategy runs this tick (disabled, off the allowlist, or
-            # auto-paused by the rate alarm); only a readable pause stops it.
+            # auto-paused by the rate alarm), or runs in this bot at all
+            # (a restart after a config change); only a readable pause
+            # stops it.
             ran = {s.name for s in active}
             for strategy in self.strategies:
+                if self._diverged:
+                    break
                 if (
                     strategy.name not in ran
                     and (strategy.name, strategy.symbol) in self._pending_closes
                 ):
                     await self._run_one(strategy, evaluate=False)
+            built = {s.name for s in self.strategies}
+            for key in [k for k in self._pending_closes if k[0] not in built]:
+                if self._diverged:
+                    break
+                await self._run_guarded(
+                    key[0], self._send_unbuilt_pending_close(key),
+                )
             # Aggregate this tick's fetch failures into the outage
             # window; alert once if the window persists. Runs after the
             # strategy loop (and only on non-paused ticks) so a paused
@@ -1232,21 +1302,27 @@ class EngineRunner:
     async def _run_one(self, strategy: Strategy, *, evaluate: bool = True) -> None:
         """One strategy's turn in the tick, its errors classified.
         `evaluate=False` sends only the close the engine owes it."""
+        await self._run_guarded(
+            strategy.name,
+            self._run_strategy(strategy) if evaluate
+            else self._run_strategy(strategy, evaluate=False),
+        )
+
+    async def _run_guarded(self, name: str, work) -> None:
+        """Await `work` (one strategy's turn) with its errors classified."""
         try:
-            if evaluate:
-                await self._run_strategy(strategy)
-            else:
-                await self._run_strategy(strategy, evaluate=False)
+            await work
         except TradeDbDivergence:
             # Already handled at source: bot paused, detailed
             # ErrorOccurred event published, full traceback
             # logged via logger.exception. Skip the generic
             # "Strategy tick failed" branch so we don't
             # double-publish + double-log the same incident
-            # (Copilot review fix on PR #107).
+            # (Copilot review fix on PR #107). The tick stops here.
+            self._diverged = True
             return
         except Exception as e:
-            logger.exception("Error running strategy %s", strategy.name)
+            logger.exception("Error running strategy %s", name)
             # Filter by error type before publishing (CLAUDE.md
             # backlog Open-Low: "Suppress Telegram noise on
             # transient HL-fetch failures"; § 6 "Telegram is for
@@ -1260,11 +1336,11 @@ class EngineRunner:
             # errors are real bugs → publish immediately,
             # unchanged.
             if _is_transient_network_error(e):
-                self._tick_fetch_failures.add(strategy.name)
+                self._tick_fetch_failures.add(name)
             elif self.event_bus:
                 await self.event_bus.publish(
                     ErrorOccurred(
-                        strategy=strategy.name,
+                        strategy=name,
                         message="Strategy tick failed",
                     )
                 )
@@ -1273,15 +1349,17 @@ class EngineRunner:
         """Run a pending flat-all request. True when it completed, which
         paused the bot. Otherwise the request stays pending and is retried
         every tick; "did not complete" is published once per request and
-        reason, not once per tick (a coin whose close keeps failing would
-        otherwise send one Telegram a minute)."""
+        set of coins left open, not once per tick (a coin whose close keeps
+        failing would otherwise send one Telegram a minute) nor whenever a
+        coin's outcome changes (a thin book that fills short one tick and
+        not at all the next: r1-tests-and-noise-2)."""
         status = await self._flat_all_positions()
         if status.ok:
             await self._pause_after_flat_all(status)
             await self.control.acknowledge_flat_request(token)
             self._flat_all_notice = None
             return True
-        notice = (token, status.reason)
+        notice = (token, status.coins or (status.reason,))
         if notice == self._flat_all_notice:
             logger.info(
                 "Flat-all still not complete (%s) — retried next tick; opens "
@@ -1533,6 +1611,7 @@ class EngineRunner:
             return FlatAllStatus(
                 ok=False,
                 reason=f"exchange read failed ({type(e).__name__}): {e}",
+                coins=("exchange",),
             )
 
         if positions:
@@ -1540,9 +1619,11 @@ class EngineRunner:
         # coin -> why it is not flat. Worded without live numbers, so the
         # same failure on the next tick reads the same (one notice).
         failed: dict[str, str] = {}
-        # coin -> (side, price) of a close that filled: what its rows keep
-        # beyond the fill, no fill covering it, is size drift at that price.
-        filled_at: dict[str, tuple[str, float]] = {}
+        # coin -> (side, price, fills-before) of a close that filled: what
+        # its rows keep beyond the fill, no fill covering it, is size drift
+        # at that price; fills from `fills-before` on are left out when it
+        # is set (the close's own, booked under another id).
+        filled_at: dict[str, tuple[str, float, int | None]] = {}
         closed = 0
         for pos in positions:
             try:
@@ -1560,17 +1641,18 @@ class EngineRunner:
         await self._flat_all_settle_rows(failed, filled_at)
 
         if failed:
-            # The caller logs it, once per request and reason.
+            # The caller logs it, once per request and set of coins.
             reason = "; ".join(f"{sym}: {why}" for sym, why in sorted(failed.items()))
             return FlatAllStatus(
                 ok=False, closed=closed, failed=len(failed), reason=reason,
+                coins=tuple(sorted(failed)),
             )
         if not positions:
             logger.info("Flat-all requested — no open positions")
         return FlatAllStatus(ok=True, closed=closed)
 
     async def _flat_all_close(
-        self, pos, filled_at: dict[str, tuple[str, float]],
+        self, pos, filled_at: dict[str, tuple[str, float, int | None]],
     ) -> str | None:
         """Close one exchange position for flat-all and book what filled,
         noting its side and price in `filled_at`. None when none of it is
@@ -1591,6 +1673,7 @@ class EngineRunner:
             )
             if r.side == pos.side
         ]
+        sent_ms = int(time.time() * 1000)
         order = await self.exchange.place_order(
             pos.symbol, close_side, read, OrderType.MARKET,
             reduce_only=True,
@@ -1598,7 +1681,13 @@ class EngineRunner:
         filled = float(order.size) if order.status.value == "filled" else 0.0
         if filled > 0:
             if order.filled_price:
-                filled_at[pos.symbol] = (pos.side, float(order.filled_price))
+                filled_at[pos.symbol] = (
+                    pos.side, float(order.filled_price),
+                    # A late fill is booked under an id that may not be its
+                    # oid, so its own fill stays unbooked: no rest may be
+                    # priced from it (r1-double-close-2).
+                    sent_ms if getattr(order, "late", None) else None,
+                )
             await self._flat_all_book(pos, read, order, filled, db_recs)
         # Only what filled is booked (reduce-only fills at most what is
         # left); less than was read is checked against a confirmed read.
@@ -1611,6 +1700,16 @@ class EngineRunner:
             f" ({getattr(order, 'error', None) or 'no reason given'})"
         )
         held, ex_pos, exchange = await self._held_after_close(pos.symbol, pos.side)
+        if not held and ex_pos is not None:
+            # The read was stale, and the coin is on the other side now (a
+            # flip by hand since): not flat. The request stays pending, and
+            # the next attempt reads it and closes it (r1-flip-and-flat-1).
+            logger.warning(
+                "Flat-all: %s %s %s %s (filled %s); the exchange holds %s now "
+                "— the other side, which the next attempt closes",
+                pos.side, read, pos.symbol, why, filled, exchange,
+            )
+            return "the other side is open on the exchange now"
         if not held:
             logger.warning(
                 "Flat-all: %s %s %s %s (filled %s); the exchange holds none "
@@ -1633,38 +1732,18 @@ class EngineRunner:
         One exchange order closes every row on the coin's side, and
         `trades.order_id` is UNIQUE: the first row gets the oid, each next
         one `<oid>-<n>`. One shared id failed every row after the first,
-        which stayed open against a flat exchange (booking-2)."""
+        which stayed open against a flat exchange (booking-2). What filled
+        beyond the rows (the exchange held more than the DB) is booked
+        under `<oid>-surplus`, as a fill with no row is (r1-booking-3)."""
         filled_price = order.filled_price or 0
-        reason = "Flat-all from dashboard"
-        if getattr(order, "late", None) == "mid":
-            reason = f"ESTIMATED {reason} (filled after a timeout, @ mid)"
+        order_id, reason = await self._late_close_booking(
+            order, "Flat-all from dashboard",
+            f"Flat-all {order.side} {filled} {pos.symbol}",
+        )
         if not db_recs:
             # No DB-side open record (rare exchange-side orphan).
-            # Best-effort: record one trade for history with the size
-            # that filled, using the exchange's VWAP entry as the only
-            # entry signal we have.
-            fee = filled_price * filled * settings.taker_fee_rate
-            pnl = realized_pnl(
-                side=pos.side, entry_price=pos.entry_price,
-                exit_price=filled_price, size=filled, fee=fee,
-            )
-            if self.repo:
-                await self.repo.record_trade(
-                    order_id=order.id,
-                    strategy_name="manual_flat",
-                    symbol=pos.symbol,
-                    side=order.side,
-                    size=filled,
-                    price=filled_price,
-                    fee=fee,
-                    pnl=pnl,
-                    reason=f"{reason} (no open DB rec)",
-                )
-            await self.portfolio.record_pnl(pnl)
-            logger.warning(
-                "Flat-all: closed %s %s of %s %s @ %.2f with no DB row "
-                "(PnL %.2f)", pos.side, filled, read, pos.symbol,
-                filled_price, pnl,
+            await self._flat_all_book_unowned(
+                pos, order, filled, order_id, f"{reason} (no open DB rec)",
             )
             return
 
@@ -1687,7 +1766,7 @@ class EngineRunner:
             )
             # Audit H5: single atomic trade+close per row.
             await self.repo.record_trade_and_close_position(
-                order_id=order.id if n == 1 else f"{order.id}-{n}",
+                order_id=order_id if n == 1 else f"{order_id}-{n}",
                 strategy_name=rec.strategy_name,
                 symbol=pos.symbol,
                 trade_side=order.side,
@@ -1717,16 +1796,55 @@ class EngineRunner:
                 "share of the rest until the exchange is read again",
                 pos.symbol, filled, total_db_size,
             )
+        surplus = self._unfilled(pos.symbol, filled, total_db_size)
+        if surplus:
+            await self._flat_all_book_unowned(
+                pos, order, surplus, f"{order_id}-surplus",
+                f"{reason} (beyond the DB rows)",
+            )
+
+    async def _flat_all_book_unowned(
+        self, pos, order, size: float, order_id: str, reason: str,
+    ) -> None:
+        """Book `size` of a flat-all fill that no DB row held: one trade
+        for history and its PnL, against the exchange's VWAP entry — the
+        only entry there is for it."""
+        filled_price = order.filled_price or 0
+        fee = filled_price * size * settings.taker_fee_rate
+        pnl = realized_pnl(
+            side=pos.side, entry_price=pos.entry_price,
+            exit_price=filled_price, size=size, fee=fee,
+        )
+        if self.repo:
+            await self.repo.record_trade(
+                order_id=order_id,
+                strategy_name="manual_flat",
+                symbol=pos.symbol,
+                side=order.side,
+                size=size,
+                price=filled_price,
+                fee=fee,
+                pnl=pnl,
+                reason=reason,
+            )
+        await self.portfolio.record_pnl(pnl)
+        logger.warning(
+            "Flat-all: closed %s %s %s @ %.2f that no DB row held (PnL %.2f)",
+            pos.side, size, pos.symbol, filled_price, pnl,
+        )
 
     async def _flat_all_settle_rows(
-        self, failed: dict[str, str], filled_at: dict[str, tuple[str, float]],
+        self, failed: dict[str, str],
+        filled_at: dict[str, tuple[str, float, int | None]],
     ) -> None:
         """After flat-all's closes, every open DB row must be gone too. A
         row the exchange (confirmed) no longer holds is booked as an
-        external close priced from fills — or, the rest of a row whose
-        coin's close filled on its side, as size drift at that fill — and
-        its strategy reset; one it still holds, or one that cannot be
-        booked, fails the attempt."""
+        external close priced from fills — one ledger for all of them, so
+        a fill that covers part of one row is left for the next — or, the
+        rest of a row whose coin's close filled on its side, as size drift
+        at that fill; its strategy is reset. One it still holds, one that
+        cannot be booked, or a coin now held on the other side fails the
+        attempt."""
         if not self.repo:
             return
         try:
@@ -1735,6 +1853,7 @@ class EngineRunner:
             logger.exception("Flat-all: reading the open rows after the closes failed")
             failed["DB"] = f"open rows unreadable ({type(e).__name__})"
             return
+        ledger = None
         for row in rows:
             if row.symbol in failed:
                 continue  # its coin's close failed: that is the reason
@@ -1748,14 +1867,32 @@ class EngineRunner:
                     row.strategy_name, row.side, row.size, row.symbol, exchange,
                 )
                 failed[row.symbol] = "still held on the exchange"
-            elif not await self._book_external_close(
+                continue
+            if ledger is None:
+                try:
+                    ledger = await self.repo.fill_ledger_for(
+                        self.exchange, rows, "Flat-all", strict=bool(filled_at),
+                    )
+                except Exception:
+                    logger.exception("Flat-all: reading the fills failed")
+            side, price, before = filled_at.get(row.symbol, ("", None, None))
+            drift = side == row.side
+            if not await self._book_external_close(
                 row, f"flat-all found none of it on the exchange ({exchange})",
-                ex_pos, drift_price=(
-                    filled_at[row.symbol][1]
-                    if filled_at.get(row.symbol, ("",))[0] == row.side else None
-                ),
+                drift_price=price if drift else None,
+                fills_before_ms=before if drift else None, ledger=ledger,
             ):
                 failed[row.symbol] = "a row the exchange no longer holds could not be booked"
+            elif ex_pos is not None:
+                # Booked; but the coin is held on the other side, which no
+                # row owns and the flat-all read did not show: not flat
+                # (r1-flip-and-flat-1). The next attempt closes it.
+                logger.warning(
+                    "Flat-all: %s %s is held on the other side (%s) with no "
+                    "row — the next attempt closes it", row.symbol, row.side,
+                    exchange,
+                )
+                failed[row.symbol] = "the other side is open on the exchange now"
 
     async def _update_position_pnl(self) -> None:
         """Update unrealized P&L for all open positions in the DB."""
@@ -1779,8 +1916,20 @@ class EngineRunner:
         it. `evaluate=False` (a strategy that does not run this tick) only
         sends the close the engine owes it (NU-5a)."""
         key = (strategy.name, strategy.symbol)
-        # Fetch candles
-        candles = await fetch_candles(strategy.symbol, strategy.timeframe)
+        # Fetch candles. A close the engine owes needs none, so a fetch
+        # that raises (aiohttp's timeout is a plain TimeoutError, re-raised
+        # after the feed's retries) or a malformed frame still sends it,
+        # and the error is classified as before (r1-exits-never-blocked-2).
+        try:
+            candles = await fetch_candles(strategy.symbol, strategy.timeframe)
+            latest_price = (
+                None if candles.empty else candles["close"].iloc[-1]
+            )
+        except Exception:
+            if key in self._pending_closes:
+                self._note_pre_signal_state(strategy)
+                await self._send_pending_close(strategy, None, 0.0)
+            raise
         if candles.empty:
             logger.warning("No candle data for %s %s", strategy.symbol, strategy.timeframe)
             # fetch_candles swallows network/5xx errors after its 3
@@ -1796,8 +1945,8 @@ class EngineRunner:
                 await self._send_pending_close(strategy, None, 0.0)
             return
 
-        # Update exchange price (use latest/forming candle for real-time pricing)
-        latest_price = candles["close"].iloc[-1]
+        # Update exchange price (use latest/forming candle for real-time
+        # pricing): `latest_price`, read above.
         # DEBUG not INFO: one line per strategy per tick (22 strategies x
         # every 60s) was ~1,000 lines/hour per bot and the single biggest
         # log-volume source (bot/reports/analysis-2026-09-15.md § 1). The
@@ -1940,6 +2089,39 @@ class EngineRunner:
             signal, price, leverage=strategy.leverage, bar_time=bar_time,
         )
 
+    async def _send_unbuilt_pending_close(self, key: tuple[str, str]) -> None:
+        """r1-restart-and-state-4: the close the engine owes a row whose
+        strategy is not built in this bot (a restart after the allowlist,
+        the mainnet opt-in or a strategy cap left it out). The close needs
+        only the row, so it goes as any pending close does — DB size,
+        reduce-only, the band its misses earned, the same classification —
+        with nothing to re-arm."""
+        pending = self._pending_closes[key]
+        name, symbol = key
+        row = await self.repo.get_open_position(name, symbol)
+        if row is None or row.side != pending.side:
+            del self._pending_closes[key]
+            logger.info(
+                "[%s] its pending close of a %s %s ends: the row is %s now",
+                name, pending.side, symbol, row.side if row else "closed",
+            )
+            return
+        signal = Signal(
+            action=(
+                SignalAction.CLOSE_LONG if row.side == "long"
+                else SignalAction.CLOSE_SHORT
+            ),
+            symbol=symbol,
+            strategy_name=name,
+            reason=f"{pending.reason} (pending close, attempt "
+                   f"{pending.misses + 1}; strategy not running)",
+        )
+        logger.info(
+            "[%s] Pending close: %s %s %s — %s", name, signal.action.value,
+            row.size, symbol, signal.reason,
+        )
+        await self._execute_signal(signal, 0.0)
+
     async def _execute_signal(
         self,
         signal: Signal,
@@ -2057,6 +2239,7 @@ class EngineRunner:
 
         flipped = False
         close_row = None
+        sent_ms: int | None = None  # when a close was sent
         if is_open:
             try:
                 refusal = await self._open_refusal(
@@ -2153,6 +2336,7 @@ class EngineRunner:
                     and pending.misses >= CLOSE_REJECTS_BEFORE_WIDE_BAND
                     else {}
                 )
+                sent_ms = int(time.time() * 1000)
                 order = await self.exchange.place_order(
                     signal.symbol, "sell" if held == "long" else "buy",
                     close_size, OrderType.MARKET, reduce_only=True, **band,
@@ -2281,9 +2465,22 @@ class EngineRunner:
         open_pos = None
         if signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
             if self.repo:
-                open_pos = await self.repo.get_open_position(
-                    signal.strategy_name, signal.symbol
-                )
+                try:
+                    open_pos = await self.repo.get_open_position(
+                        signal.strategy_name, signal.symbol
+                    )
+                except Exception as e:
+                    # The order filled: this read must not end the close
+                    # before the fill is booked and a rest is re-armed
+                    # (r1-exits-never-blocked-3). The row read before the
+                    # order is the same row.
+                    logger.warning(
+                        "[%s] %s %s filled, and re-reading its row failed "
+                        "(%s: %s) — booking it against the row read before "
+                        "the order", signal.strategy_name, signal.action.value,
+                        signal.symbol, type(e).__name__, e,
+                    )
+                    open_pos = close_row
                 if open_pos:
                     close_pnl = realized_pnl(
                         side=open_pos.side, entry_price=open_pos.entry_price,
@@ -2342,11 +2539,11 @@ class EngineRunner:
                         state_json=state_json,
                     )
                 elif signal.action in (SignalAction.CLOSE_LONG, SignalAction.CLOSE_SHORT):
-                    order_id, reason = order.id, signal.reason
-                    if getattr(order, "late", None):
-                        order_id, reason = await self._late_close_booking(
-                            signal, order,
-                        )
+                    order_id, reason = await self._late_close_booking(
+                        order, signal.reason,
+                        f"[{signal.strategy_name}] {signal.action.value} "
+                        f"{signal.symbol}",
+                    )
                     await self.repo.record_trade_and_close_position(
                         order_id=order_id,
                         strategy_name=signal.strategy_name,
@@ -2403,9 +2600,12 @@ class EngineRunner:
 
         # What a close left on its row is booked if gone from the exchange
         # (from fills, else as size drift at this fill's price), else the
-        # strategy is re-armed and the engine closes the rest.
+        # strategy is re-armed and the engine closes the rest. A late fill
+        # was booked under an id that may not be its oid: its own fill is
+        # unbooked, and must not price the rest (r1-double-close-2).
         if remaining and await self._close_left_open(
             signal, None, open_pos, filled_at=filled_price or None,
+            fills_before_ms=sent_ms if getattr(order, "late", None) else None,
         ) in ("external", "external-held"):
             remaining = 0.0
 
@@ -2459,37 +2659,23 @@ class EngineRunner:
         # A short-filled close did not finish: a flip must not open on it.
         return parity_ok and not remaining
 
-    async def _late_close_booking(self, signal: Signal, order) -> tuple[str, str]:
-        """The trade row's order id and reason for a close that filled only
-        after its POST timed out (`Order.late`). A mid is an estimate, and
-        the reason says so first (#167's convention): it reaches the trade
-        listing, /eval and the daily-loss counter like a real fill. An oid
-        that is already a trade row was another order's fill — a sibling's
-        close on the coin, a flat-all — so its price is not this close's
-        either, and its id would trip the UNIQUE `order_id` into the
-        divergence pause: estimated too, under a fresh id. Never raises."""
-        oid = order.id
-        if order.late == "fill":
-            try:
-                taken = await self.repo.order_id_booked(oid)
-            except Exception:
-                logger.warning(
-                    "[%s] could not check whether order id %s is booked",
-                    signal.strategy_name, oid, exc_info=True,
-                )
-                taken = False
-            if not taken:
-                return oid, signal.reason
-            why = f"the fill matched was order {oid}'s, already booked"
-            oid = str(uuid.uuid4())
-        else:
-            why = "no fill of its own found, @ mid"
-        logger.warning(
-            "[%s] %s %s filled after its order timed out and is booked "
-            "ESTIMATED @ %s (%s)", signal.strategy_name, signal.action.value,
-            signal.symbol, order.filled_price, why,
-        )
-        return oid, f"ESTIMATED {signal.reason} (filled after a timeout; {why})"
+    async def _late_close_booking(
+        self, order, reason: str, who: str,
+    ) -> tuple[str, str]:
+        """The trade row's order id and reason for a close `order`
+        (`Repository.late_close_id`): its own, unless it filled only after
+        its POST timed out and was priced at the mid, or matched to an oid
+        already booked — then ESTIMATED, and under a fresh id in the second
+        case. Logged as `who`. Never raises."""
+        if not getattr(order, "late", None) or self.repo is None:
+            return order.id, reason
+        order_id, reason, why = await self.repo.late_close_id(order, reason)
+        if why:
+            logger.warning(
+                "%s filled after its order timed out and is booked "
+                "ESTIMATED @ %s (%s)", who, order.filled_price, why,
+            )
+        return order_id, reason
 
     def _unfilled(self, symbol: str, requested: float, filled: float) -> float:
         """What a close left unfilled, in whole szDecimals steps; 0.0 when
@@ -2521,6 +2707,29 @@ class EngineRunner:
         either absent (plain open) or the position the flip is about to
         close.
         """
+        # NU-5a: a close found its own side gone and the exchange holding
+        # the other side with no row (`_book_external_close`). An open on
+        # the coin nets into that until it is gone — a flip that fires
+        # again next tick stacked onto it (r1-tests-and-noise-3).
+        unowned = self._unowned.get(signal.symbol)
+        if unowned is not None:
+            try:
+                pos = await self.exchange.get_position(signal.symbol)
+            except Exception:
+                pos = None
+            else:
+                if pos is None or float(pos.size) <= 1e-9:
+                    del self._unowned[signal.symbol]
+                    unowned = None
+                else:
+                    unowned = _exchange_text(pos)
+            if unowned is not None:
+                return logging.WARNING, "unowned position", (
+                    f"the exchange holds {unowned} {signal.symbol} that no "
+                    "row owns; opens on the coin wait until it is closed "
+                    "(reconcile, or by hand)"
+                )
+
         open_rows: list = []
         if self.repo:
             open_rows = await self.repo.get_open_positions()
@@ -2776,7 +2985,7 @@ class EngineRunner:
         """
         if not await self._flip_close(
             signal, existing, current_price, leverage, bar_time,
-            why=f"(the open half is refused: {category})",
+            why=f"(the open half is refused: {category})", refused=category,
         ):
             return
         await self._reset_strategy_state(
@@ -2800,9 +3009,13 @@ class EngineRunner:
         such row."""
         name = signal.strategy_name
         held_before = name in self._pre_signal_state
+        # Its row was not read, so a close the engine already owes it stays
+        # owed: a strategy flat in memory since an earlier failed read lost
+        # it here for good (r1-restart-and-state-1).
         await self._reset_strategy_state(
             name, why=f"its {signal.action.value} {signal.symbol} was not "
                       "sent: its position could not be read",
+            keep_pending=True,
         )
         if not held_before:
             return
@@ -2852,11 +3065,13 @@ class EngineRunner:
         leverage: int,
         bar_time,
         why: str,
+        refused: str | None = None,
     ) -> bool:
         """Close `existing` through the standard close path (DB-driven
         size, trade record, parity) as the first half of a flip. Returns
         whether the close fully succeeded and nothing is left on the
-        exchange for the open to land on.
+        exchange for the open to land on. `refused`: why the flip's open
+        is refused, if it is — the close goes out alone.
 
         On failure the strategy is brought back in line with what the DB
         now says: still holding the old position (the close did not fill)
@@ -2884,7 +3099,17 @@ class EngineRunner:
             reason=f"Auto-close before flip ({signal.reason[:60]})",
         )
         key = (signal.strategy_name, signal.symbol)
+        unbooked = self._unbooked_flips.pop(key, None)
+        if (
+            unbooked is not None and unbooked[0] == existing.id
+            and time.monotonic() - unbooked[1] < self.UNBOOKED_FLIP_RETRY_SECONDS
+        ):
+            self._unbooked_flips[key] = unbooked
+            await self._flat_after_unbooked_flip(signal, existing, wanted, bar_time)
+            return False
         self._flip_closes[key] = None
+        if refused is not None:
+            self._flip_refused[key] = refused
         try:
             ok = await self._execute_signal(flip_close, current_price, leverage)
         except TradeDbDivergence:
@@ -2894,6 +3119,17 @@ class EngineRunner:
             raise
         finally:
             settled = self._flip_closes.pop(key, None)
+            self._flip_refused.pop(key, None)
+        if settled == "unpriced":
+            # The old side is gone from the exchange, but nothing prices it
+            # yet, so its row stays open for reconcile. No open onto that
+            # row (audit H1), no re-arm (the exchange holds nothing for the
+            # strategy to manage), and no new try on the row for a
+            # reconcile interval: re-armed, a level-triggered flip sent a
+            # refused close every tick (r1-tests-and-noise-4).
+            self._unbooked_flips[key] = (existing.id, time.monotonic())
+            await self._flat_after_unbooked_flip(signal, existing, wanted, bar_time)
+            return False
         if settled == "external-held":
             # The old side was gone and is booked, but the exchange holds
             # the other side with no row: an open would stack onto it.
@@ -2933,6 +3169,25 @@ class EngineRunner:
             publish=settled is None,
         )
         return False
+
+    async def _flat_after_unbooked_flip(
+        self, signal: Signal, existing, wanted: str, bar_time,
+    ) -> None:
+        """A flip whose old row is gone from the exchange but could not be
+        priced: neither half is sent, and the strategy is flat — what the
+        exchange holds for it. Logged once per bar; reconcile books the
+        row and says so."""
+        await self._reset_strategy_state(
+            signal.strategy_name, quiet=True,
+            why=f"its flip's old {existing.side} row is gone from the "
+                "exchange, not yet booked",
+        )
+        await self._note_refusal(
+            signal, "old row unbooked", bar_time,
+            f"Flip {existing.side}→{wanted} on {signal.symbol}: open not sent "
+            f"— the {existing.side} row is gone from the exchange and could "
+            "not be priced yet; reconcile books it. Strategy flat.",
+        )
 
     async def _align_strategy_after_failed_flip_close(
         self, signal: Signal, existing,
@@ -3368,6 +3623,14 @@ class EngineRunner:
                 )
                 return None, None
 
+            # A close the engine sends again every tick says these once, at
+            # WARNING, and at INFO on each attempt after (each attempt has
+            # its own line: r1-tests-and-noise-5).
+            pending = self._pending_closes.get((strategy_name, symbol))
+            level = (
+                logging.INFO if pending is not None and pending.misses
+                else logging.WARNING
+            )
             # Sanity-clamp to the exchange's actual netted position size for
             # this side. If the DB thinks we own more than the exchange has
             # (could happen after partial reconcile), close only what exists.
@@ -3377,7 +3640,8 @@ class EngineRunner:
                 # The clamp is a safety net, not the source of truth —
                 # whatever failed, we fall back to the DB size and say
                 # so. One handler; the type is in the message.
-                logger.warning(
+                logger.log(
+                    level,
                     "[%s] CLOSE_%s for %s — exchange read failed (%s: %s); "
                     "closing the DB size unclamped, reduce-only",
                     strategy_name, expected_side.upper(), symbol,
@@ -3386,7 +3650,8 @@ class EngineRunner:
                 return db_pos.size, db_pos
             held = _held_on_side(ex_pos, expected_side)
             if held > 1e-9 and db_pos.size > held + 1e-9:
-                logger.warning(
+                logger.log(
+                    level,
                     "[%s] CLOSE_%s clamping DB size %.6f to exchange %.6f for %s",
                     strategy_name, expected_side.upper(),
                     db_pos.size, held, symbol,
@@ -3422,16 +3687,20 @@ class EngineRunner:
 
     async def _close_left_open(
         self, signal: Signal, order, row, *, filled_at: float | None = None,
+        fills_before_ms: int | None = None,
     ) -> str | None:
         """NU-5a: a close left `row` open — all of it (`order` rejected or
         zero-filled) or the rest (filled short at `filled_at`: `order`
-        None). A confirmed read (`_held_after_close`) says which:
+        None). A confirmed read (`_held_after_close`) of what the exchange
+        holds beyond the coin's other rows on that side says which:
 
-        a. Nothing left on the row's side: it was closed outside this bot
-           (liquidation, by hand, a late fill of a timed-out order). The
-           row is booked from fills; nothing to retry, one notice. The
-           rest of a close that filled, which no fill covers, is size
-           drift instead: booked at `filled_at`, pnl 0, logged only. A row
+        a. Nothing left of this row: it was closed outside this bot
+           (liquidation, by hand, a late fill of a timed-out order, or of
+           this very close when its outcome came back unknown). The row is
+           booked from fills; nothing to retry, one notice. The rest of a
+           close that filled, which no fill covers, is size drift instead:
+           booked at `filled_at`, pnl 0, logged only (fills from
+           `fills_before_ms` on are the close's own and left out). A row
            that cannot be priced at all stays open for reconcile, the
            strategy flat: the exchange holds nothing for it to manage.
         b. Anything else, unreadable included: still open. The close
@@ -3441,11 +3710,17 @@ class EngineRunner:
            pre-signal state. One alert per (strategy, coin) episode
            (`_close_missed`).
 
+        Other rows on the coin's side count against what the exchange
+        holds: the exchange nets them with this one, and read as this
+        row's, a close that filled but came back with its outcome unknown
+        was sent again and closed a sibling's position (r1-double-close-1).
+
         Returns "external" (booked, the exchange flat), "external-held"
-        (booked, the exchange on the other side with no row), "alerted",
-        "retry", or None if the row could not be classified or booked;
-        a flip in flight gets it too. Never raises: a failure still
-        re-arms the strategy on `row` and keeps the close the engine's.
+        (booked, the exchange on the other side with no row), "unpriced"
+        (gone from the exchange, not booked), "alerted", "retry" (also
+        when classifying failed), or None without a row; a flip in flight
+        gets it too. Never raises: a failure still re-arms the strategy on
+        `row` and keeps the close the engine's.
         """
         key = (signal.strategy_name, signal.symbol)
         got = (
@@ -3464,16 +3739,27 @@ class EngineRunner:
         try:
             if order is None:  # what is left is the rest on the row
                 row = await self.repo.get_open_position(*key) or row
-            held, pos, exchange = await self._held_after_close(row.symbol, row.side)
+            others = sum(
+                float(r.size)
+                for r in await self.repo.get_open_positions_for_symbol(row.symbol)
+                if r.side == row.side and r.id != row.id
+            )
+            held, pos, exchange = await self._held_after_close(
+                row.symbol, row.side, others,
+            )
+            if others:
+                exchange += f", of which other rows hold {others:g}"
             if not held:
+                other = pos if pos is not None and pos.side != row.side else None
                 booked = await self._book_external_close(
                     row, f"its {signal.action.value} {got} and the "
-                    f"exchange is {exchange}", pos,
+                    f"exchange is {exchange}", other,
                     drift_price=filled_at if order is None else None,
+                    fills_before_ms=fills_before_ms if order is None else None,
                 )
                 outcome = (
-                    None if not booked
-                    else "external" if pos is None else "external-held"
+                    "unpriced" if not booked
+                    else "external" if other is None else "external-held"
                 )
                 if not booked and self._pending_closes.pop(key, None):
                     # Nothing is left to send it to; reconcile books the row.
@@ -3499,11 +3785,22 @@ class EngineRunner:
             self._flip_closes[key] = outcome
         return outcome
 
-    async def _held_after_close(self, symbol: str, side: str) -> tuple[bool, object, str]:
-        """Whether the exchange still holds any `side` of `symbol` (an
-        unreadable one does), the position it read (None when flat or
-        unreadable), and what, as text. "Nothing" needs a second read to
-        agree CLOSE_CONFIRM_DELAY_SECONDS later (reconcile's rule)."""
+    async def _held_after_close(
+        self, symbol: str, side: str, others: float = 0.0,
+    ) -> tuple[bool, object, str]:
+        """Whether the exchange still holds any `side` of `symbol` beyond
+        `others` (what other open rows on that side hold; at least one
+        szDecimals step beyond, then) — an unreadable one does — the
+        position it read (None when flat or unreadable), and what, as
+        text. "Nothing" needs a second read to agree
+        CLOSE_CONFIRM_DELAY_SECONDS later (reconcile's rule)."""
+        floor = 1e-9
+        if others > 0:
+            try:
+                step = 10 ** -int(self.exchange.get_size_precision(symbol))
+            except Exception:
+                step = 1e-9
+            floor = others + step / 2
         pos = None
         for attempt in (1, 2):
             if attempt == 2:
@@ -3512,44 +3809,78 @@ class EngineRunner:
                 pos = await self.exchange.get_position(symbol)
             except Exception as e:
                 return True, None, f"unreadable ({type(e).__name__}: {e})"
-            if _held_on_side(pos, side) > 1e-9:
+            if _held_on_side(pos, side) > floor:
                 return True, pos, _exchange_text(pos)
         if pos is not None and float(pos.size) <= 1e-9:
             pos = None
         return False, pos, _exchange_text(pos)
 
-    async def _pend_close(self, key: tuple[str, str], side: str, reason: str) -> _PendingClose:
+    async def _pend_close(
+        self, key: tuple[str, str], side: str, reason: str, *,
+        save: bool = True,
+    ) -> _PendingClose:
         """The close the engine owes `key`'s `side` row, made so if it is
-        not yet, and noted on the row so a restart sends it again. Never
-        raises; a note that cannot be written is logged — a restart before
-        the close goes through would then forget it."""
+        not yet, and noted on the row so a restart sends it again. A note
+        that could not be written is tried again on every later call until
+        it lands (r1-exits-never-blocked-1); `save=False` leaves the write
+        to the caller. Never raises."""
         pending = self._pending_closes.get(key)
-        if pending is not None and pending.side == side:
-            return pending
-        pending = self._pending_closes[key] = _PendingClose(side=side, reason=reason)
-        saved = False
-        if self.repo is not None:
-            try:
-                saved = await self.repo.mark_pending_close(
-                    key[0], key[1], side, {
-                        "reason": reason[:200],
-                        "since": datetime.now(timezone.utc).isoformat(
-                            timespec="seconds",
-                        ),
-                    },
-                )
-            except Exception as e:
-                logger.warning(
-                    "[%s] noting the pending close on its row failed (%s: %s)",
-                    key[0], type(e).__name__, e,
-                )
-        if not saved:
-            logger.warning(
-                "[%s] the close the engine owes its %s %s is not saved on the "
-                "row: a restart before it goes through forgets it",
-                key[0], side, key[1],
+        if pending is None or pending.side != side:
+            pending = self._pending_closes[key] = _PendingClose(
+                side=side, reason=reason,
+                since=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
+        elif pending.saved:
+            return pending
+        if save:
+            await self._save_pending(key, pending)
         return pending
+
+    async def _save_pending(self, key: tuple[str, str], pending: _PendingClose) -> None:
+        """Write `pending` onto its row: the restart marker, with its
+        attempt count and the alerts delivered, so a restart carries on
+        where it was (r1-restart-and-state-3). Never raises. Until a marker
+        lands, a restart forgets the close: said at WARNING once, at INFO
+        on each further failed write, and at INFO when it lands."""
+        if self.repo is None:
+            return
+        error = "no open row on that side, or its state is not a JSON object"
+        try:
+            ok = await self.repo.mark_pending_close(
+                key[0], key[1], pending.side, {
+                    "reason": pending.reason[:200],
+                    "since": pending.since,
+                    "misses": pending.misses,
+                    "alerted": pending.alerted,
+                },
+            )
+        except Exception as e:
+            ok, error = False, f"{type(e).__name__}: {e}"
+        if ok:
+            if not pending.saved and pending.save_failures:
+                logger.info(
+                    "[%s] the close the engine owes its %s %s is saved on "
+                    "the row now, after %d failed write(s)", key[0],
+                    pending.side, key[1], pending.save_failures,
+                )
+            pending.saved = True
+            pending.save_failures = 0
+            return
+        if pending.saved:
+            # The marker is on the row; only its count is behind.
+            logger.debug(
+                "[%s] updating the pending-close note of its %s %s failed "
+                "(%s)", key[0], pending.side, key[1], error,
+            )
+            return
+        pending.save_failures += 1
+        logger.log(
+            logging.WARNING if pending.save_failures == 1 else logging.INFO,
+            "[%s] the close the engine owes its %s %s is not saved on the "
+            "row (%s): a restart before it goes through forgets it; the "
+            "write is tried again with the next attempt",
+            key[0], pending.side, key[1], error,
+        )
 
     async def _close_missed(
         self, signal: Signal, row, detail: str, *, rejected: bool,
@@ -3562,10 +3893,22 @@ class EngineRunner:
         episode (one undelivered goes with the next miss); every miss logs
         one line — an alert's text at ERROR the first time, everything
         else at INFO, but for the first miss of an episode that does not
-        alert, at WARNING. "alerted" if an alert went out now."""
+        alert, at WARNING. "alerted" if an alert went out now. The count
+        and the alerts delivered go onto the row's marker."""
         key = (signal.strategy_name, signal.symbol)
-        pending = await self._pend_close(key, row.side, signal.reason)
+        pending = await self._pend_close(key, row.side, signal.reason, save=False)
         pending.misses += 1
+        outcome = await self._count_miss(signal, row, detail, rejected, pending)
+        await self._save_pending(key, pending)
+        return outcome
+
+    async def _count_miss(
+        self, signal: Signal, row, detail: str, rejected: bool,
+        pending: _PendingClose,
+    ) -> str:
+        """`_close_missed`'s log line and alert for its `pending.misses`th
+        miss."""
+        key = (signal.strategy_name, signal.symbol)
         n = pending.misses
         wide = n > CLOSE_REJECTS_BEFORE_WIDE_BAND
         level = 2 if wide else 1 if rejected else 0
@@ -3609,19 +3952,24 @@ class EngineRunner:
 
     async def _book_external_close(
         self, row, why: str, other=None, *, drift_price: float | None = None,
+        fills_before_ms: int | None = None, ledger=None,
     ) -> bool:
         """NU-5a class (a): book `row` as closed outside this bot, priced
         from fills as reconcile prices an orphan (#167), with its PnL and
         one notice; reset the strategy, unless a flip's open goes ahead —
-        only when the exchange is flat: `other`, a position on the other
-        side that no row owns, would take the open stacked onto it.
-        `drift_price`: `row` is the rest of a close that filled at that
-        price, and one no fill covers is size drift — booked there with
-        pnl 0 and logged, not published (`close_row_externally`).
-        Returns whether it was booked (an unpriceable row stays open)."""
+        only when the exchange is flat and no gate refused that open:
+        `other`, a position on the other side that no row owns, would take
+        the open stacked onto it, and holds opens on the coin until it is
+        gone (`_open_refusal`). `drift_price`: `row` is the rest of a
+        close that filled at that price, and what no fill covers is size
+        drift — booked there with pnl 0 and logged, not published
+        (`close_row_externally`, with `fills_before_ms` and a shared
+        `ledger`). Returns whether it was booked (an unpriceable row stays
+        open)."""
         try:
             priced = await self.repo.close_row_externally(
                 self.exchange, row, drift_price=drift_price,
+                fills_before_ms=fills_before_ms, ledger=ledger,
             )
         except Exception:
             logger.exception(
@@ -3639,8 +3987,11 @@ class EngineRunner:
             return False
         key = (row.strategy_name, row.symbol)
         flip = key in self._flip_closes
-        opens = flip and other is None
+        refused = self._flip_refused.get(key) if flip else None
+        opens = flip and other is None and refused is None
         self._pending_closes.pop(key, None)
+        if other is not None:
+            self._unowned[row.symbol] = _exchange_text(other)
         await self._on_reconcile_close(row.strategy_name, priced.pnl, reset=not opens)
         if opens:
             after = "The flip's open goes ahead."
@@ -3649,8 +4000,11 @@ class EngineRunner:
                 f"The exchange holds {_exchange_text(other)} {row.symbol} that "
                 "no row owns: "
                 + ("the flip's open is not sent, and " if flip else "")
-                + "reconcile decides on it."
+                + "opens on the coin wait until it is closed; reconcile "
+                "decides on it."
             )
+        elif flip:
+            after = f"The flip's open is refused ({refused}): flat."
         else:
             after = "Nothing to retry."
         if priced.drift:
@@ -3662,13 +4016,18 @@ class EngineRunner:
                 row.side, row.size, row.symbol, why, priced.exit_price, after,
             )
             return True
+        drift = (
+            f"; {priced.drift_size:g} of it no fill closed — the row held more "
+            "than the exchange did — booked as size drift, pnl 0"
+            if priced.drift_size else ""
+        )
         message = (
             f"External close: {row.side} {row.size} {row.symbol} — {why}. "
             f"None of the {row.side} is left on the exchange (a liquidation, "
             "a close by hand, or a late fill of this bot's own order); booked "
             f"@ {priced.exit_price:.6f} "
             f"({'ESTIMATED @ mid' if priced.estimated else 'fill'}), "
-            f"pnl {priced.pnl:+.4f}. {after}"
+            f"pnl {priced.pnl:+.4f}{drift}. {after}"
         )
         logger.warning("[%s] %s", row.strategy_name, message)
         await self._publish_error(row.strategy_name, message)
