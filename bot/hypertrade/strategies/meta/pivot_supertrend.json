@@ -25,12 +25,5 @@
   "params": {
     "ma_len": 200,
     "sl_pct": 1.0
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (4h pivot ST, long & short)"
   }
 }

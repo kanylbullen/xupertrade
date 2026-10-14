@@ -11,6 +11,7 @@ import aiohttp
 from hypertrade.config import settings
 from hypertrade.data.feed import fetch_candles
 from hypertrade.db.repo import ReconcileResult, Repository
+from hypertrade.engine import funding
 from hypertrade.engine.control import BotControl
 from hypertrade.engine.portfolio import PortfolioManager
 from hypertrade.engine.signals import Signal, SignalAction
@@ -943,22 +944,8 @@ class EngineRunner:
                 logger.exception("Funding poll failed")
             self._last_funding_poll = time.time()
 
-        # HODL signal evaluation every 6h, owned by the mainnet bot only.
-        # Same rationale as the vault scanner gate below: HODL inputs
-        # (price, RSI, on-chain levels) are mode-agnostic, so running in
-        # every container produced 3× duplicate Telegram notifications
-        # ("MAINNET / PAPER / TESTNET ... HODL hype_accumulation") on each
-        # verdict change. Mainnet is the canonical owner — co-located with
-        # Telegram (PR #114) and vault scanner (PR #113).
-        if (
-            settings.exchange_mode == "mainnet"
-            and (time.time() - self._last_hodl_check) > 6 * 3600
-        ):
-            try:
-                await self._evaluate_hodl_signals()
-            except Exception:
-                logger.exception("HODL signal evaluation failed")
-            self._last_hodl_check = time.time()
+        # HODL + vault scanner, on the services-owner bot only.
+        await self._run_side_services()
 
         # Trade-rate anomaly alarm. Catches strategies that start
         # spam-trading vs their normal baseline (e.g. the 2026-05-09
@@ -977,31 +964,6 @@ class EngineRunner:
             except Exception:
                 logger.exception("Trade-rate alarm check failed")
             self._last_rate_check = time.time()
-
-        # Vault scanner: daily poll, owned by the mainnet bot only. All
-        # bot containers share the same Postgres, so running it in every
-        # container would duplicate the 14 MB catalogue fetch and risk
-        # emitting two `vault.qualified` alerts for the same state
-        # change. Vaults are an on-chain mainnet concept (testnet/paper
-        # have no real vaults) and the /vaults dashboard is pinned to
-        # mainnet, so mainnet is the natural single owner. The published
-        # event's `mode` field tags Telegram messages as MAINNET via
-        # EventBus.publish. The /vaults dashboard reads from the shared
-        # DB so the row is visible from any mode the user browses.
-        # On failure we DON'T advance _last_vault_poll, so a transient HL
-        # outage retries on the next tick instead of waiting a full day.
-        if (
-            self.repo
-            and settings.exchange_mode == "mainnet"
-            and (time.time() - self._last_vault_poll) > 24 * 3600
-        ):
-            try:
-                await self._poll_vaults()
-                self._last_vault_poll = time.time()
-            except Exception:
-                logger.exception(
-                    "Vault scan failed — will retry on next tick"
-                )
 
         # Honor flat-all request before everything else. The request is
         # acknowledged ONLY on full success: acknowledging a flat-all
@@ -2607,6 +2569,38 @@ class EngineRunner:
                 except Exception:
                     logger.exception("rate-alarm: event publish failed")
 
+    async def _run_side_services(self) -> None:
+        """HODL evaluation (every 6h) and the vault scanner (daily), on the
+        services-owner bot only (`SERVICES_OWNER`, roadmap NU-7).
+
+        Exactly one bot per tenant runs them. HODL inputs (price, RSI,
+        on-chain levels) are mode-agnostic, so running them in every
+        container sent three identical verdict-change messages; every bot
+        shares one Postgres, so a second vault scanner would repeat the
+        14 MB catalogue fetch and send `vault.qualified` twice for one
+        state change. Vault data is HL mainnet data whichever bot fetches
+        it. The owner used to be mainnet; it is now whichever mode the
+        dashboard names (default paper), so stopping the real-money bot no
+        longer silences them.
+        """
+        if not settings.services_owner:
+            return
+        now = time.time()
+        if (now - self._last_hodl_check) > 6 * 3600:
+            try:
+                await self._evaluate_hodl_signals()
+            except Exception:
+                logger.exception("HODL signal evaluation failed")
+            self._last_hodl_check = time.time()
+        # On failure we DON'T advance _last_vault_poll, so a transient HL
+        # outage retries on the next tick instead of waiting a full day.
+        if self.repo and (now - self._last_vault_poll) > 24 * 3600:
+            try:
+                await self._poll_vaults()
+                self._last_vault_poll = time.time()
+            except Exception:
+                logger.exception("Vault scan failed — will retry on next tick")
+
     async def _evaluate_hodl_signals(self) -> None:
         """Run all HODL signals; on verdict change vs last tick, push a Telegram
         notification (if configured). HODL signals are advisory-only — they
@@ -2684,65 +2678,36 @@ class EngineRunner:
         logger.info("vault scan result: %s", result)
 
     async def _poll_funding(self) -> None:
-        """Pull HL funding events since the latest stored timestamp and
-        upsert them into the funding_payments table. Best-effort attribution
-        to the strategy that holds the coin at funding time."""
+        """Store HL funding events since the newest stored one in
+        funding_payments. Paging, attribution and the event key are
+        `engine/funding.py`'s, shared with the backfill CLI."""
         from datetime import datetime, timedelta, timezone
         if self.repo is None:
             return
         latest = await self.repo.get_latest_funding_timestamp()
         # On first run, look back 24h. Otherwise from the latest stored ts
-        # minus 1 minute (overlap window — dedup by hash handles duplicates).
+        # minus 1 minute (overlap window — the event key dedupes it).
         if latest is None:
-            start_ms = int(
-                (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp() * 1000
-            )
+            start = datetime.now(timezone.utc) - timedelta(hours=24)
         else:
-            start_ms = int((latest - timedelta(minutes=1)).timestamp() * 1000)
+            start = funding.as_utc(latest) - timedelta(minutes=1)
 
-        try:
-            events = await self.exchange.get_user_funding_history(start_ms)
-        except Exception:
-            logger.exception("Funding fetch failed")
-            return
-
-        if not events:
-            return
-
-        inserted = 0
-        for ev in events:
-            try:
-                ts_ms = int(ev.get("time", 0))
-                h = str(ev.get("hash", ""))
-                delta = ev.get("delta", {})
-                coin = str(delta.get("coin", ""))
-                usdc = float(delta.get("usdc", 0))
-                szi = delta.get("szi")
-                szi_f = float(szi) if szi is not None else None
-                fr = delta.get("fundingRate")
-                fr_f = float(fr) if fr is not None else None
-                if not h or not coin:
-                    continue
-
-                ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-
-                # Best-effort strategy attribution: open position on this coin
-                strat_name = None
-                pos = await self.repo.get_open_position_any(coin)
-                if pos is not None:
-                    strat_name = pos.strategy_name
-
-                ok = await self.repo.upsert_funding_payment(
-                    ts=ts, h=h, coin=coin, usdc=usdc,
-                    szi=szi_f, funding_rate=fr_f, strategy_name=strat_name,
-                )
-                if ok:
-                    inserted += 1
-            except Exception:
-                logger.exception("Failed to record funding event %s", ev)
-
-        if inserted:
-            logger.info("Funding poll: %d new payment(s) recorded", inserted)
+        result = await funding.ingest_funding(
+            self.repo,
+            self.exchange.get_user_funding_history,
+            funding.to_ms(start),
+            max_pages=funding.POLL_MAX_PAGES,
+        )
+        if result.new:
+            logger.info(
+                "Funding poll: %d new payment(s) recorded (%+.4f USDC, %d unattributed)",
+                result.new, result.new_usdc, result.unattributed_new,
+            )
+        if not result.complete:
+            logger.info(
+                "Funding poll: stopped after %d page(s) at %s; the next poll continues",
+                result.pages, result.newest,
+            )
 
     async def _resolve_close_size(
         self, strategy_name: str, symbol: str, expected_side: str

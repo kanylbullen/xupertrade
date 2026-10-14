@@ -33,7 +33,7 @@ import type { Mode } from "@/lib/mode";
  *   its own status dot (green/yellow/red/muted) polled independently.
  * - Pages group: bare paths (no `?mode=`) — Trades is mode-agnostic
  *   with its own filter pill, Strategies is hardcoded descriptive
- *   cards, HODL + Vaults are mainnet-only by design, Backtests is a
+ *   cards, HODL + Vaults read the services-owner bot, Backtests is a
  *   read-only view over the bot CLI's `backtest_runs` history.
  * - Footer: `<UserMenu />` — Credentials / Bots / Settings / Sign out.
  */

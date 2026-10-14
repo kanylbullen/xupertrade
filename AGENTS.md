@@ -126,7 +126,7 @@ and under Claude Code it is the only one: the guard hook refuses
 
 ```bash
 cd bot && uv run pytest -q                                   # bot suite (merge gate for bot changes)
-cd bot && uv run python -m hypertrade.backtest --strategy <name> --days N   # backtest (auto-saves)
+cd bot && uv run python -m hypertrade.backtest --strategy <name> --days N   # backtest (saves under --tenant-id or TENANT_ID; --no-save skips)
 cd dashboard && npm ci && npx tsc --noEmit && npm run lint && npm test && npm run build   # dashboard gates
 python3 .claude/hooks/test_guard_bash.py                     # tests for the push/--no-verify hook
 docker compose up -d                                         # local stack: postgres, redis, dashboard, caddy (no bot — see CLAUDE.md § 2)

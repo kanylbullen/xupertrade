@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatSignedUsd } from "@/lib/money";
 
 export type PositionRow = {
   symbol: string;
@@ -74,7 +75,7 @@ export function PositionCard({ position }: { position: PositionRow }) {
               pnl >= 0 ? "text-green-500" : "text-red-500"
             }`}
           >
-            {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+            {formatSignedUsd(pnl)}
           </p>
           <p className="text-xs text-muted-foreground">Unrealized P&L</p>
         </div>
