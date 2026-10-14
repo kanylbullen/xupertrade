@@ -508,6 +508,9 @@ class HyperLiquidExchange(Exchange):
         (`bot/reports/analysis-2026-09-15.md` § 4).
         """
         is_buy = side == "buy"
+        # A refused close is re-sent while its exit fires, and the runner
+        # logs each attempt: this wrapper's lines for it stay at INFO.
+        warn = logging.INFO if reduce_only else logging.WARNING
 
         # Refuse a coin we have no szDecimals for rather than guess. The
         # old 4 dp fallback sent SOL (szDecimals 2) at 4 dp and HL 422'd it.
@@ -615,7 +618,7 @@ class HyperLiquidExchange(Exchange):
 
         status_str = result.get("status", "")
         if status_str != "ok":
-            logger.warning(
+            logger.log(warn,
                 "HyperLiquid order rejected for %s %s %s: %s",
                 symbol, side, rounded_size, result,
             )
@@ -648,7 +651,7 @@ class HyperLiquidExchange(Exchange):
                     # less): nothing is on the exchange, so nothing may
                     # be booked. Reporting it FILLED at the submitted
                     # size would put a phantom position in the DB.
-                    logger.warning(
+                    logger.log(warn,
                         "HyperLiquid reported a fill of %s for %s %s %s "
                         "(oid=%s) — treating as REJECTED",
                         filled_size, symbol, side, rounded_size,
@@ -674,12 +677,12 @@ class HyperLiquidExchange(Exchange):
                 )
                 error = str(entry["error"])
             else:
-                logger.warning(
+                logger.log(warn,
                     "HyperLiquid unknown status entry for %s %s %s: %s",
                     symbol, side, rounded_size, entry,
                 )
         else:
-            logger.warning(
+            logger.log(warn,
                 "HyperLiquid empty statuses for %s %s %s: %s",
                 symbol, side, rounded_size, result,
             )
@@ -814,8 +817,9 @@ class HyperLiquidExchange(Exchange):
         we degrade to REJECTED — better to surface the timeout than
         misclassify an unrelated existing position as a fresh fill.
         """
+        warn = logging.INFO if reduce_only else logging.WARNING
         if pre_signed is None:
-            logger.warning(
+            logger.log(warn,
                 "Timeout-poll skipped (no pre-order baseline) — "
                 "returning REJECTED for %s %s %s",
                 symbol, side, requested_rounded,
@@ -842,7 +846,7 @@ class HyperLiquidExchange(Exchange):
             try:
                 current = await self._signed_position_size(symbol)
             except Exception:
-                logger.warning(
+                logger.log(warn,
                     "Timeout-poll: read failed at %.0fs (will keep polling)",
                     elapsed,
                 )
@@ -878,7 +882,8 @@ class HyperLiquidExchange(Exchange):
                     price=price, filled_price=fill_px,
                     status=OrderStatus.FILLED,
                 )
-        logger.error(
+        logger.log(
+            logging.INFO if reduce_only else logging.ERROR,
             "Timeout-poll: no delayed fill for %s %s %s after %.0fs — "
             "returning REJECTED. Reconcile will catch it if HL fills late.",
             symbol, side, requested_rounded, elapsed,
