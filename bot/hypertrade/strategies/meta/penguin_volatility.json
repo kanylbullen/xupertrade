@@ -30,12 +30,5 @@
     "ema_slow_len": 26,
     "rsi_diff_len": 14,
     "rsi_avg_len": 7
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1h volatility state, long only)"
   }
 }

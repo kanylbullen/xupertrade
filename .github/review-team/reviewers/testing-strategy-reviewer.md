@@ -29,10 +29,11 @@ whether those tests would catch meaningful regressions before merge.
   `btc_mean_reversion` and `supertrend` before (§ 5 Done).
 - **Differential evidence for behavior-preserving refactors.** A port fix
   or internal refactor claiming "no behavior change" should carry
-  before/after proof — a backtest run (`python -m hypertrade.backtest`,
-  auto-saved to `backtest_runs`; `--no-save` to opt out) or a golden-trade
-  comparison. The `ema_crossover` phantom-reversal fix is the model: a
-  small diff, a large APR change.
+  before/after proof — a backtest run (`python -m hypertrade.backtest
+  --tenant-id <uuid>` or with `TENANT_ID` set, saved to `backtest_runs`;
+  `--no-save` to run without a tenant) or a golden-trade comparison. The
+  `ema_crossover` phantom-reversal fix is the model: a small diff, a
+  large APR change.
 - **Tenant/RLS-scoping tests**: changes to tenant-scoped queries or
   migrations should prove isolation (a cross-tenant read attempt fails),
   not just happy-path CRUD (see alembic 0010/0014 and

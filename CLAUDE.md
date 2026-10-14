@@ -103,7 +103,7 @@ bot/hypertrade/
 ├── reconcile/fills.py  # prices reconcile closes from HL fills
 ├── data/, events/      # candle feed with retry; Redis pub/sub bus
 ├── notify/telegram.py  # notifier + command bot
-├── reports/, backtest/ # weekly_eval.py (/eval, /kelly); backtest CLI + metrics
+├── reports/, backtest/ # weekly_eval.py (/eval); backtest CLI + metrics
 └── db/                 # models.py, repo.py (all SQL, reconcile_positions)
 bot/tests/, bot/alembic/versions/ (0001 → 0017)
 dashboard/src/          # Next.js 16: app/ (pages + /api), proxy.ts (auth gate), components/, lib/
@@ -118,8 +118,8 @@ docker-compose.yml      # postgres, redis, dashboard, caddy, cloudflared (profil
 `xupertrade-bot:latest`. The orchestrator turns a `tenant_bots` row plus the
 tenant's decrypted secrets into one container per tenant per mode
 (`xupertrade-bot-<16-hex id>-<mode>`, no published ports,
-`restart: unless-stopped`). Only the mainnet bot gets
-`TELEGRAM_ENABLED=true`, so Telegram runs there.
+`restart: unless-stopped`). Telegram, HODL, vaults and key reminders run on
+the operator's `HYPERTRADE_SERVICES_OWNER_MODE` bot (paper), other tenants' mainnet bot.
 
 ---
 
@@ -175,7 +175,7 @@ Planned initiatives live in the roadmap.
 
 ### Open — Medium
 
-- [ ] **Volatility-adjusted sizing (option C from Kelly discussion).** Replace fixed `MAX_POSITION_SIZE_USD` with ATR-normalized sizing: `notional = RISK_BUDGET_USD / (atr × atr_mult)` so every trade has roughly the same dollar-risk regardless of asset volatility. Industry standard, no statistical estimation needed. Add `RISK_BUDGET_USD` config; keep `MAX_POSITION_SIZE_USD` as a hard cap. ~3-4h work, defensive change. Pair with the Kelly report for guidance on the budget level. *(Roadmap SE-2.)*
+- [ ] **Volatility-adjusted sizing (option C from Kelly discussion).** Replace fixed `MAX_POSITION_SIZE_USD` with ATR-normalized sizing: `notional = RISK_BUDGET_USD / (atr × atr_mult)` so every trade has roughly the same dollar-risk regardless of asset volatility. Industry standard, no statistical estimation needed. Add `RISK_BUDGET_USD` config; keep `MAX_POSITION_SIZE_USD` as a hard cap. ~3-4h work, defensive change. *(Roadmap SE-2.)*
 - [ ] **Drawdown-based auto-scaling (option B from Kelly discussion).** Add `MAX_STRATEGY_DRAWDOWN_PCT` per strategy. When 80% of cap reached → halve effective margin until 7-day rolling PnL > 0. Limits exposure on degrading strategies without requiring stationary distribution assumptions like Kelly does. *(Roadmap SE-2.)*
 
 ### Open — Low
@@ -332,7 +332,7 @@ through the dashboard `/options` page or
 - **Export_state / restore_from_json:** SL/TP/trail/entry saved to `positions.state_json` and restored verbatim on restart (17 of 22 strategies).
 - **PUBLIC_URL / CADDY_HOST:** the dashboard's user-facing URL with scheme, the base of every redirect; the host Caddy's bootstrap cert is issued for.
 - **vvv_hedge:** in-house, mainnet-only VVV hedge: mandatory EMA-bearish filter plus 2 of 3 other indicators, fixed `holding_vvv` size, hard 10% SL.
-- **Backtest CLI:** `cd bot && uv run python -m hypertrade.backtest --strategy <name> --days N` (`--all`; `--no-save` skips `backtest_runs`).
+- **Backtest CLI:** `cd bot && uv run python -m hypertrade.backtest --strategy <name>`/`--all` needs `--tenant-id`/`TENANT_ID` or `--no-save`.
 
 ---
 

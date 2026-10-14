@@ -39,18 +39,29 @@ En position som öppnades efter backupen finns på börsen men inte i den
 återställda databasen.
 
 - En bot som inte är pausad kör reconcile när den startar och sedan var femte
-  minut. Pass 2 (`reconcile_positions` i `repo.py`) marknadsstänger då varje
-  sådan position. På mainnet är det en riktig order med riktiga pengar, och
-  ingen har bett om den.
+  minut. Pass 2 (`reconcile_positions` i `repo.py`) marknadsstänger en sådan
+  position. På mainnet är det en riktig order med riktiga pengar, och ingen
+  har bett om den.
+- Hur mycket pass 2 stänger beror på vilken kod containern kör. En container
+  kör alltid den image den skapades från, även efter `docker start` och när
+  Docker startar den själv (avsnitt 1.1). En bot vars container skapades från
+  en image med #186 håller i första passet efter boot alla sådana positioner
+  och sätter reconcile hold (avsnitt 1.6). Först när en människa har rensat
+  hold stänger pass 2 en ensam sådan position på ett mynt som boten handlar.
+  En bot från före #186 har inget sådant skydd. Dess första opausade pass
+  marknadsstänger varje sådan position, på alla mynt, i ett och samma pass.
+  Steg 7 visar vilken sort varje container är.
 - Samma sak gäller en position som har bytt sida efter backupen. Pass 1 stänger
-  DB-raden som `wrong-side`, och pass 2 marknadsstänger sedan börspositionen.
+  DB-raden som `wrong-side`, och sedan saknar börspositionen rad. En bot från
+  före #186 marknadsstänger den i samma pass.
 - En DB-rad för en position som stängdes efter backupen stängs av pass 1 och
   bokförs från HL:s fill-historik. Reconcile lägger ingen order för den, men
   radens strategi kan hinna före och lägga en (avsnitt 1.4).
 
-**Mot reconcile skyddar bara paus.** En pausad bot kör reconcile som en
+**Mot hela reconcile skyddar bara paus.** En pausad bot kör reconcile som en
 torrkörning (`_run_reconcile` i `runner.py`). Den skriver ingenting och lägger
-inga order. **Kill switch skyddar inte här.** Den blockerar bara nya öppningar,
+inga order. Reconcile hold, som bara bottar med #186 har, skyddar bara mot
+pass 2. **Kill switch skyddar inte här.** Den blockerar bara nya öppningar,
 och reconcile går förbi den. Paus stoppar inte allt (avsnitt 1.5).
 
 Torrkörningen rapporterar bara pass 1, alltså raderna `PAUSED — not closed
@@ -70,8 +81,8 @@ databasen måste jämföras för hand (steg 1 och 7).
 - Hävstångsoverrides är borta.
 - Mainnet-opt-in är också tom, och det stänger mainnet. Det är det enda som
   hamnar rätt av sig självt.
-- Dashboardens inloggning låser sig (`locked`). Se CLAUDE.md, "Dashboard auth
-  recovery".
+- Dashboardens inloggning låser sig (`locked`). Se
+  [dashboard-auth-recovery.md](dashboard-auth-recovery.md).
 
 En återställd Redis är inte tom, men den saknar allt som ändrats efter
 backupen. Kontrollera flaggorna mot det operatören vill ha (steg 4).
@@ -103,6 +114,47 @@ Steg 7 stänger av de strategierna före unpause.
   till HL, med overrides ur Redis, oavsett paus.
 
 Steg 4 går igenom båda innan någon bot startar.
+
+### 1.6 Sentinel och reconcile hold (NU-2)
+
+Det här avsnittet gäller bara en bot vars container skapades från en image
+med #186. Steg 7 visar hur du ser det. En bot från före #186 läser ingen av
+nycklarna nedan och har ingen hold.
+
+Varje bot har två egna nycklar i Redis, med tenant-id från
+`tenant_bots.tenant_id` (`control.py`):
+
+- `hypertrade:<mode>:t:<tenant_id>:control:sentinel` betyder att botens
+  Redis-tillstånd finns kvar. Dashboarden skriver den när en bot skapas.
+- `hypertrade:<mode>:t:<tenant_id>:control:reconcile_hold` finns medan boten
+  håller. Då öppnar boten ingenting, och pass 2 marknadsstänger ingen
+  börsposition utan DB-rad. Exits körs som vanligt, och pass 1 påverkas inte.
+  Hold pausar inte och rör inte kill switch.
+
+Boten sätter hold själv i tre fall. Bara en människa rensar den, och den
+påminner var 30:e minut tills dess.
+
+- **Sentinel saknas.** Boten läser den varje tick. Saknas den har Redis
+  tappat sitt tillstånd: boten sätter hold, larmar en gång med de öppna
+  DB-positionerna och skriver sentinel igen. En återställd `dump.rdb` har
+  normalt sentinel kvar, men en tom Redis (avsnitt 3) ger hold vid första
+  tick.
+- **Första passet efter boot.** Det första läsbara, opausade passet håller
+  varje börsposition utan DB-rad (`HELD exchange-orphan … — not closed:
+  first reconcile pass since the bot started`). Om någon av dem ligger på ett
+  mynt som boten handlar sätts hold (`Reconcile hold SET`). Efter en
+  återställning är det här positionerna som öppnades efter backupen hamnar.
+  Inga öppningar görs innan ett sådant pass har gått.
+- **Flera på en gång.** Ett senare pass som hittar mer än en börsposition utan
+  rad på mynt som boten handlar håller dem alla och sätter hold.
+
+Rensningen tar bara bort nyckeln. Boten märker den i början av nästa tick,
+inom ungefär en minut (`POLL_INTERVAL_SECONDS`, 60 sekunder som standard), och
+kör då ett reconcile-pass före alla öppningar. Passet marknadsstänger en ensam
+börsposition utan rad på ett mynt som boten handlar, och sätter hold igen om
+flera finns kvar. En position på ett mynt som ingen
+strategi i boten handlar stänger reconcile aldrig. Steg 8 visar hur du läser
+och rensar hold.
 
 ## 2. Återställ hela containern
 
@@ -201,6 +253,17 @@ done
 ```
 
 Tomma hakparenteser betyder att nyckeln saknas och att env-standarden gäller.
+Se också vilka bottar som har sentinel och hold (avsnitt 1.6):
+
+```sh
+r --scan --pattern 'hypertrade:*:control:sentinel'
+r --scan --pattern 'hypertrade:*:control:reconcile_hold'
+```
+
+En bot med #186 som saknar sentinel startar med hold. En bot från före #186
+läser inte sentinel alls (steg 7). Skriv inte in någon sentinel för hand här.
+Hold är rätt läge tills steg 8.
+
 Rätta sedan det här innan någon bot startar:
 
 - **Flat-all.** Om `flat_request_id` har ett värde som skiljer sig från
@@ -258,18 +321,48 @@ docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
 - Om master har en nyare migration än `version_num` (filerna i
   `bot/alembic/versions/` börjar med sitt nummer): vänta tills
   återställningen är kontrollerad. Bygg sedan om imagen som i steg 1 av
-  "Standard deploy command" i CLAUDE.md § 3, och kör först därefter kommandot
-  i `bot/scripts/migrate.sh`. Det kör alembic ur `xupertrade-bot:latest`, och
-  före ombygget är det backupens image, som bara känner till sina egna
-  migrationer och ändå avslutar med 0. Kontrollera `version_num` igen efteråt.
-- Om `docker logs` fallerar: läs containerns loggfil direkt, enligt CLAUDE.md
-  § 3.
+  bot-deploy-fönstret i [deploy.md](deploy.md#bot-deploy-window), och kör
+  först därefter kommandot i `bot/scripts/migrate.sh`. Det kör alembic ur
+  `xupertrade-bot:latest`, och före ombygget är det backupens image, som bara
+  känner till sina egna migrationer och ändå avslutar med 0. Kontrollera
+  `version_num` igen efteråt.
+- Om `docker logs` fallerar: läs containerns loggfil direkt, enligt
+  [health-check.md](health-check.md).
 
 ### Steg 7: kontrollera pariteten, stäng av strategier och starta bottarna
 
 Starta dashboarden med `docker start hypertrade-dashboard-1` och logga in. Om
 `/login` säger "Authentication is locked" kom Redis inte tillbaka. Stanna då
 och utred, i stället för att konfigurera om inloggningen.
+
+Ta reda på vilken kod varje bot kommer att köra. `docker start`, och Docker
+när den startar en container själv, kör containern på den image den skapades
+från. Ett nytt `xupertrade-bot:latest`, också ett ombygge i steg 6, ändrar
+inget för en container som redan finns. Läs filen ur varje stoppad container
+utan att starta den:
+
+```sh
+for c in $(docker ps -a --format '{{.Names}}' | grep '^xupertrade-bot-'); do
+  n=$(docker cp "$c:/app/hypertrade/engine/control.py" - 2>/dev/null | grep -ac reconcile_hold)
+  if [ "$n" -gt 0 ]; then echo "$c: #186"; else echo "$c: FÖRE #186"; fi
+done
+```
+
+En bot `FÖRE #186` har ingen sentinel, ingen hold och inget första pass som
+håller (avsnitt 1.2). Vid unpause marknadsstänger den varje börsposition utan
+DB-rad i sin mode. Välj en av två vägar för varje sådan bot innan den startar:
+
+- **Ny kod.** Bygg om imagen som i steg 1 av bot-deploy-fönstret i
+  [deploy.md](deploy.md#bot-deploy-window). Det kräver Phase. Starta sedan
+  boten från dashboarden med Stop och därefter Start (med passfras), i stället
+  för med `docker start` nedan. Start skapar en ny container ur den nya
+  imagen. Den håller i sitt första opausade pass (avsnitt 1.6). Start skriver
+  ingen sentinel, så om Redis saknar en sätter boten hold redan vid första
+  tick.
+- **Gammal kod.** Före unpause i steg 8 stänger du själv på HL (reduce-only)
+  varje position i botens mode som saknar DB-rad eller har en rad på motsatt
+  sida (tabellen nedan), på alla mynt. Det första riktiga passet kommer då
+  inom ungefär sex minuter efter unpause, inte inom en.
 
 Jämför facit från steg 1 med de öppna raderna i databasen:
 
@@ -281,8 +374,8 @@ docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
 
 | Börsen | Databasen | Vad som händer efter unpause | Vad du gör, innan bottarna startar |
 |---|---|---|---|
-| Position | Ingen rad | Pass 2 marknadsstänger positionen | Bestäm nu. Stäng den själv på HL (reduce-only), eller låt reconcile stänga den. Att skapa en DB-rad för hand avråds från, eftersom strategin saknar SL-state för positionen. |
-| Position | Rad med motsatt sida | Radens strategi kan skicka en exit som förstorar positionen (avsnitt 1.4). Pass 1 stänger raden (`wrong-side`), och pass 2 marknadsstänger sedan positionen | Stäng av strategin (nedan). Bestäm om positionen som för en position utan rad. |
+| Position | Ingen rad | Med #186: första passet håller positionen och sätter hold om boten handlar myntet (avsnitt 1.6). När hold rensas marknadsstänger reconcile en ensam sådan position på ett mynt som boten handlar. Före #186: första opausade passet marknadsstänger den | Bestäm nu. Stäng den själv på HL (reduce-only), eller låt reconcile stänga den i steg 8 om den är ensam och boten har #186. Att skapa en DB-rad för hand avråds från, eftersom strategin saknar SL-state för positionen. |
+| Position | Rad med motsatt sida | Radens strategi kan skicka en exit som förstorar positionen (avsnitt 1.4). Pass 1 stänger raden (`wrong-side`), och pass 2 håller sedan positionen som en position utan rad. Före #186 marknadsstänger pass 2 den i samma pass | Stäng av strategin (nedan). Bestäm om positionen som för en position utan rad. |
 | Ingen position | Öppen rad | Radens strategi kan skicka en exit som öppnar en ny position (avsnitt 1.4). Pass 1 stänger raden och bokför den från fill-historiken | Stäng av strategin (nedan). Kontrollera PnL efteråt. |
 | Position | Rad med samma sida, men `entry_price` klart skilt från HL:s `entryPx` (flera rader på symbolen: jämför det storleksviktade snittet) | Ingenting. Reconcile ser paritet, men positionen öppnades efter backupen och styrs av en strategi som inte öppnade den | Stäng positionen själv på HL (reduce-only). Då är raden en "Ingen position / Öppen rad". |
 | Position | Rad med samma sida och annan storlek | Avvikelsen loggas bara | Notera den. |
@@ -305,9 +398,9 @@ docker exec hypertrade-postgres-1 psql -U postgres -d hypertrade -c \
   "SELECT mode, container_name FROM tenant_bots WHERE is_running ORDER BY mode;"
 ```
 
-Starta dem en i taget med `docker start <container_name>`. Börja med paper och
-ta mainnet sist. **Tiden börjar gå vid första bot-starten: unpausa inom 30
-minuter.**
+Starta dem en i taget med `docker start <container_name>`, utom de bottar
+från före #186 som ska få ny kod (ovan). Börja med paper och ta mainnet sist.
+**Tiden börjar gå vid första bot-starten: unpausa inom 30 minuter.**
 
 Om dashboarden inte når en bot (401) är Redis-kopian äldre än botens senaste
 start. Starta då om just den boten från dashboarden (Settings → Bots → restart,
@@ -326,6 +419,13 @@ docker logs --since 10m <container_name> 2>&1 | grep -i reconcile
   tabellen.
 - Börspositioner utan DB-rad syns inte här (avsnitt 1.2). För dem är tabellen
   det enda underlaget.
+- `hold <container_name>` (funktionen i
+  [health-check.md](health-check.md#reconcile-hold-nu-2)) visar vilken kod
+  boten faktiskt kör. `{"reconcile_hold": …}` betyder #186, och
+  `HTTP Error 404` betyder före #186. Svaret ska stämma med kontrollen ovan.
+  En bot som har startats om från dashboarden kör `xupertrade-bot:latest`, och
+  det är backupens image om den inte har byggts om. Svarar en bot 404 gäller
+  valet ovan för den.
 
 Om något inte stämmer: stoppa boten och utred innan du går vidare.
 
@@ -340,10 +440,36 @@ docker exec hypertrade-redis-1 redis-cli SET hypertrade:<mode>:control:paused 0
 
 - En mode som var pausad i backupen (steg 4) förblir pausad. Det beslutet är
   operatörens.
-- Det första riktiga reconcile-passet körs inom ungefär sex minuter. Följ
-  loggen tills det har gått. Det ska göra exakt det som tabellen i steg 7
-  förutsade, med en rad `Reconcile: closed orphan` eller `closed wrong-side`
-  för varje sådan rad.
+- Det första riktiga reconcile-passet körs vid första tick efter unpause,
+  alltså inom ungefär en minut. En bot från före #186 kör det inom ungefär
+  sex minuter. Följ loggen tills det har gått. Det ska göra exakt det som
+  tabellen i steg 7 förutsade, med en rad `Reconcile: closed orphan` eller
+  `closed wrong-side` för varje sådan rad, och en rad `HELD exchange-orphan`
+  för varje börsposition utan rad (avsnitt 1.6). En bot från före #186
+  skriver i stället `closed exchange-orphan` för varje sådan position som
+  finns kvar.
+- Läs varje bots hold med funktionen `hold` i
+  [health-check.md](health-check.md#reconcile-hold-nu-2). Den tar nyckeln ur
+  containerns env, så den fungerar även när Redis-kopian är äldre än boten.
+  `hold <container_name>` svarar `{"reconcile_hold": true}` eller `false`.
+  En 503 betyder att boten inte kan läsa Redis, och då håller den också.
+  `HTTP Error 404` betyder att boten kör kod från före #186 och inte har
+  någon hold (steg 7).
+- Rensa hold först när varje hållen position är stängd för hand på HL, eller
+  när bara en återstår och reconcile ska stänga den:
+  `hold <container_name> false`. Det går också med
+  `docker exec hypertrade-redis-1 redis-cli DEL hypertrade:<mode>:t:<tenant_id>:control:reconcile_hold`.
+  Båda kräver att Redis tar emot skrivningar. Annars svarar API:t 503, och
+  hold ligger kvar. Använd hellre API:t. Det avslutar också en hold som boten
+  bara har i minnet för att skrivningen till Redis misslyckades, och det
+  skriver sentinel om boten har sett att den saknas. I båda fallen sätter
+  boten hold igen vid nästa tick efter en DEL.
+- Boten märker rensningen i början av nästa tick, inom ungefär en minut, och
+  kör då ett reconcile-pass (avsnitt 1.6). Läs hold igen först när det passet
+  har gått. Vänta minst två minuter, och tills loggen efter rensningen har en
+  ny rad `Reconcile: … db rows, … exchange positions`. Passet skriver
+  `closed exchange-orphan` för en position det stängde och
+  `Reconcile hold SET` om det satte hold igen.
 - Slå på en strategi från steg 7 igen först när dess rad är stängd, och bara de
   du själv lade till:
   `docker exec hypertrade-redis-1 redis-cli SREM hypertrade:<mode>:control:disabled <strategy_name>`.
@@ -354,8 +480,8 @@ docker exec hypertrade-redis-1 redis-cli SET hypertrade:<mode>:control:paused 0
 
 ### Steg 9: kontrollera
 
-- Kör paritetskontrollen i CLAUDE.md § 3 ("Standard 'is the bot OK?' check")
-  för varje mode. Börsen och databasen ska stämma överens.
+- Kör paritetskontrollen i [health-check.md](health-check.md) för varje mode.
+  Börsen och databasen ska stämma överens, och ingen bot ska hålla (steg 8).
 - Heartbeat ska vara färsk, equity-snapshots ska skrivas och loggen ska vara
   fri från fel.
 - `disabled`-mängderna ska vara som avsett, och `leverage` per position på HL

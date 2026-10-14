@@ -194,6 +194,28 @@ async def main() -> None:
     strategies = [get_strategy(name) for name in allowed_names]
     logger.info("Active strategies: %s", [s.name for s in strategies])
 
+    # Side-services ownership (roadmap NU-7): one line at boot says whether
+    # this bot runs HODL, the vault scanner and the key reminders, so the
+    # log shows which container went quiet when they stop.
+    if settings.services_owner:
+        logger.info(
+            "Services owner: this %s bot runs HODL, the vault scanner and "
+            "key-expiry reminders (Telegram %s)",
+            settings.exchange_mode.upper(),
+            "on" if settings.telegram_enabled else "OFF",
+        )
+        if not settings.effective_vault_tracking_address:
+            logger.warning(
+                "Services owner has no VAULT_TRACKING_ADDRESS — /vaults will "
+                "list no holdings. Set it in Phase (operator) or on the "
+                "Credentials page, then restart this bot."
+            )
+    else:
+        logger.info(
+            "Not the services owner: HODL, vault scanner and key reminders "
+            "are off on this %s bot", settings.exchange_mode.upper(),
+        )
+
     # Now that exchange + control + strategies exist, start Telegram
     # (only if enabled on this bot instance — typically only one mode's bot
     # has TELEGRAM_ENABLED=true to avoid 3 simultaneous Telegram pollers)
