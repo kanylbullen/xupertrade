@@ -22,12 +22,5 @@
     "rsi_length": 12,
     "williams_length_6": 6,
     "williams_length_12": 12
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1h ensemble, long & short, EMA50/200 trend-filter)"
   }
 }

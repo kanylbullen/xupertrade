@@ -1,4 +1,5 @@
 import { formatDateTime } from "@/lib/format";
+import { formatUsd } from "@/lib/money";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -71,7 +72,7 @@ export function TradeTable({ trades }: { trades: Trade[] }) {
               ${trade.price.toLocaleString()}
             </TableCell>
             <TableCell className="text-right font-mono text-muted-foreground">
-              ${(trade.fee ?? 0).toFixed(2)}
+              {formatUsd(trade.fee ?? 0)}
             </TableCell>
             <TableCell className="max-w-[200px] truncate text-xs text-muted-foreground">
               {trade.reason}

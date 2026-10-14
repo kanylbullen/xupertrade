@@ -15,18 +15,11 @@
   ],
   "weaknesses": [
     "No SL — risk control depends entirely on engine's MAX_POSITION_SIZE_USD cap.",
-    "180d backtest: -6.9% APR, 33% win rate, 96 trades — over-trades in choppy regimes.",
-    "Funding cost on 96 round-trips adds up — strategy should be paired with funding-aware analysis."
+    "Flips on every cross, so it over-trades in choppy regimes.",
+    "Funding cost adds up over frequent round-trips — pair it with funding-aware analysis."
   ],
   "params": {
     "atr_period": 16,
     "factor": 3.11
-  },
-  "stats": {
-    "apr": "N/A",
-    "sharpe": "N/A",
-    "maxDrawdown": "N/A",
-    "winRate": "N/A",
-    "trades": "Active (1h SuperTrend flips, long & short)"
   }
 }
