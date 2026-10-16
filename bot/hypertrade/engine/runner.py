@@ -334,6 +334,10 @@ class EngineRunner:
         self._flat_all_notices: set[tuple] = set()
         self._kill_switch_owed = False
         self._kill_switch_was: str | None = None  # before this bot set it
+        # Coins of open rows whose strategy is not built in this bot (boot
+        # restore). Such a strategy opens no row at runtime, so this is a
+        # superset: the NU-5b exit fallback never closes those coins.
+        self._unbuilt_row_coins: set[str] = set()
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -555,6 +559,7 @@ class EngineRunner:
                     pos.symbol, pos.side, pos.strategy_name,
                 )
                 unmanaged.append(f"{pos.strategy_name} {pos.symbol} {pos.side}")
+                self._unbuilt_row_coins.add(pos.symbol)
                 continue
             self._restore_strategy_from_row(strat, pos)
             restored += 1
@@ -673,6 +678,16 @@ class EngineRunner:
             hold_orphans=hold or first,
             traded_symbols=traded,
         )
+        for s in self.strategies:
+            if s.symbol in result.closed_orphans and _holds(s):
+                # Pass 2 closes only coins no row covers, so this is a
+                # phantom (an open whose row write failed). Left holding,
+                # its stop could later close another row's position
+                # through the NU-5b exchange-size fallback.
+                await self._reset_strategy_state(
+                    s.name, why=f"reconcile closed the {s.symbol} exchange "
+                    "orphan it held without a DB row",
+                )
         if hold in (None, _HOLD_SET) and not (
             paused or result.skipped or result.unresolved_orphans
         ):
@@ -3105,7 +3120,8 @@ class EngineRunner:
         the strategy is re-armed) when the exchange is unreadable or holds
         none of it, or another row may share the coin HL nets: with
         allow_multi_coin on, another strategy trading the coin, whatever it
-        holds in memory; with it unreadable, another holder in memory."""
+        holds in memory; with it unreadable, another holder in memory;
+        whatever the flag, a row at boot of a strategy not built here."""
         try:
             multi = bool(self.control) and await self.control.get_allow_multi_coin()
             others = sorted(s.name for s in self.strategies if multi
@@ -3113,6 +3129,8 @@ class EngineRunner:
         except Exception:
             others = sorted(s.name for s in self.strategies if s.symbol == symbol
                             and s.name != name and _holds(s))
+        if symbol in self._unbuilt_row_coins:
+            others.append("a strategy not running in this bot")
         held, why = 0.0, f"{', '.join(others)} may hold {symbol} too"
         if not others:
             try:

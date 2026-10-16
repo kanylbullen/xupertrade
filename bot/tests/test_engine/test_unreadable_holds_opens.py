@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import logging
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from hypertrade.config import settings
+from hypertrade.db import repo as repo_module
 from hypertrade.engine.runner import (
     CLOSE_REJECTS_BEFORE_WIDE_BAND as K,
     WIDE_CLOSE_BAND,
@@ -467,3 +469,59 @@ async def test_a_fill_the_db_missed_re_arms_nothing(repo, close):
     assert await runner._restore_from_db(())
     await runner._run_strategy(strat)
     assert ex.book == {} and await repo.get_open_positions() == []
+
+
+async def test_reconcile_closing_a_phantoms_orphan_resets_it(repo, monkeypatch):
+    """r2-exits-phantom-1: an open filled, its row write failed and the
+    strategy kept holding (r1-exits-1); reconcile pass 2 then market-closed
+    the orphan and nothing reset the strategy. In a later DB blip its stop
+    closed, through the exchange-size fallback, whatever held the coin by
+    then: here another strategy's row. A holder of another coin stays."""
+    monkeypatch.setattr(repo_module, "asyncio", SimpleNamespace(sleep=AsyncMock()))
+    phantom, other, btc = Opener(), Exit(), Exit("BTC")
+    other.name = "t_ETH"
+    ex, runner, bus = await _ticking(
+        repo, phantom, other, btc, positions=[_long("BTC")],
+    )
+    await _hold(repo, btc)
+    await runner.control.set_kill_switch(False)
+    repo.record_trade_and_open_position = AsyncMock(side_effect=ConnectionError("db"))
+    with pytest.raises(TradeDbDivergence):
+        await runner._run_strategy(phantom)
+    del repo.record_trade_and_open_position
+    assert phantom.side == "long" and "ETH" in ex.book
+
+    result = await runner._run_reconcile("Periodic")
+
+    assert result.closed_orphans == ["ETH"] and "ETH" not in ex.book
+    assert phantom.side is None and btc.side == "long"
+    assert not await runner.control.load_strategy_state(phantom.name)
+    ex.book["ETH"] = _long()
+    await _hold(repo, other)
+    phantom.on_candle = lambda candles: Exit.on_candle(phantom, candles)  # stop hit
+    repo.get_open_position = AsyncMock(side_effect=ConnectionError("db blip"))
+    await runner._run_strategy(phantom)
+    assert len(ex.orders) == 2 and ex.book["ETH"].size == 1.0
+
+
+async def test_an_unbuilt_strategys_row_keeps_the_exit_fallback_off_its_coin(repo):
+    """r2-exits-unmanaged-2: the fallback's co-owners came from the built
+    strategies and the flag, so a row of a strategy not built this boot
+    (allowlist, mainnet opt-in, a cap) was invisible and its position, netted
+    into the coin, was closed with the exit's. Its coin is now shared."""
+    strat = Exit()
+    ex, runner, bus = await _ticking(repo, strat, positions=[_long(size=2.0)])
+    await repo.open_position(
+        strategy_name="gone_ETH", symbol="ETH", side="long", size=1.0,
+        entry_price=ENTRY,
+    )
+    await _hold(repo, strat)
+    strat.side = None
+    assert await runner._restore_from_db(()) and strat.side == "long"
+    repo.get_open_position = AsyncMock(side_effect=ConnectionError("db blip"))
+
+    with pytest.raises(SignalNotSent):
+        await runner._run_strategy(strat)
+
+    assert ex.orders == [] and ex.book["ETH"].size == 2.0
+    assert strat.side == "long", "re-armed: the exit goes once the row reads"

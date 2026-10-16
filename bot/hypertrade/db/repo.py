@@ -94,6 +94,10 @@ class ReconcileResult:
     """Symbols pass 2 meant to close and did not — a re-read did not
     confirm them, or the close failed. Such a pass does not count (NU-2)."""
 
+    closed_orphans: list[str] = field(default_factory=list)
+    """Symbols pass 2 market-closed. No row covered them, so a strategy
+    still holding one in memory holds a phantom; the runner resets it."""
+
     @property
     def took_action(self) -> bool:
         return bool(self.actions or self.failures)
@@ -1250,6 +1254,7 @@ class Repository:
                     continue
 
                 result.unresolved_orphans.remove(sym)
+                result.closed_orphans.append(sym)
                 fill_price = float(order.filled_price or ex_pos.entry_price or 0.0)
                 # Reduce-only: a position cut since the read fills less,
                 # and what filled is what is booked and reported.
