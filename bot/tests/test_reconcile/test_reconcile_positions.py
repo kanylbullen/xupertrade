@@ -25,7 +25,7 @@ import pytest
 from sqlalchemy import select
 
 from hypertrade.db import models
-from hypertrade.db.repo import Repository
+from hypertrade.db.repo import Repository, _OrphanClosePrice
 from hypertrade.exchange.base import (
     ExchangeReadError,
     Order,
@@ -269,11 +269,16 @@ async def test_orphan_close_priced_from_fill_writes_trade(repo):
     assert pos.is_open is False
     assert pos.exit_price == pytest.approx(110.0)
     assert pos.pnl == pytest.approx(9.5)
+    # NU-6.1 attributes funding by [opened_at, closed_at): a closed row
+    # with no closed_at would claim every later payment.
+    assert pos.closed_at is not None
 
     trades = await _rows(repo, models.Trade)
     assert len(trades) == 1
     assert trades[0].order_id == "991122"
     assert trades[0].side == "sell"
+    # Close size comes from the DB row, never from the fill or the price.
+    assert trades[0].size == pytest.approx(1.0)
     assert trades[0].price == pytest.approx(110.0)
     assert trades[0].fee == pytest.approx(0.5)
     assert trades[0].pnl == pytest.approx(9.5)
@@ -553,11 +558,12 @@ async def test_close_exchange_orphans_false_places_no_orders(repo):
 
 
 @pytest.mark.asyncio
-async def test_fill_already_booked_as_a_trade_is_not_reused(repo):
+async def test_fill_already_booked_as_a_trade_is_not_reused(repo, caplog):
     """The sharp edge: daily_long_0830's 08:15 sell on BTC is already a
     `trades` row from its own signal path. Handing it to an orphaned
     hash_supertrend row as an authoritative "(fill)" price would book
-    the same money twice, to two strategies."""
+    the same money twice, to two strategies. The log says why the fill
+    was refused, so an ESTIMATED close next to a real fill is explained."""
     await repo.record_trade(
         order_id="991122",
         strategy_name="daily_long_0830",
@@ -572,8 +578,15 @@ async def test_fill_already_booked_as_a_trade_is_not_reused(repo):
     await _open_row(repo, strategy="hash_supertrend", side="long", entry=100.0)
     ex = FakeExchange([[], []], fills=[_sell_fill()], mid=105.0)
 
-    result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+    with caplog.at_level("INFO", logger="hypertrade.db.repo"):
+        result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
 
+    assert any(
+        r.message.startswith(
+            "Reconcile: 1 of 1 fill(s) are already booked as trades rows"
+        )
+        for r in caplog.records
+    )
     assert len(result.actions) == 1
     assert "ESTIMATED" in result.actions[0]
     pos = (await _rows(repo, models.PositionRecord))[0]
@@ -607,6 +620,9 @@ async def test_a_fill_prices_one_row_and_the_next_falls_back(repo):
     assert fill_trade.price == pytest.approx(110.0)
     assert fill_trade.fee == pytest.approx(0.5)
     assert est_trade.price == pytest.approx(105.0)
+    # Each Trade carries its own row's size, not a constant.
+    assert fill_trade.size == pytest.approx(0.0025)
+    assert est_trade.size == pytest.approx(0.0025)
     # The 0.5 fill fee is charged once; the estimate carries only the
     # configured taker rate on its own notional.
     assert est_trade.fee < 0.01
@@ -800,7 +816,11 @@ async def test_truncated_fill_page_is_logged(repo, caplog):
     with caplog.at_level("WARNING", logger="hypertrade.db.repo"):
         await repo.reconcile_positions(ex, confirm_delay_seconds=0)
 
-    assert any("may be truncated" in r.message for r in caplog.records)
+    assert any(
+        r.message.startswith("Reconcile: fetch_user_fills returned 2000")
+        and "may be truncated" in r.message
+        for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -818,3 +838,107 @@ async def test_clean_pass_reports_the_counts(repo, caplog):
     assert result.db_open == 1
     assert result.exchange_open == 1
     assert any("Reconcile: clean" in r.message for r in caplog.records)
+
+
+# ----------------------------------------------------------------------
+# 9. The fill ledger and the priced row close (#196)
+# ----------------------------------------------------------------------
+
+
+class _FillsReadRaises(FakeExchange):
+    async def fetch_user_fills(self, address=None, since_ms=None):
+        self.fills_calls.append(since_ms)
+        raise RuntimeError("userFillsByTime: 502")
+
+
+class _SignalPathClosesTheRow(FakeExchange):
+    """A strategy exit closes the row after reconcile read it and before
+    reconcile writes; here, while reconcile fetches the fills."""
+
+    def __init__(self, *args, repo, strategy, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._repo = repo
+        self._strategy = strategy
+
+    async def fetch_user_fills(self, address=None, since_ms=None):
+        await self._repo.close_position(
+            self._strategy, "BTC", exit_price=120.0, pnl=20.0,
+        )
+        return await super().fetch_user_fills(address=address, since_ms=since_ms)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fills_read_prices_at_the_mid(repo, caplog):
+    """A raising `fetch_user_fills` neither skips the close nor aborts
+    the pass: the ledger is empty, the row prices at the mid and says
+    so. HyperLiquidExchange swallows its own errors today; this pins the
+    fallback for a wrapper that does not."""
+    await _open_row(repo, side="long", size=1.0, entry=100.0)
+    ex = _FillsReadRaises([[], []], mid=105.0)
+
+    with caplog.at_level("INFO", logger="hypertrade.db.repo"):
+        result = await repo.reconcile_positions(ex, confirm_delay_seconds=0)
+
+    assert ex.fills_calls == [int(OPENED_AT.timestamp() * 1000)]
+    assert len(result.actions) == 1
+    assert result.failures == []
+    pos = (await _rows(repo, models.PositionRecord))[0]
+    assert pos.is_open is False
+    assert pos.exit_price == pytest.approx(105.0)
+    trades = await _rows(repo, models.Trade)
+    assert len(trades) == 1
+    assert trades[0].reason == "ESTIMATED reconcile: orphan close @ mid"
+    assert any(
+        r.message.startswith("Reconcile: fetch_user_fills failed")
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_row_closed_meanwhile_is_not_closed_twice(repo):
+    """The strategy's own close stands: no second exit price or PnL over
+    it, no second Trade row, and no second PnL into the daily-loss
+    counter."""
+    await _open_row(repo, strategy="hash_momentum", side="long", entry=100.0)
+    ex = _SignalPathClosesTheRow(
+        [[], []], fills=[_sell_fill()], repo=repo, strategy="hash_momentum",
+    )
+    seen: list[tuple] = []
+
+    async def cb(name, pnl):
+        seen.append((name, pnl))
+
+    result = await repo.reconcile_positions(
+        ex, on_strategy_close=cb, confirm_delay_seconds=0,
+    )
+
+    assert result.actions == []
+    assert result.failures == []
+    pos = (await _rows(repo, models.PositionRecord))[0]
+    assert pos.is_open is False
+    assert pos.exit_price == pytest.approx(120.0)
+    assert pos.pnl == pytest.approx(20.0)
+    assert await _rows(repo, models.Trade) == []
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_close_row_priced_writes_nothing_for_a_closed_or_missing_row(repo):
+    """The helper's own contract, which NU-5a's external close reuses:
+    a row already closed, or gone, gives None and nothing is written."""
+    pos = await _open_row(repo, strategy="hash_momentum", side="long", entry=100.0)
+    await repo.close_position("hash_momentum", "BTC", exit_price=120.0, pnl=20.0)
+    priced = _OrphanClosePrice(
+        exit_price=110.0, fee=0.5, pnl=9.5, order_id="991122",
+        reason="reconcile: orphan close (fill)", estimated=False,
+    )
+
+    async with repo._session_factory() as session:
+        assert await repo._close_row_priced(session, pos.id, priced, NOW) is None
+        assert await repo._close_row_priced(session, 10**9, priced, NOW) is None
+        await session.commit()
+
+    row = (await _rows(repo, models.PositionRecord))[0]
+    assert row.exit_price == pytest.approx(120.0)
+    assert row.pnl == pytest.approx(20.0)
+    assert await _rows(repo, models.Trade) == []
