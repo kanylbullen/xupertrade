@@ -171,16 +171,23 @@ Planned initiatives live in the roadmap.
 
 ### Open — High (impacts trading correctness)
 
-(none currently)
+- [ ] **A refused edge exit is lost after its bar or a restart.** Owner: NU-5 C, NU-5d. [D1][d]
 
 ### Open — Medium
 
-- [ ] **Volatility-adjusted sizing (option C from Kelly discussion).** Replace fixed `MAX_POSITION_SIZE_USD` with ATR-normalized sizing: `notional = RISK_BUDGET_USD / (atr × atr_mult)` so every trade has roughly the same dollar-risk regardless of asset volatility. Industry standard, no statistical estimation needed. Add `RISK_BUDGET_USD` config; keep `MAX_POSITION_SIZE_USD` as a hard cap. ~3-4h work, defensive change. *(Roadmap SE-2.)*
-- [ ] **Drawdown-based auto-scaling (option B from Kelly discussion).** Add `MAX_STRATEGY_DRAWDOWN_PCT` per strategy. When 80% of cap reached → halve effective margin until 7-day rolling PnL > 0. Limits exposure on degrading strategies without requiring stationary distribution assumptions like Kelly does. *(Roadmap SE-2.)*
+- [ ] **Rows larger than the exchange are never settled from fills.** Owner: settlement PR. [D2][d]
+- [ ] **A late fill is booked at a guessed price under a new id.** Owner: late-fill PR. [D3][d]
 
 ### Open — Low
 
-(none currently)
+- [ ] **allow_multi_coin: a refused close beside another row is dropped.** Owner: C plan. [D4][d]
+- [ ] **A short pass-2 orphan close releases the NU-2 hold.** Owner: NU-2 follow-up. [D5][d]
+- [ ] **An open can stack onto a position no row owns.** Owner: NU-5c. [D6][d]
+- [ ] **The "flip open failed" Telegram lacks `order.error`.** Owner: order path. [D7][d]
+- [ ] **Each failed HL read logs a traceback.** Accepted noise. [D8][d]
+- [ ] **A refused close alerts on its first miss.** Operator call. [D9][d]
+
+[d]: docs/plans/nu5-deferred-defects.md
 
 ---
 
