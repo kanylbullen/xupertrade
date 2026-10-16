@@ -16,7 +16,10 @@ Records are never deleted.
 
 **Ids.** #192's ids are the ones its review triage comments use; an
 `r1-` id is from the round fixed in `8d27bbe`. `a-` ids are from A's
-first review round, triaged in the message of A's commit `c4cc958`.
+first review round, triaged in the message of A's commit `c4cc958`;
+`d-` ids from the review of A's later delta (`eda22cc`, `72cec9b`),
+triaged in #199's comments and the message of the commit that fixed
+them.
 **Source** names the #192 commits (branch `fix/reduce-only-closes`) that
 hold the code or tests to port, where one exists.
 
@@ -172,29 +175,43 @@ planned PR, accepted with no owner, process items). The lists have no
 
 ## D4 · allow_multi_coin: a refused close beside another row is dropped
 
-- **Severity:** Low. It is live only while `allow_multi_coin` is on,
-  which decision 5.11 rules out; the Redis flag remains.
-- **Findings:** A a-reduce-only-semantics-2, a-alerts-and-logs-5.
+- **Severity:** Low. A readable sibling is there only while
+  `allow_multi_coin` is on, which decision 5.11 rules out; the Redis
+  flag remains. The unreadable branch needs no flag: with
+  `allow_multi_coin` off too, a refused close is dropped when two reads
+  of its coin's rows, `CLOSE_CONFIRM_DELAY_SECONDS` (2 s) apart, both
+  fail, that is a DB outage that coincides with the refusal. Until A's
+  delta fix (d-fixes-1) one failed read was enough.
+- **Findings:** A a-reduce-only-semantics-2, a-alerts-and-logs-5,
+  d-fixes-1.
 - **What:** A's sibling guard in `_close_left_open`. When another open
-  row shares the coin, or the coin's rows cannot be read, a refused or
-  zero-filled close is handled as on master. A plain close is dropped:
-  no re-arm, no streak, no wider band and, beside a readable sibling, no
-  alert, only one WARNING saying the row is left open and managed by
-  nothing. A flip re-aligns to its row. The guard is there because HL
-  nets the coin. Booking at once could spend a liquidation fill both
-  rows share, and a re-send after an unknown outcome could close the
-  other row's position (#192's r1-double-close-1). Since A's last
-  check (exits-money-r1-1), a plain close dropped because the rows
-  were unreadable does alert, once per (strategy, coin) and bar through
-  `_note_refusal`: there, most likely no row shares the coin. The
-  effect below is the case where a row readably does.
+  row shares the coin, or two reads of the coin's rows fail
+  (`_shares_coin`), a refused or zero-filled close is handled as on
+  master. One failed read is read again, so a single DB blip leaves an
+  ordinary refused exit, re-armed and sent again. A plain close is
+  dropped: no re-arm, no streak, no wider band and, beside a readable
+  sibling, no alert, only one WARNING saying the row is left open and
+  managed by nothing. A flip re-aligns to its row. The guard is there
+  because HL nets the coin. Booking at once could spend a liquidation
+  fill both rows share, and a re-send after an unknown outcome could
+  close the other row's position (#192's r1-double-close-1). A plain
+  close dropped because the rows were unreadable alerts, once per
+  (strategy, coin) and bar through `_note_refusal`, and the alert is
+  sent each tick until the bus takes it: there, most likely no row
+  shares the coin.
 - **Effect:** the strategy has dropped the position, while the row and
   the exchange still agree, so reconcile does nothing. The live position
-  is managed by no one, and no Telegram says so.
+  is managed by no one until a restart restores the strategy from its
+  row. Beside a readable sibling no Telegram says so; after two failed
+  reads one alert does.
 - **Owner:** the C plan's question 6 decides whether C keeps A's rule
-  (its recommendation) or owns closes beside a sibling too. Either way
-  the dropped close should at least alert (a-alerts-and-logs-5); no PR
-  carries that yet.
+  (its recommendation) or owns closes beside a sibling too. As #197
+  words it, the question covers `allow_multi_coin` only; it must also
+  cover the unreadable branch, which is live with the flag off and ends
+  an exit on an unreadable read, where decision 5.4 lets only a readable
+  pause block one. Either way the dropped close beside a readable
+  sibling should at least alert (a-alerts-and-logs-5); no PR carries
+  that yet.
 - **Source:** none in #192. The guard is A's (`355859b`, reworded in
   `c4cc958`).
 
@@ -277,8 +294,10 @@ planned PR, accepted with no owner, process items). The lists have no
   filled"). A publishes an ErrorOccurred on the first miss, which
   reaches Telegram on mainnet; that follows the roadmap's NU-5a ("ett
   larm per (strategi, coin)"). A one-tick
-  refusal that the next tick fills (no liquidity inside the 0.5 % band,
-  a timed-out POST) still reaches a human. The #158 fetch-outage
+  refusal that the next tick fills (no liquidity inside the 0.5 % band)
+  still reaches a human. A timed-out close is not that case: since
+  `c4cc958` its outcome is unknown, so it is not sent again and alerts
+  once (d-pr-body-5). The #158 fetch-outage
   aggregator sets the opposite precedent: a window that clears before
   its threshold never notifies. Since `c4cc958` an episode ends only on
   a fill, a reset to flat or `CLOSE_EPISODE_QUIET_SECONDS` (30 min, its
@@ -377,8 +396,12 @@ that takes one says so here.
   a readable clamp (the settlement PR, D2). `c4cc958` routes these
   owners to A's PR Notes.
 - **a-scope-and-size-1.** A is over AGENTS.md's 600-added-line budget.
-  At `c4cc958` it adds 1,937 lines to the A0 base: 546 code, 17 docs
-  and 1,374 tests. The tests carry the excess, because NU-5a's "Klart
-  när" asks for fault-injection tests against the real Repository.
-  Waiving the budget is the operator's call, argued in A's PR Notes
-  (item 4).
+  At `c4cc958` it added 1,937 lines to the A0 base: 546 code, 17 docs
+  and 1,374 tests; with its delta fix it adds 2,267 against master:
+  646 code, 71 docs, 1,550 tests. The tests carry the excess, as NU-5a's
+  "Klart när" asks for fault-injection tests against the real
+  Repository. Waiving the budget is the operator's call, argued in A's
+  PR Notes (item 4). The PR body reports the waiver as given on
+  2026-10-14, the day of the split, outside GitHub; until this line
+  nothing in the repo or on GitHub recorded it (d-pr-body-4). The
+  operator's merge of A is its record here.

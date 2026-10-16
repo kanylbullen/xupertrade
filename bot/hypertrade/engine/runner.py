@@ -174,6 +174,15 @@ def _exchange_text(pos) -> str:
     return f"{pos.side} {pos.size}" if pos is not None else "flat"
 
 
+def _brief_error(e: BaseException, limit: int = 120) -> str:
+    """An error for a human: its type and the first line of its text, cut
+    to `limit`. A SQLAlchemy error's text goes on with the whole SELECT and
+    its parameters; that belongs in the log, not in a Telegram."""
+    lines = str(e).strip().splitlines()
+    first = lines[0].strip()[:limit] if lines else ""
+    return f"{type(e).__name__}: {first}" if first else type(e).__name__
+
+
 class EngineRunner:
     # How long a refusal note stands when the caller gave no bar time.
     _REFUSAL_NOTE_TTL_SECONDS = 3600.0
@@ -289,6 +298,10 @@ class EngineRunner:
         # NU-5a: a flip's (strategy, coin) while its close is in flight ->
         # how `_close_left_open` settled that close, if it ran.
         self._flip_closes: dict[tuple[str, str], str | None] = {}
+        # NU-5a: (strategy, alert) for each alert about a close nothing
+        # sends again that the bus has not taken. No later attempt would
+        # carry it, so `tick` sends it until it is delivered.
+        self._unsent_close_alerts: list[tuple[str, str]] = []
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -961,6 +974,7 @@ class EngineRunner:
         # a Redis emptied under a running bot reads as "not paused, nothing
         # disabled", and strategies run below.
         await self._check_control_state()
+        await self._resend_close_alerts()
 
         # Periodic reconcile every 5 minutes. Catches positions closed
         # manually on the exchange, partial fills, and any post-startup
@@ -2231,7 +2245,7 @@ class EngineRunner:
         *,
         publish: bool = False,
         level: int = logging.WARNING,
-    ) -> None:
+    ) -> bool:
         """Log (and optionally publish) a refusal once per (category, bar).
 
         An edge-triggered strategy re-syncs or resets after a refusal and
@@ -2243,7 +2257,7 @@ class EngineRunner:
         exposure cap's dollar amounts) that never repeat exactly. Without
         a bar time (a caller outside the tick loop) a note expires after
         `_REFUSAL_NOTE_TTL_SECONDS`. Repeats log at DEBUG and are never
-        published.
+        published. Returns whether this one was news.
         """
         key = (signal.strategy_name, signal.symbol)
         now = time.monotonic()
@@ -2263,11 +2277,12 @@ class EngineRunner:
                     signal.strategy_name, signal.action.value,
                     signal.symbol, category, message,
                 )
-                return
+                return False
         self._refusal_notes[key] = (category, bar_time, now)
         logger.log(level, "[%s] %s", signal.strategy_name, message)
         if publish:
             await self._publish_error(signal.strategy_name, message)
+        return True
 
     async def _flat_after_refused_open(
         self,
@@ -2936,14 +2951,16 @@ class EngineRunner:
            re-send could close a position no row owns (one alert).
 
         Neither when another open row shares the coin (allow_multi_coin;
-        HL nets the coin), or that is unreadable: a booking would spend a
-        fill both rows share, and a re-send after an unknown outcome could
-        close the other row's position. Then nothing changes from before
-        NU-5a: the close is dropped (a flip re-aligned) and reconcile
-        prices every row on the coin from one ledger. Every path that does
-        not re-arm the strategy ends its streak. A plain close dropped
-        because the rows were unreadable also alerts, once per (strategy,
-        coin) and `bar_time` (`_note_refusal`).
+        HL nets the coin), or two reads cannot tell (`_shares_coin`): a
+        booking would spend a fill both rows share, and a re-send after an
+        unknown outcome could close the other row's position. Then nothing
+        changes from before NU-5a: the close is dropped (a flip re-aligned)
+        and reconcile prices every row on the coin from one ledger. Every
+        path that does not re-arm the strategy ends its streak. A plain
+        close dropped because the rows were unreadable also alerts, once
+        per (strategy, coin) and `bar_time` (`_note_refusal`), and like the
+        unknown outcome's alert it is sent until the bus takes it
+        (`_alert_unmanaged_close`): nothing sends that close again.
 
         A flip in flight learns how its close settled (`_flip_closes`):
         "external", the alert's outcome, or None when nothing was booked or
@@ -2959,37 +2976,44 @@ class EngineRunner:
             + (f" ({order.error})" if order.error else "")
         ) + (f" at ~{price:g}" if price else "")
         outcome: str | None = None
-        unreadable = False
-        try:  # outside the try below: its except re-arms
-            shared = "another open row shares it" if any(
-                r.id != row.id
-                for r in await self.repo.get_open_positions_for_symbol(row.symbol)
-            ) else ""
-        except Exception as e:
-            shared = f"its other rows are unreadable ({type(e).__name__}: {e})"
-            unreadable = True
-        if shared:
+        # Outside the try below, whose except re-arms. Never raises.
+        beside, error = await self._shares_coin(row)
+        if beside or error is not None:
             self._close_rejects.pop(key, None)
-            message = (
-                f"{signal.action.value} {signal.symbol} ({row.side} "
-                f"{row.size}) {got}; {shared} and HL nets the coin, so as "
-                "before NU-5a " + (
-                    "the flip re-aligns to its row and sends it again while "
-                    "it fires" if key in self._flip_closes else "it is "
-                    "dropped and the row left open, managed by nothing"
-                ) + "; reconcile books what the exchange no longer holds"
+
+            def told(shared: str) -> str:
+                return (
+                    f"{signal.action.value} {signal.symbol} ({row.side} "
+                    f"{row.size}) {got}; {shared} and HL nets the coin, so "
+                    "as before NU-5a " + (
+                        "the flip re-aligns to its row and sends it again "
+                        "while it fires" if key in self._flip_closes else
+                        "it is dropped and the row left open, managed by "
+                        "nothing"
+                    ) + "; reconcile books what the exchange no longer holds"
+                )
+
+            if error is None:
+                logger.warning("[%s] %s", signal.strategy_name,
+                               told("another open row shares it"))
+                return
+            message = told(
+                f"its other rows are unreadable ({type(error).__name__}: {error})"
             )
-            if unreadable and key not in self._flip_closes:
+            if key in self._flip_closes:  # its own note (`_flip_close`) alerts
+                logger.warning("[%s] %s", signal.strategy_name, message)
+            elif await self._note_refusal(
+                signal, "close dropped, rows unreadable", bar_time,
+                f"{message}. Check the position.",
+            ):
                 # Most likely no row shares the coin and this is a refused
                 # exit like any other, which would reach nobody: one alert
                 # (per bar, should the exit come again), and the strategy
-                # is not re-armed. A flip's own note (`_flip_close`) alerts.
-                await self._note_refusal(
-                    signal, "close dropped, rows unreadable", bar_time,
-                    f"{message}. Check the position.", publish=True,
-                )
-            else:
-                logger.warning("[%s] %s", signal.strategy_name, message)
+                # is not re-armed. The full error, a SQLAlchemy one with
+                # its SELECT, is in the line just logged.
+                await self._alert_unmanaged_close(signal, told(
+                    f"its other rows are unreadable ({_brief_error(error)})"
+                ) + ". Check the position.")
             return
         try:
             held, exchange = await self._held_after_close(row.symbol, row.side)
@@ -3012,7 +3036,7 @@ class EngineRunner:
                         "the position."
                     )
                     logger.warning("[%s] %s", signal.strategy_name, message)
-                    await self._publish_error(signal.strategy_name, message)
+                    await self._alert_unmanaged_close(signal, message)
             else:
                 self._resync_strategy_to_row(row)
                 outcome = await self._alert_rejected_close(
@@ -3031,6 +3055,53 @@ class EngineRunner:
                 )
         if key in self._flip_closes:
             self._flip_closes[key] = outcome
+
+    async def _shares_coin(self, row) -> tuple[bool, Exception | None]:
+        """NU-5a: whether another open row shares `row`'s coin, for
+        `_close_left_open`'s sibling guard. A read that raises is tried
+        once more CLOSE_CONFIRM_DELAY_SECONDS later, so one DB blip does
+        not end an exit; the error comes back only when both failed."""
+        error: Exception | None = None
+        for attempt in (1, 2):
+            if attempt == 2:
+                logger.info(
+                    "[%s] the open rows on %s are unreadable (%s); reading "
+                    "again in %gs", row.strategy_name, row.symbol,
+                    _brief_error(error), self.CLOSE_CONFIRM_DELAY_SECONDS,
+                )
+                await asyncio.sleep(self.CLOSE_CONFIRM_DELAY_SECONDS)
+            try:
+                rows = await self.repo.get_open_positions_for_symbol(row.symbol)
+            except Exception as e:
+                error = e
+                continue
+            return any(r.id != row.id for r in rows), None
+        return False, error
+
+    async def _alert_unmanaged_close(self, signal: Signal, message: str) -> None:
+        """NU-5a: publish the alert about a close that nothing sends again
+        (its outcome unknown, or dropped for unreadable rows). One the bus
+        did not take is kept, and `tick` sends it again until delivered:
+        no later attempt of that close would carry it, as a re-armed
+        close's next miss carries its alert (`_alert_rejected_close`)."""
+        if await self._publish_error(signal.strategy_name, message):
+            return
+        if (signal.strategy_name, message) not in self._unsent_close_alerts:
+            self._unsent_close_alerts.append((signal.strategy_name, message))
+        logger.error(
+            "[%s] the alert about %s %s was not delivered; it is sent again "
+            "each tick until it is", signal.strategy_name,
+            signal.action.value, signal.symbol,
+        )
+
+    async def _resend_close_alerts(self) -> None:
+        """Every tick: send again each alert `_alert_unmanaged_close` could
+        not deliver; a delivered one is dropped."""
+        for alert in list(self._unsent_close_alerts):
+            if await self._publish_error(*alert):
+                self._unsent_close_alerts.remove(alert)
+                logger.info("[%s] an alert not delivered before was "
+                            "delivered: %.80s", *alert)
 
     async def _held_after_close(self, symbol: str, side: str) -> tuple[bool, str]:
         """Whether the exchange still holds any `side` of `symbol` (an

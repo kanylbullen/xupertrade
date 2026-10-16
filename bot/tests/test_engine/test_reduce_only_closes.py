@@ -534,6 +534,7 @@ async def test_an_exit_that_comes_and_goes_is_one_episode(
     assert len(ex.orders) == 3 and len(bus.errors(strat.name)) == 1
     ends = [r.getMessage() for r in caplog.records if "no longer fires" in r.getMessage()]
     assert len(ends) == 3 and "(short 1.0)" in ends[0]
+    assert "after 1 attempt(s)" in ends[0]
     assert all("held by the strategy" in m for m in ends)
 
     flip = Signal(
@@ -907,7 +908,7 @@ async def test_a_sibling_row_on_the_side_keeps_the_old_behaviour(repo, caplog, h
     after an unknown outcome could close the other's position. So neither:
     the close is dropped as before NU-5a. Flat: reconcile then prices both
     rows from the one liquidation fill. Held: nothing is re-sent — nor
-    when the rows on the coin cannot be read to tell, which alerts."""
+    when two reads of the rows on the coin cannot tell, which alerts."""
     strat, other = Exit(), Exit()
     other.name = "other_ETH"
     ex = HLLike(*(
@@ -924,7 +925,7 @@ async def test_a_sibling_row_on_the_side_keeps_the_old_behaviour(repo, caplog, h
     await _hold(repo, other)
     if held == "unreadable":
         repo.get_open_positions_for_symbol = AsyncMock(
-            side_effect=[ConnectionError("db blip")],
+            side_effect=ConnectionError("db blip"),
         )
 
     with caplog.at_level(logging.WARNING):
@@ -976,16 +977,16 @@ async def test_a_sibling_row_flip_is_re_aligned_as_before(repo, caplog, monkeypa
 async def test_a_close_dropped_for_unreadable_rows_alerts_once(
     repo, caplog, monkeypatch,
 ):
-    """The coin's rows cannot be read, so a refused close is handled as
-    before NU-5a, though most likely no row shares the coin: it is dropped
-    with its row left open and managed by nothing, and the streak a
-    readable attempt began ends. That alerts (it used to reach nobody),
+    """The coin's rows cannot be read, twice, so a refused close is handled
+    as before NU-5a, though most likely no row shares the coin: it is
+    dropped with its row left open and managed by nothing, and the streak
+    a readable attempt began ends. That alerts (it used to reach nobody),
     once per bar (`_note_refusal`) even when the exit comes again on it,
     and nothing re-arms the strategy."""
     strat, ex, runner, bus = await _exit_holding(repo, refuse=4)
     rows = await repo.get_open_positions_for_symbol("ETH")
     repo.get_open_positions_for_symbol = AsyncMock(
-        side_effect=[rows] + [ConnectionError("db blip")] * 3,
+        side_effect=[rows] + [ConnectionError("db blip")] * 6,
     )
 
     with caplog.at_level(logging.WARNING):
@@ -1015,6 +1016,107 @@ async def test_a_close_dropped_for_unreadable_rows_alerts_once(
     strat.side = "long"
     await runner._run_strategy(strat)
     assert len(bus.errors(strat.name)) == 3 and strat.side is None
+    assert repo.get_open_positions_for_symbol.await_count == 7, "two reads a drop"
+
+
+@pytest.mark.parametrize("sibling", [False, True])
+async def test_one_failed_read_of_the_rows_does_not_end_the_exit(
+    repo, caplog, sibling,
+):
+    """The read of the coin's rows fails once (a DB blip) and the next read
+    answers. Alone on the coin, the refused close is an ordinary refused
+    exit: re-armed, alerted and sent again next tick. It used to be dropped
+    as if a sibling were there, managed by nothing until a restart. With a
+    sibling there, the second read finds it and the guard keeps master's
+    behaviour, alerting nobody."""
+    strat, ex, runner, bus = await _exit_holding(
+        repo, held=2.0 if sibling else 1.0, refuse=2,
+    )
+    if sibling:
+        other = Exit()
+        other.name = "other_ETH"
+        runner.strategies.append(other)
+        await _hold(repo, other)
+    real = repo.get_open_positions_for_symbol
+    repo.get_open_positions_for_symbol = AsyncMock(
+        side_effect=[ConnectionError("db blip"), await real("ETH"), await real("ETH")],
+    )
+
+    with caplog.at_level(logging.INFO, logger="hypertrade.engine.runner"):
+        await runner._run_strategy(strat)
+        await runner._run_strategy(strat)
+
+    assert any("reading again in 0s" in r.getMessage() for r in caplog.records)
+    if sibling:
+        assert len(ex.orders) == 1 and strat.side is None
+        assert bus.errors(strat.name) == [] and runner._close_rejects == {}
+        assert any("another open row shares it" in r.getMessage() for r in caplog.records)
+        return
+    assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)] * 2
+    assert strat.side == "long", "re-armed, its exit sent again"
+    [alert] = bus.errors(strat.name)
+    assert "attempt 1" in alert and "re-armed" in alert
+    assert runner._close_rejects[(strat.name, "ETH")][0] == 2
+
+
+async def test_an_unreadable_rows_alert_carries_no_sql(repo, caplog):
+    """A SQLAlchemy error's text carries the whole SELECT and its
+    parameters. The Telegram gets its type and first line; the line logged
+    at WARNING keeps all of it."""
+    from sqlalchemy.exc import OperationalError
+
+    strat, ex, runner, bus = await _exit_holding(repo, refuse=1)
+    query = select(models.PositionRecord).where(models.PositionRecord.symbol == "ETH")
+    error = OperationalError(
+        str(query), {"symbol_1": "ETH"},
+        ConnectionError("connection was closed in the middle of operation"),
+    )
+    assert len(str(error)) > 400 and "[SQL: SELECT positions.id" in str(error)
+    repo.get_open_positions_for_symbol = AsyncMock(side_effect=error)
+
+    with caplog.at_level(logging.WARNING):
+        await runner._run_strategy(strat)
+
+    [alert] = bus.errors(strat.name)
+    assert "unreadable (OperationalError: (builtins.ConnectionError) connection " \
+        "was closed in the middle of operation)" in alert
+    assert "SQL" not in alert and "SELECT" not in alert and len(alert) < 400
+    [line] = [r.getMessage() for r in caplog.records if "HL nets the coin" in r.getMessage()]
+    assert "[SQL: SELECT positions.id" in line
+
+
+@pytest.mark.parametrize("why", ["rows unreadable", "outcome unknown"])
+async def test_an_undelivered_alert_about_an_unmanaged_close_is_sent_again(repo, caplog, why):
+    """Nothing sends such a close again, so no later miss would carry its
+    alert as a re-armed close's does. One the bus did not take (a
+    notifier re-subscribing) is sent again every tick until delivered, and
+    then no more."""
+    strat, ex, runner, bus = await _exit_holding(repo, refuse=1)
+    if why == "outcome unknown":
+        ex.refusal = "outcome unknown: timed out, no fill seen in 30s"
+    else:
+        real = repo.get_open_positions_for_symbol
+        repo.get_open_positions_for_symbol = AsyncMock(
+            side_effect=ConnectionError("db blip"),
+        )
+    bus.deliver = False
+
+    with caplog.at_level(logging.ERROR, logger="hypertrade.engine.runner"):
+        await runner._run_strategy(strat)
+    assert strat.side is None and bus.errors(strat.name) == []
+    assert any("was not delivered" in r.getMessage() for r in caplog.records)
+    if why == "rows unreadable":
+        repo.get_open_positions_for_symbol = real
+
+    await runner.tick()  # still nobody listening
+    bus.deliver = True
+    for _ in range(2):
+        await runner.tick()
+
+    [alert] = bus.errors(strat.name)
+    assert ("unreadable" if why == "rows unreadable" else "not sent again") in alert
+    assert runner._unsent_close_alerts == []
+    assert len(ex.orders) == 1, "the close itself is not sent again"
 
 
 async def test_a_flip_close_dropped_for_unreadable_rows_alerts_once(repo, caplog):
