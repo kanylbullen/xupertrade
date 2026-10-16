@@ -857,6 +857,35 @@ class Repository:
         )
         return db_row
 
+    async def close_row_externally(
+        self, exchange, row: PositionRecord,
+    ) -> "_OrphanClosePrice | None":
+        """Book one row the exchange no longer holds as closed outside the
+        bot (NU-5a: a strategy exit found it liquidated or closed by hand).
+
+        Priced exactly as reconcile prices an orphan (#167): the
+        exchange's own closing fills since the row opened, never one
+        already booked as a trade; else the mid, marked ESTIMATED; else
+        nothing, and the row stays open. No order is placed. Returns the
+        price used, or None when nothing was written.
+        """
+        ledger = await self._fill_ledger(
+            exchange, _to_epoch_ms(row.opened_at), "External close",
+        )
+        priced = await self._price_orphan_close(
+            exchange, row, ledger, {}, label="external close",
+        )
+        if priced is None:
+            return None
+        async with self._session_factory() as session:
+            closed = await self._close_row_priced(
+                session, row.id, priced, datetime.now(timezone.utc),
+            )
+            if closed is None:
+                return None
+            await session.commit()
+        return priced
+
     async def _fill_ledger(self, exchange, since_ms, who: str) -> FillLedger:
         """The exchange's fills since `since_ms`, each spendable once and
         none already booked as a trade (#167); empty when the fetch
@@ -1188,8 +1217,11 @@ class Repository:
                     continue
                 close_side = "buy" if ex_pos.side == "short" else "sell"
                 try:
+                    # Reduce-only (NU-5a): if the position changed since
+                    # the read, this can shrink it and nothing else.
                     order = await exchange.place_order(
-                        sym, close_side, ex_pos.size, OrderType.MARKET
+                        sym, close_side, ex_pos.size, OrderType.MARKET,
+                        reduce_only=True,
                     )
                 except Exception as e:
                     msg = (
@@ -1203,14 +1235,15 @@ class Repository:
                     )
                     continue
 
-                # A rejected close is not an action — the position is
-                # still there. Reporting it as "closed" is how two live
-                # REJECTEDs got counted as cleanups.
+                # A rejected close is not an action. Reporting it as
+                # "closed" is how two live REJECTEDs got counted as
+                # cleanups; reduce-only, the orphan may also be gone.
                 if order.status != OrderStatus.FILLED:
                     msg = (
                         f"FAILED to close exchange-orphan {ex_pos.side} "
-                        f"{ex_pos.size} {sym}: order status "
-                        f"{order.status.value} — position still open"
+                        f"{ex_pos.size} {sym}: order {order.status.value} "
+                        f"({order.error or 'no reason given'}) — the next "
+                        "pass reads it again"
                     )
                     result.failures.append(msg)
                     logger.error("Reconcile: %s", msg)
@@ -1218,14 +1251,17 @@ class Repository:
 
                 result.unresolved_orphans.remove(sym)
                 fill_price = float(order.filled_price or ex_pos.entry_price or 0.0)
-                fee = fill_price * float(ex_pos.size) * float(settings.taker_fee_rate)
+                # Reduce-only: a position cut since the read fills less,
+                # and what filled is what is booked and reported.
+                filled = float(order.size)
+                fee = fill_price * filled * float(settings.taker_fee_rate)
                 try:
                     await self.record_trade(
                         order_id=order.id,
                         strategy_name="reconcile",
                         symbol=sym,
                         side=close_side,
-                        size=float(ex_pos.size),
+                        size=filled,
                         price=fill_price,
                         fee=fee,
                         # No DB row means no entry price, so there is no
@@ -1241,7 +1277,7 @@ class Repository:
                     # reconcile by hand.
                     fail = (
                         f"UNBOOKKEPT exchange-orphan close on {sym} "
-                        f"(order_id={order.id}, {ex_pos.side} {ex_pos.size} "
+                        f"(order_id={order.id}, {ex_pos.side} {filled} "
                         f"@ {fill_price:.6f}): Trade row failed to write: {e}"
                     )
                     result.failures.append(fail)
@@ -1250,8 +1286,9 @@ class Repository:
                         "row failed to write (order_id=%s)", sym, order.id,
                     )
                 msg = (
-                    f"closed exchange-orphan: {ex_pos.side} {ex_pos.size} "
-                    f"{sym} @ {fill_price:.6f} (filled)"
+                    f"closed exchange-orphan: {ex_pos.side} {filled} "
+                    f"{sym} @ {fill_price:.6f} (filled"
+                    + (f" of {ex_pos.size})" if filled < ex_pos.size - 1e-12 else ")")
                 )
                 result.actions.append(msg)
                 logger.warning("Reconcile: %s", msg)

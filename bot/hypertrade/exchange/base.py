@@ -44,6 +44,9 @@ class Order:
     filled_price: float | None = None
     status: OrderStatus = OrderStatus.PENDING
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Why it was not filled, when known ("Reduce only order would
+    # increase position.", "no mid price", an unknown outcome).
+    error: str | None = None
 
 
 @dataclass
@@ -72,7 +75,22 @@ class Exchange(ABC):
         size: float,
         order_type: OrderType = OrderType.MARKET,
         price: float | None = None,
+        *,
+        reduce_only: bool = False,
+        slippage: float | None = None,
     ) -> Order:
+        """Submit one order.
+
+        `reduce_only=True` is every close (NU-5a): the order may only
+        shrink the position on `symbol`. As on HyperLiquid, one larger
+        than the position fills at most the position (`Order.size` says
+        how much), and one against a flat position or the same side is
+        REJECTED ("Reduce only order would increase position"). A close
+        can then never open or flip a position, whatever size it asks.
+
+        `slippage` is a MARKET order's IOC price band around the mid, as
+        a fraction; None is the exchange's default.
+        """
         ...
 
     @abstractmethod

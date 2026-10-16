@@ -71,7 +71,12 @@ def _runner(strategies, *, snapshots=None, repo=True, open_row=None):
         r.get_open_position = AsyncMock(return_value=open_row)
     exchange = MagicMock()
     exchange.place_order = AsyncMock()
-    exchange.get_position = AsyncMock(return_value=None)
+    # The exchange holds the open row, if any: a close against a flat
+    # exchange is booked as an external close instead (NU-5a).
+    exchange.get_position = AsyncMock(return_value=open_row and Position(
+        symbol=open_row.symbol, side=open_row.side, size=open_row.size,
+        entry_price=open_row.entry_price,
+    ))
     runner = EngineRunner(
         exchange=exchange, strategies=list(strategies), repo=r,
         event_bus=None, control=ctl,

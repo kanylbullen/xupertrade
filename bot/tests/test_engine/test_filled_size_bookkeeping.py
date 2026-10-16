@@ -17,7 +17,7 @@ import pytest
 from hypertrade.config import settings
 from hypertrade.engine.runner import EngineRunner
 from hypertrade.engine.signals import Signal, SignalAction
-from hypertrade.exchange.base import Order, OrderStatus, OrderType
+from hypertrade.exchange.base import Order, OrderStatus, OrderType, Position
 
 REQUESTED = 0.002523
 FILLED = 0.00252
@@ -38,11 +38,16 @@ def _runner(filled_size, *, open_row=None):
 
     exchange = MagicMock()
     exchange.update_leverage = AsyncMock(return_value=True)
-    exchange.get_position = AsyncMock(return_value=None)
+    # The exchange holds the open row, if any: a close against a flat
+    # exchange is booked as an external close instead (NU-5a).
+    exchange.get_position = AsyncMock(return_value=open_row and Position(
+        symbol=open_row.symbol, side=open_row.side, size=open_row.size,
+        entry_price=open_row.entry_price,
+    ))
     # BTC: the request and the fill differ by rounding, not a short fill.
     exchange.get_size_precision = MagicMock(return_value=5)
 
-    async def _place(symbol, side, size, order_type=OrderType.MARKET):
+    async def _place(symbol, side, size, order_type=OrderType.MARKET, **kw):
         return Order(
             id="oid-1", symbol=symbol, side=side, size=filled_size,
             order_type=order_type, filled_price=PRICE,
