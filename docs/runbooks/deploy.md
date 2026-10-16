@@ -93,6 +93,10 @@ image built from HEAD: check step 2 and the cache trap below.
 > `docker exec hypertrade-redis-1 redis-cli SAVE`, `docker cp` the
 > `dump.rdb` out, copy it into the target volume, and only then
 > recreate redis on its own and check `DBSIZE` and the key list match.
+> Since NU-5b (#200) a pause the bot cannot read is no pause: while
+> redis is down, opens are held but the strategies holding a position
+> still run their exits (reconcile stays a dry run). To freeze
+> everything during the swap, stop the bot containers instead.
 
 ## Bot-deploy window
 

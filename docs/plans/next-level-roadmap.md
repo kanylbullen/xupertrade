@@ -1150,7 +1150,7 @@ Nästa har två delar:
 | Säkerhetsändringar låser ute operatören | Misslyckad Access-inloggning | Break-glass via LAN beskrivs i bilaga P. nft införs först när konsolen är tillgänglig. |
 | Säkerhetsdetaljer, innehav eller privata värden hamnar i det publika repot | Träff i gitleaks eller hook; granskning av docs-PR:er | Publiceringsregeln överst. Privata värden hämtas ur Phase eller från lokala filer, och nya mönster läggs till i pre-commit och `.gitleaks.toml` (NU-2). |
 | En för snäv ACL i NA-15 ger en bot som tyst ser noll strategier | Ett test av kontrollnycklarna i paper | Paper först och ett test per kontrollnyckel. Opt-in-setet stänger vid fel, så felet är säkert. |
-| En migration mot live-DB slår sönder en skrivning efter fill | TradeDbDivergence eller auto-paus | Kill switch under migrering (NA-8). Constraints speglas som kontroll före order, och en dump tas före varje migration. |
+| En migration mot live-DB slår sönder en skrivning efter fill | TradeDbDivergence, som slår på kill switch (NU-5b; före den auto-paus) | Kill switch under migrering (NA-8). Constraints speglas som kontroll före order, och en dump tas före varje migration. |
 | B1 skjuts upp och planen fortsätter på slentrian | Inget beslutsdokument 2026-12-04 | B1 är ett eget initiativ (NA-14). Utan beslut startas inget Sedan-initiativ. |
 | CI blir flakigt och kringgås | Admin-bypass används mer än en gång per månad | Karantän med ägare och utgångsdatum. Bypass loggas och granskas varje månad. |
 

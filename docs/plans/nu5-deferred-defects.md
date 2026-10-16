@@ -34,11 +34,13 @@ planned PR, accepted with no owner, process items). The lists have no
 
 - **Severity:** High.
 - **Findings:** #192 exits-never-blocked-1, exits-never-blocked-5 (the
-  short-fill part); A a-exits-never-blocked-3.
+  short-fill part); A a-exits-never-blocked-3; B (#200)
+  b-exits-never-blocked-4, b-db-fallback-5 and b-scope-and-size-2 (the
+  stateless part, last bullet).
 - **What:** master drops a refused plain close at once. A re-arms the
   strategy with its pre-signal state, so the exit is sent again while
   the strategy's own rule still fires. The band widens after 3 refusals,
-  and a WARNING is logged when the exit stops firing. Three gaps remain:
+  and a WARNING is logged when the exit stops firing. Four gaps remain:
   - An edge-triggered exit fires on one bar: a crossunder in cdc_macd or
     macd_zero, the Supertrend flip in hash_supertrend, kalman_breakout's
     flip, daily_long_0830's 08:00 bar. When that bar ends, the exit is
@@ -52,6 +54,20 @@ planned PR, accepted with no owner, process items). The lists have no
     from its open-time state, so a ratcheted trailing stop rolls back
     and the exit stops firing. The streak is gone too, so no WARNING is
     logged.
+  - Five strategies export no state: bb_short, cdc_macd, macd_zero,
+    penguin_volatility and sma_rsi. When B's exit cannot read its own
+    row and then raises or is refused, `_rearm` has neither row nor
+    pre-signal state, so it resets the strategy flat. When the exit
+    raised, the note saying so is published once per bar (since #200's
+    first review round). When HL refused it, one alert goes out, sent
+    again until delivered: the position is still open and nothing
+    sends the exit again (since #200's second round; the first round
+    published "re-armed … sent again" there, which was false).
+    Nothing re-syncs a flat strategy to its row later, so it stays flat
+    until a restart, not "until its row is readable" as #200's body
+    first said. Four of the five ignore the entry price in
+    `restore_state`, so a trivial `export_state` (NU-5d) or C's owed
+    close would cover them.
 - **Effect:** DB and exchange agree, so reconcile does nothing. The
   position rides until the strategy's next edge, and cdc_macd, macd_zero
   and hash_supertrend have no stop-loss. Pine's `strategy.close` would
@@ -155,8 +171,9 @@ planned PR, accepted with no owner, process items). The lists have no
   daily-loss counter and `/eval`. Pricing it from fills has its own
   trap: a ledger that can hand this order another order's booked fill
   (a sibling's close, a flat-all) writes a duplicate `trades.order_id`.
-  The runner treats that as a DB-write divergence and pauses the bot,
-  which freezes every exit (booking-1, double-close-1).
+  The runner treats that as a DB-write divergence and paused the bot,
+  which froze every exit (booking-1, double-close-1); since B (#200) it
+  turns the kill switch on, and exits keep running.
 - **Owner:** the NU-5 late-fill PR (audit H2 follow-up):
   - Book a late fill at its own fill price and order id, matched from
     fills at or after the send, with the reduce-only target capped at
@@ -237,12 +254,18 @@ planned PR, accepted with no owner, process items). The lists have no
 ## D6 · An open can stack onto a position no row owns
 
 - **Severity:** Low.
-- **Findings:** #192 r1-tests-and-noise-3.
+- **Findings:** #192 r1-tests-and-noise-3; B (#200) b-scope-and-size-6
+  (the close half; its booking half, b-db-fallback-2, is fixed).
 - **What:** the open gates (`_open_refusal`) read DB rows only. A close
   can find its own side gone and the other side held with no row, for
   example after a flip by hand. A then books the row as an external
   close and opens nothing, but nothing marks the coin. The strategy's
   next open passes every gate and lands on the unowned position.
+  The other way round, B's DB-read fallback (`_close_size_from_exchange`)
+  closes the exchange's whole same-side size, so an unowned extra on the
+  coin (opened by hand, say) is closed with the strategy's exit. Since
+  #200's first review round only the row's size is booked; the rest is
+  logged as no row's.
 - **Effect:** HL nets the open into that position, so the new row and
   the exchange disagree on size. Reconcile pass 2 no longer treats the
   position as an orphan, because the coin has a row.
@@ -268,7 +291,10 @@ planned PR, accepted with no owner, process items). The lists have no
 ## D8 · Each failed HL read logs a traceback
 
 - **Severity:** Low (log noise).
-- **Findings:** #192 lifecycle-2 (the rest); A a-alerts-and-logs-6.
+- **Findings:** #192 lifecycle-2 (the rest); A a-alerts-and-logs-6;
+  B (#200) b-alerts-and-logs-9 (its last bullet: while the disabled set
+  or allowlist and the open rows are both unreadable,
+  `_strategies_for_tick` logs a traceback every tick).
 - **What:** two shared HL helpers log with `logger.exception`, an ERROR
   with a traceback, on every failure: `get_current_price` on a failed
   `allMids` read, and `get_positions` ("Failed to fetch user state") on
@@ -312,6 +338,75 @@ planned PR, accepted with no owner, process items). The lists have no
   it is answered makes the change.
 - **Source:** none; #192 never changed it.
 
+## D10 · Flat-all does nothing in a DB outage, and loops on a refused write
+
+- **Severity:** Medium.
+- **Findings:** B (#200) b-flat-all-1; b-opens-held-4, b-flat-all-3,
+  b-tick-lifecycle-6 and b-alerts-and-logs-7 (one defect, four lenses).
+  All are on master too.
+- **What:**
+  - `_flat_all_positions` reads the coin's DB rows before it sends the
+    close, which needs only the exchange's `pos.size`. A raising read
+    counts the coin as failed, so during a DB outage the operator's
+    flat-all sends nothing, every tick, and says "N of N close(s)
+    failed", as if they had been tried.
+  - On a completed flat-all, `_pause_after_flat_all` swallows a failed
+    pause write and the request is acknowledged anyway, so nothing holds
+    the next tick's opens. If instead the acknowledge write raises (Redis
+    refusing writes, reads working), it raises out of `tick()` every tick:
+    the strategy loop, PnL update and equity snapshot are skipped, and
+    the "complete … PAUSING THE BOT FAILED" notice goes out every tick.
+- **Effect:** the emergency flatten is dead while the DB is down; a Redis
+  write fault re-opens what flat-all closed, or stops every exit and
+  floods Telegram.
+- **Owner:** the NU-5 settlement PR, which rewrites flat-all's close and
+  booking (D2): send the reduce-only close first and book after, a
+  failed booking handled like a strategy fill the DB missed; acknowledge
+  only once the pause landed, and keep a failed acknowledge in memory.
+- **Source:** none in #192.
+
+## D11 · A plain open that comes back unfilled leaves its strategy holding
+
+- **Severity:** Low.
+- **Findings:** B (#200) b-exits-never-blocked-1 (its source; the guard it
+  misled is fixed in #200).
+- **What:** when a plain OPEN comes back unfilled, or its `place_order`
+  raises, `_execute_signal` resets nothing; only the flip and close paths
+  handle that. The strategy switched to the side it asked for when it
+  emitted the signal, so it believes in a position with no row and no
+  exchange side.
+- **Effect:** it runs SL/TP for nothing and does not re-enter until its
+  exit fires and finds no row. Before #200's first review round such a
+  phantom also blocked B's DB-read fallback for a real holder on the coin.
+- **Owner:** the order path; about five lines, `_flat_after_refused_open`
+  on an unfilled or raising plain open, with a test.
+- **Source:** none.
+
+## D12 · Some of B's holds reach no human
+
+- **Severity:** Low.
+- **Findings:** B (#200) b-tick-lifecycle-5, b-alerts-and-logs-8, the
+  rest of b-opens-held-1 and of b-alerts-and-logs-6.
+- **What:** #200's first review round stayed inside its 120-line budget
+  and left these out:
+  - A control flag that stays unreadable while the sentinel reads holds
+    every open with one WARNING a tick and no alert, however long it
+    lasts (a NOPERM from a narrow ACL, NA-15; a WRONGTYPE). A plain open
+    whose own row read raises is likewise only logged, once per bar, so
+    a DB outage with no position open reaches no Telegram; master sent
+    one "Strategy tick failed" per strategy.
+  - Telegram `/status` and `GET /api/control/state` do not show the kill
+    switch a DB-write divergence turns on (the dashboard is NA-9's). The
+    divergence alert names how to restore it.
+  - "Flat-all did not complete" does not list the coins left open,
+    although `FlatAllStatus.coins` holds them.
+- **Effect:** opens can stay held for hours with nothing on Telegram.
+- **Owner:** a follow-up to B: one alert once a hold has lasted
+  `OPENS_STUCK_SECONDS`, again every `HOLD_REALERT_SECONDS` (the
+  `_remind_hold` pattern), and the kill switch in `/status` and the
+  state route.
+- **Source:** none.
+
 ---
 
 ## Carried by planned PRs
@@ -322,8 +417,8 @@ listed so this file shows where each one went.
 
 | PR | Findings |
 |---|---|
-| B (NU-5b) | exits-never-blocked-2, exits-never-blocked-4, r1-exits-never-blocked-3, flip-and-flat-2 (the pre-existing part), exits-never-blocked-6 (the notice part), r1-tests-and-noise-2, failure-injection-3 (a DB failure after a short fill, below), and master's DB-divergence auto-pause against decision 5.4 |
-| NU-5c | exits-never-blocked-3 (an open gate refuses the whole flip, the only exit of hash_supertrend and kalman_breakout) and the rest of exits-never-blocked-5 |
+| B (NU-5b), **fixed by #200** | exits-never-blocked-2 (but D1's stateless part), exits-never-blocked-4, r1-exits-never-blocked-3, flip-and-flat-2 (the pre-existing part), exits-never-blocked-6 (the notice part), r1-tests-and-noise-2, failure-injection-3 (a DB failure after a short fill, below), and master's DB-divergence auto-pause against decision 5.4 (the kill switch since 2026-10-16). #200's own first review round deferred findings to D1, D6, D8, D10–D12 and NU-5c's row |
+| NU-5c | exits-never-blocked-3 (an open gate refuses the whole flip, the only exit of hash_supertrend and kalman_breakout) and the rest of exits-never-blocked-5; #200's b-exits-never-blocked-3, its DB twin: when a flip's own row read raises, B re-arms the strategy on its old side and sends no close half, although a plain close would go out at the exchange's size. Since #200's first round it alerts once per bar, but the edge-triggered flip is gone after its bar. The close half should take the CLOSE path's fallback, the open half held |
 | NU-5d | the restart part of tests-real-4 and r1-restart-and-state (a restart restores open-time state and rolls back a ratcheted stop) |
 | C | r1-exits-never-blocked-1, -2 and -4, r1-restart-and-state-1 to -5, exits-never-blocked-6 (the band part); exits-money-1, exits-money-3, r1-booking-1, r1-booking-2 and r1-double-close-2 are #192 regressions that the plan's rules (a) and (b) avoid; exits-money-2, the third, is moot: A's sibling guard never classifies a close beside another row, and rule (a) keeps that guard |
 
@@ -340,6 +435,17 @@ failed write also pauses the bot. B owns DB failures after a fill, and
 the split plans B to re-arm nothing after a fill. So B settles the
 short-fill case: re-arm on the rest, as the dropped test asserted, or
 say what manages it.
+
+**Settled by B (#200): nothing re-arms.** The operator's 2026-10-16
+decision binds B to re-arm nothing after a filled close. A failed row
+read or write after the fill turns the kill switch on (not the pause)
+and sends one alert, which names what is left: the row keeps its old
+size and the strategy stays flat, so the rest is managed by no strategy
+until the restart the alert asks for restores it from that row; its
+next exit then closes the rest. Reconcile pass 1 books nothing while the
+exchange still holds the coin, and the part that filled is the
+settlement PR's (D2). Test:
+`test_a_fill_the_db_missed_re_arms_nothing[short fill]`.
 
 ## Accepted, no owner
 
@@ -390,7 +496,7 @@ that takes one says so here.
 - **lifecycle-1.** #192's PR description, rewritten for `47f844e`.
 - **a-tests-real-6.** A's suite counts, and the roadmap's NU-5 "Klart
   när" bullets that no test on A covers, each with its owner: "ett
-  Redis- eller DB-fel inte stoppar SL-exit" (B), "en avstängd strategi
+  Redis- eller DB-fel inte stoppar SL-exit" (B, tested by #200), "en avstängd strategi
   som håller en position stänger enligt sin regel" (NU-5c), "en omstart
   bevarar ett ratchetat SL" (NU-5d), and NU-5a's "mindre än raden" with
   a readable clamp (the settlement PR, D2). `c4cc958` routes these
@@ -405,3 +511,6 @@ that takes one says so here.
   2026-10-14, the day of the split, outside GitHub; until this line
   nothing in the repo or on GitHub recorded it (d-pr-body-4). The
   operator's merge of A is its record here.
+- **b-scope-and-size-1.** B (#200) is over the budget too, and its size
+  waiver has not been given: the operator's approval of 2026-10-16
+  named #199. #200's PR Notes give the numbers and ask for it.

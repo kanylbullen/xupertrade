@@ -94,6 +94,12 @@ TP-exits, och före SE-1 finns inga stopp på börsen. Därför får pausen vara
 högst 30 minuter. Efter pausen tar kill switch över. Den blockerar öppningar
 men släpper igenom varje stängning (`check_risk_limits` i `portfolio.py`).
 
+Från NU-5b (#200) fryser bara en paus som boten kan läsa. En pausflagga den
+inte kan läsa, till exempel medan Redis är nere, räknas som ingen paus:
+öppningar hålls, strategier som håller en position kör sina exits, och
+reconcile är fortfarande en torrkörning. Ska allt stå still medan Redis är
+nere, stoppa botcontainrarna.
+
 Från NU-5a är varje stängning reduce-only: strategins exit,
 flip-stängningen, flat-all och reconciles pass 2. En stängning kan bara
 minska en position, aldrig öppna eller vända en. Saknar HL positionen, eller
