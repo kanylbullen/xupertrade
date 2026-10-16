@@ -157,6 +157,11 @@ _AWAIT_PASS_AFTER_CLEAR = "waiting for a reconcile pass after the hold cleared"
 # `market_close` default); the first of those rejected alerts critical.
 CLOSE_REJECTS_BEFORE_WIDE_BAND = 3
 WIDE_CLOSE_BAND = 0.05
+# NU-5a: how long a refused exit must stop firing before its next
+# rejection is a new episode that alerts again. The value is NU-2's
+# HOLD_REALERT_SECONDS, but its own knob: retuning the hold reminder
+# must not change when a stuck close alerts again, nor the reverse.
+CLOSE_EPISODE_QUIET_SECONDS = 1800.0
 
 
 def _held_on_side(pos, side: str) -> float:
@@ -274,8 +279,9 @@ class EngineRunner:
         # open while the exchange held it, highest alert delivered (1, or 2
         # the critical), highest logged, when its exit stopped firing (0.0
         # while it fires), the row as text]. Gone on a fill or a reset to
-        # flat; its alerts are not repeated within HOLD_REALERT_SECONDS of
-        # the exit last firing, so an exit that comes and goes is one episode.
+        # flat; its alerts are not repeated within
+        # CLOSE_EPISODE_QUIET_SECONDS of the exit last firing, so an exit
+        # that comes and goes is one episode.
         self._close_rejects: dict[tuple[str, str], list] = {}
         # NU-5a: each holding strategy's `export_state()` from before this
         # tick's `on_candle`; `_resync_strategy_to_row` re-arms with it.
@@ -1794,7 +1800,9 @@ class EngineRunner:
                     publish=True,
                 )
             elif not is_open:
-                await self._close_left_open(signal, order, close_row, current_price)
+                await self._close_left_open(
+                    signal, order, close_row, current_price, bar_time,
+                )
             return False
 
         # This (strategy, coin) traded again; its next refusal is news.
@@ -2911,7 +2919,9 @@ class EngineRunner:
             return None, None
         return ex_pos.size, None
 
-    async def _close_left_open(self, signal: Signal, order, row, price=None) -> None:
+    async def _close_left_open(
+        self, signal: Signal, order, row, price=None, bar_time=None,
+    ) -> None:
         """NU-5a: a close came back rejected or zero-filled and left `row`
         open. A confirmed read (`_held_after_close`) says why:
 
@@ -2931,7 +2941,9 @@ class EngineRunner:
         close the other row's position. Then nothing changes from before
         NU-5a: the close is dropped (a flip re-aligned) and reconcile
         prices every row on the coin from one ledger. Every path that does
-        not re-arm the strategy ends its streak.
+        not re-arm the strategy ends its streak. A plain close dropped
+        because the rows were unreadable also alerts, once per (strategy,
+        coin) and `bar_time` (`_note_refusal`).
 
         A flip in flight learns how its close settled (`_flip_closes`):
         "external", the alert's outcome, or None when nothing was booked or
@@ -2947,6 +2959,7 @@ class EngineRunner:
             + (f" ({order.error})" if order.error else "")
         ) + (f" at ~{price:g}" if price else "")
         outcome: str | None = None
+        unreadable = False
         try:  # outside the try below: its except re-arms
             shared = "another open row shares it" if any(
                 r.id != row.id
@@ -2954,17 +2967,29 @@ class EngineRunner:
             ) else ""
         except Exception as e:
             shared = f"its other rows are unreadable ({type(e).__name__}: {e})"
+            unreadable = True
         if shared:
             self._close_rejects.pop(key, None)
-            logger.warning(
-                "[%s] %s %s (%s %s) %s; %s and HL nets the coin, so as before "
-                "NU-5a %s; reconcile books what the exchange no longer holds",
-                signal.strategy_name, signal.action.value, signal.symbol,
-                row.side, row.size, got, shared, "the flip re-aligns to its "
-                "row and sends it again while it fires" if key in
-                self._flip_closes else "it is dropped and the row left open, "
-                "managed by nothing",
+            message = (
+                f"{signal.action.value} {signal.symbol} ({row.side} "
+                f"{row.size}) {got}; {shared} and HL nets the coin, so as "
+                "before NU-5a " + (
+                    "the flip re-aligns to its row and sends it again while "
+                    "it fires" if key in self._flip_closes else "it is "
+                    "dropped and the row left open, managed by nothing"
+                ) + "; reconcile books what the exchange no longer holds"
             )
+            if unreadable and key not in self._flip_closes:
+                # Most likely no row shares the coin and this is a refused
+                # exit like any other, which would reach nobody: one alert
+                # (per bar, should the exit come again), and the strategy
+                # is not re-armed. A flip's own note (`_flip_close`) alerts.
+                await self._note_refusal(
+                    signal, "close dropped, rows unreadable", bar_time,
+                    f"{message}. Check the position.", publish=True,
+                )
+            else:
+                logger.warning("[%s] %s", signal.strategy_name, message)
             return
         try:
             held, exchange = await self._held_after_close(row.symbol, row.side)
@@ -3033,7 +3058,8 @@ class EngineRunner:
         when one went out, "quiet" when this level's already had."""
         key = (signal.strategy_name, signal.symbol)
         rejects = self._close_rejects.setdefault(key, [0, 0, 0, 0.0, ""])
-        if rejects[3] and time.monotonic() - rejects[3] >= HOLD_REALERT_SECONDS:
+        quiet_for = time.monotonic() - rejects[3]
+        if rejects[3] and quiet_for >= CLOSE_EPISODE_QUIET_SECONDS:
             rejects[1:3] = [0, 0]  # its exit was quiet long enough: news again
         rejects[0], rejects[3], rejects[4] = rejects[0] + 1, 0.0, f"{row.side} {row.size}"
         n = rejects[0]

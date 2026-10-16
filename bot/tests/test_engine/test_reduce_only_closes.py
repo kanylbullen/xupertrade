@@ -522,9 +522,10 @@ async def test_an_exit_that_comes_and_goes_is_one_episode(
     """A refused stop that is hit, not hit, hit again… (HL refusing all
     along) alerts once: each time it stops firing a WARNING says the
     strategy still holds the position, and a re-fire is no news. Once its
-    exit has been quiet for HOLD_REALERT_SECONDS a rejection — here the
-    close half of a flip — alerts again and says its open was not sent."""
-    strat, ex, runner, bus = await _exit_holding(repo, "short", refuse=4)
+    exit has been quiet for CLOSE_EPISODE_QUIET_SECONDS — its own window,
+    not NU-2's HOLD_REALERT_SECONDS — a rejection, here the close half of
+    a flip, alerts again and says its open was not sent."""
+    strat, ex, runner, bus = await _exit_holding(repo, "short", refuse=5)
 
     with caplog.at_level(logging.WARNING):
         for quiet in (False, True) * 3:
@@ -535,16 +536,21 @@ async def test_an_exit_that_comes_and_goes_is_one_episode(
     assert len(ends) == 3 and "(short 1.0)" in ends[0]
     assert all("held by the strategy" in m for m in ends)
 
-    monkeypatch.setattr(runner_mod, "HOLD_REALERT_SECONDS", 0.0)
-    ok = await runner._execute_signal(Signal(
+    flip = Signal(
         action=SignalAction.OPEN_LONG, symbol="ETH",
         strategy_name=strat.name, reason="flip",
-    ), MID)
+    )
+    monkeypatch.setattr(runner_mod, "HOLD_REALERT_SECONDS", 0.0)
+    assert await runner._execute_signal(flip, MID) is False
+    assert len(bus.errors(strat.name)) == 1, "NU-2's window is not this one"
 
-    assert ok is False
+    strat.quiet = True
+    await runner._run_strategy(strat)
+    monkeypatch.setattr(runner_mod, "CLOSE_EPISODE_QUIET_SECONDS", 0.0)
+    assert await runner._execute_signal(flip, MID) is False
     first, second = bus.errors(strat.name)
     assert "the close half of a flip, so its open is not sent" in second
-    assert [o["side"] for o in ex.orders] == ["buy"] * 4, "no open sent"
+    assert [o["side"] for o in ex.orders] == ["buy"] * 5, "no open sent"
 
 
 @pytest.mark.parametrize("fault", ["db read raises", "unpriceable"])
@@ -901,7 +907,7 @@ async def test_a_sibling_row_on_the_side_keeps_the_old_behaviour(repo, caplog, h
     after an unknown outcome could close the other's position. So neither:
     the close is dropped as before NU-5a. Flat: reconcile then prices both
     rows from the one liquidation fill. Held: nothing is re-sent — nor
-    when the rows on the coin cannot be read to tell."""
+    when the rows on the coin cannot be read to tell, which alerts."""
     strat, other = Exit(), Exit()
     other.name = "other_ETH"
     ex = HLLike(*(
@@ -929,7 +935,8 @@ async def test_a_sibling_row_on_the_side_keeps_the_old_behaviour(repo, caplog, h
     [line] = [r.getMessage() for r in caplog.records if "HL nets the coin" in r.getMessage()]
     assert "(long 1.0)" in line and "it is dropped and the row left open" in line
     assert await _trades(repo) == [] and runner._close_rejects == {}
-    assert bus.errors(strat.name) == [] and bus.closed() == []
+    assert len(bus.errors(strat.name)) == (held == "unreadable")
+    assert bus.closed() == []
     if held:
         return
     await repo.reconcile_positions(ex)
@@ -964,6 +971,73 @@ async def test_a_sibling_row_flip_is_re_aligned_as_before(repo, caplog, monkeypa
     assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)]
     assert strat.side == "long", "re-synced to its row"
     assert len(await repo.get_open_positions()) == 2
+
+
+async def test_a_close_dropped_for_unreadable_rows_alerts_once(
+    repo, caplog, monkeypatch,
+):
+    """The coin's rows cannot be read, so a refused close is handled as
+    before NU-5a, though most likely no row shares the coin: it is dropped
+    with its row left open and managed by nothing, and the streak a
+    readable attempt began ends. That alerts (it used to reach nobody),
+    once per bar (`_note_refusal`) even when the exit comes again on it,
+    and nothing re-arms the strategy."""
+    strat, ex, runner, bus = await _exit_holding(repo, refuse=4)
+    rows = await repo.get_open_positions_for_symbol("ETH")
+    repo.get_open_positions_for_symbol = AsyncMock(
+        side_effect=[rows] + [ConnectionError("db blip")] * 3,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await runner._run_strategy(strat)  # readable: re-armed
+        assert strat.side == "long" and len(bus.errors(strat.name)) == 1
+        await runner._run_strategy(strat)
+        assert strat.side is None and runner._close_rejects == {}
+        strat.side = "long"  # the exit comes again on the bar
+        await runner._run_strategy(strat)
+
+    assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)] * 3
+    assert strat.side is None, "never re-armed"
+    assert len(await repo.get_open_positions()) == 1 and await _trades(repo) == []
+    _, alert = bus.errors(strat.name)
+    assert "(long 1.0)" in alert and "unreadable (ConnectionError: db blip)" in alert
+    assert "dropped and the row left open, managed by nothing" in alert
+    assert alert.endswith("Check the position.")
+    lines = [r.getMessage() for r in caplog.records if "HL nets the coin" in r.getMessage()]
+    assert len(lines) == 1, "the repeat logs at DEBUG"
+
+    async def _next_bar(symbol, timeframe, *a, **kw):
+        candles = _candles()
+        candles["timestamp"] += pd.Timedelta(hours=1)
+        return candles
+
+    monkeypatch.setattr(runner_mod, "fetch_candles", _next_bar)
+    strat.side = "long"
+    await runner._run_strategy(strat)
+    assert len(bus.errors(strat.name)) == 3 and strat.side is None
+
+
+async def test_a_flip_close_dropped_for_unreadable_rows_alerts_once(repo, caplog):
+    """The same for a flip: it re-aligns to its row as before NU-5a, sends
+    no open, and its own note is its one alert on the bar."""
+    strat, ex, runner, bus = await _exit_holding(repo, refuse=2)
+    repo.get_open_positions_for_symbol = AsyncMock(
+        side_effect=ConnectionError("db blip"),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            assert await runner._execute_signal(Signal(
+                action=SignalAction.OPEN_SHORT, symbol="ETH",
+                strategy_name=strat.name, reason="flip",
+            ), MID, bar_time=_candles()["timestamp"].iloc[-2]) is False
+
+    assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)] * 2
+    assert strat.side == "long", "re-aligned to its row"
+    assert runner._close_rejects == {}
+    [alert] = bus.errors(strat.name)
+    assert alert.startswith("Flip-close failed")
+    assert any("the flip re-aligns to its row" in r.getMessage() for r in caplog.records)
 
 
 # ----------------------------------------------------------------------

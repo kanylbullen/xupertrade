@@ -178,12 +178,16 @@ planned PR, accepted with no owner, process items). The lists have no
 - **What:** A's sibling guard in `_close_left_open`. When another open
   row shares the coin, or the coin's rows cannot be read, a refused or
   zero-filled close is handled as on master. A plain close is dropped:
-  no re-arm, no streak, no wider band and no alert, only one WARNING
-  saying the row is left open and managed by nothing. A flip re-aligns
-  to its row. The guard is there because HL nets the coin. Booking at
-  once could spend a liquidation fill both rows share, and a re-send
-  after an unknown outcome could close the other row's position
-  (#192's r1-double-close-1).
+  no re-arm, no streak, no wider band and, beside a readable sibling, no
+  alert, only one WARNING saying the row is left open and managed by
+  nothing. A flip re-aligns to its row. The guard is there because HL
+  nets the coin. Booking at once could spend a liquidation fill both
+  rows share, and a re-send after an unknown outcome could close the
+  other row's position (#192's r1-double-close-1). Since A's last
+  check (exits-money-r1-1), a plain close dropped because the rows
+  were unreadable does alert, once per (strategy, coin) and bar through
+  `_note_refusal`: there, most likely no row shares the coin. The
+  effect below is the case where a row readably does.
 - **Effect:** the strategy has dropped the position, while the row and
   the exchange still agree, so reconcile does nothing. The live position
   is managed by no one, and no Telegram says so.
@@ -277,9 +281,10 @@ planned PR, accepted with no owner, process items). The lists have no
   a timed-out POST) still reaches a human. The #158 fetch-outage
   aggregator sets the opposite precedent: a window that clears before
   its threshold never notifies. Since `c4cc958` an episode ends only on
-  a fill, a reset to flat or `HOLD_REALERT_SECONDS` without the exit
-  firing, so the alert no longer repeats each time the exit comes and
-  goes.
+  a fill, a reset to flat or `CLOSE_EPISODE_QUIET_SECONDS` (30 min, its
+  own constant since A's last check; it was NU-2's
+  `HOLD_REALERT_SECONDS`) without the exit firing, so the alert no
+  longer repeats each time the exit comes and goes.
 - **Effect:** Telegram noise for refusals that heal themselves. The
   CRITICAL alert on the first wide-band miss is not in question.
 - **Owner:** the operator: alert on the first miss, as now, or only
