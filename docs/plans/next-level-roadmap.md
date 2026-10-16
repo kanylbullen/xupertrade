@@ -265,7 +265,7 @@ Följande startar först efter ett ja i B1: netting-executorn, WebSocket-fillstr
 
 ### 4.1 Arbetsregler för hela planen
 
-- **WIP-gräns.** Högst en PR i taget får röra orderstigen. Kön ser ut så här: NU-2-vakten, NU-5a–e, NU-7.3, NU-9.
+- **WIP-gräns.** Högst en PR i taget får röra orderstigen. Kön ser ut så här: NU-2-vakten, NU-5 (A0 → a → b → c → avräkning → C → sena fills → d → e, se NU-5), NU-7.3, NU-9.
   - Sikta på ≤600 tillagda rader per PR, och lägg mekaniska refaktorer i egna PR:er.
   - Merga sekventiellt och kör om CI mellan varje merge.
   - Forskningsspåret (NA-1, NA-2) rör inte orderstigen och löper parallellt.
@@ -290,20 +290,20 @@ Följande startar först efter ett ja i B1: netting-executorn, WebSocket-fillstr
 | NU-2 | 2 | 1 | 1–2 |
 | NU-3 | 2 | 0 | 2–3 |
 | NU-4 | 3 | 1 | 1 |
-| NU-5 | 5 | 5 | 2–4 |
+| NU-5 | 11 | 9 | 3–9 |
 | NU-6 | 5 | 2 | 2–4 |
 | NU-7 | 4 | 1 | 2–4 |
 | NU-8 | 2 | 0 | 1–3 |
 | NU-9 | 1 | 1 | 4 |
 | NU-10 | 1 | 0 | 1 |
 | NU-11 | 2 | 0 | 1–2 |
-| **Nu totalt** | **27** | **11** | |
+| **Nu totalt** | **33** | **15** | |
 | NA-1 | 4 | 1 | 4–7 |
 | NA-2 | 3 | 0 | 6–9 |
 | NA-14 | 1 | 0 | 10 |
-| **Kritisk väg till B1** | **35** | **12** | |
+| **Kritisk väg till B1** | **41** | **16** | |
 
-Den kritiska vägen kostar ungefär 12 × 1,5 M + 23 × 0,6 M ≈ 32 M Opus-tokens i review. Om färre än 8 av 11 Nu-initiativ är klara i vecka 4 skjuts följande till v5–6 i stället för att B1 flyttas:
+Den kritiska vägen kostar ungefär 16 × 1,5 M + 25 × 0,6 M ≈ 39 M Opus-tokens i review. Om färre än 8 av 11 Nu-initiativ är klara i vecka 4 skjuts följande till v5–6 i stället för att B1 flyttas:
 
 - NU-9
 - NU-11-hooken
@@ -318,7 +318,7 @@ B1 flyttas bara om NA-1 eller NA-2 inte är klara i vecka 9. Då flyttas det hö
 |---|---|
 | 1 | NU-1 (dag 1); besluten 5.2, 5.11 och 5.12; NU-10; NU-4; NU-2 punkt 0–3; NU-11 (CLAUDE.md); NU-8 punkt 0–2 |
 | 2 | NU-2 kodvakter (första PR:en på orderstigen); NU-3; NU-6.1; NU-7.1; NU-8 punkt 3–6 |
-| 2–4 | NU-5 (fem PR:er, en i taget); NU-6.2–6.5; NU-7.2–7.4 |
+| 2–4 | NU-5 A0, a och b, en i taget (resten av NU-5 löper till v9); NU-6.2–6.5; NU-7.2–7.4 |
 | 4 | NU-9; NU-11-hooken; NA-1 startar |
 
 #### NU-1 · Avväpna mainnet per mode och stäng dörren för nya tenanter (operatörsåtgärd, dag 1)
@@ -441,16 +441,21 @@ B1 flyttas bara om NA-1 eller NA-2 inte är klara i vecka 9. Då flyttas det hö
   - Disable överger positioner.
   - Trailing-stopp lossas vid varje deploy.
   - Stop-grace är 10 s (docker.ts:98), medan en order kan ta upp till 45 s.
-- **Hur** (fem PR:er, alla med fault-injection-test):
+- **Hur** (nio PR:er på orderstigen, en i taget och alla med fault-injection-test, plus två docs-PR:er: D0, som för in de uppskjutna felen i CLAUDE.md § 5, och C-planen. Ordningen sedan delningen 2026-10-14 är A0 → a → b → c → avräkning → C → sena fills → d → e):
+  - **A0** (ny). Mekanisk refaktor före a: reconcile pass 1:s fill-ledger och prissatta radstängning bryts ut i `repo.py` (`_fill_ledger`, `_close_row_priced`, `_price_orphan_close(label=)`). Ungefär +70/−55 rader och samma testutfall som master. Den tar WIP-platsen först.
   - **a.** `reduce_only` på alla stängningsvägar, på flat-all (runner.py:1097) och på reconcile-orphan-close. Skicka aldrig en order utan reduce_only när börsen är platt eller på motsatt sida. Samma PR klassar avvisade stängningar i två fall:
-    - **Börsen är platt eller mindre än raden.** Det gäller bara när beskedet kommer från en lyckad läsning; ett `ExchangeReadError` tolkas aldrig som platt. Då triggas en omedelbar reconcile av raden, bokförd som extern stängning från fills. Inget omförsök, ingen breddning av bandet och bara ett informationslarm.
+    - **Börsen är platt eller mindre än raden.** Det gäller bara när beskedet kommer från en lyckad läsning; ett `ExchangeReadError` tolkas aldrig som platt. Då triggas en omedelbar reconcile av raden, bokförd som extern stängning från fills. Inget omförsök, ingen breddning av bandet och bara ett informationslarm. Efter delningen gör a fallet "mindre än raden" bara när klamp-läsningen misslyckas. Med en läsbar klamp behåller a masters beteende, och resten av raden går till **avräkning**.
     - **Övriga avslag.** `_resync_strategy_to_row` och ett larm per (strategi, coin). Efter K avslag i rad breddas IOC-bandet en gång, och därefter kommer ett kritiskt larm.
   - **b.** Kontrolläsningarna körs i try. Ett oläsbart värde blockerar opens men låter exits köras. Om DB-läsningen kastar används börsens storlek, klampad och med reduce_only.
-  - **c.** Ett **close-only-läge** för en hållen strategi som har stängts av, åkt ur allowlisten eller larmats av rate-grinden. Strategin tas aldrig ur ticken förrän den är platt, och ett test visar att den aldrig öppnar.
+  - **c.** Ett **close-only-läge** för en hållen strategi som har stängts av, åkt ur allowlisten eller larmats av rate-grinden. Strategin tas aldrig ur ticken förrän den är platt, och ett test visar att den aldrig öppnar. Samma PR skickar flippens stängningshalva när en opengrind vägrar öppningen, eftersom flippen är enda exit för hash_supertrend och kalman_breakout (exits-never-blocked-3 ur #192, `b292005`). Den kan även ta r1-tests-and-noise-3 (`8d27bbe`): opengrindarna läser bara DB-rader, så en open kan läggas ovanpå en börsposition som ingen rad äger.
+  - **Avräkning** (ny). Rader som är större än börsen avräknas med en begränsad regel, både efter strategins klamp och i flat-all. Glappet bokförs från obokförda stängnings-fills när ledgern täcker det, annars som storleksdrift (pnl 0, ingen avgift, en WARNING, ingen notis). Aldrig till mid, och aldrig väntan på HL:s tak på 2 000 fills. Varje rad på samma coin får ett eget order-id (`<oid>-<n>`), och flat-all kvitteras först när ingen öppen rad finns kvar på en platt coin. Bygger på a:s `close_row_externally` och A0:s hjälpare. CLAUDE.md § 5 (Medium).
+  - **C · motorägd stängning** (ny), först när planen `docs/plans/nu5-engine-owned-close.md` (#197) är signerad. Planen är en egen docs-PR som kan skrivas medan a och b granskas. En stängning som HL vägrar medan positionen hålls ägs av motorn och skickas varje tick tills den fyller, bokförs externt eller raden stängs, oberoende av on_candle, disable, allowlist och omstart. Planen avgör persistens (kolumn, markör i `state_json` eller bara minne), vad som får stoppa stängningen och vad som avslutar den. C bygger på avräkningens regel. Kantutlösta exits som går förlorade efter ett avslag löses här. CLAUDE.md § 5 (High).
+  - **Sena fills** (ny). En order som fyller efter en timeout bokförs på sin egen fill och sitt order-id, inte på positionens entry eller IOC-gränsen. Två läsningar krävs innan den räknas som FILLED, och ett order-id som redan är bokfört ger ett nytt id och ESTIMATED. CLAUDE.md § 5 (Medium).
   - **d.** `export_state()` sparas till `state_json` och snapshot varje gång den ändras under en position. Det gäller till exempel ath_breakouts trail.
   - **e.** Stop-grace höjs till 60 s, och SIGTERM avslutar bara den pågående signalen.
   - Hävstången hanteras operativt i NU-1 och i kod i NA-4.
   - **Gör inte:** lägg inte `asyncio.wait_for` runt orderstigen. SDK-anropet går i en tråd och avbryts inte, så en fylld order skulle bokas som misslyckad.
+- **Delningen av #192 (2026-10-14).** a började som #192 och växte till +5 884 rader på tre fixrundor. Operatören delade den längs ordningen ovan. A0 och a byggs om ur #192 efter första fixrundan (`204e5bf`), och b, c, avräkning, C och sena fills hämtar sina delar ur de senare rundorna (`b292005`, `3039fe5`, `8d27bbe`). Med en PR i taget på orderstigen, en egen review för var och en och deploy i veckofönstret går NU-5 från v2–4 till v3–9. Fel som skjuts upp har en rad var i CLAUDE.md § 5, och hela posterna med fynd-id och commits ur #192 står i `docs/plans/nu5-deferred-defects.md`. #192 stängs när A0, a, b och C-planen finns.
 - **Insats:** M (ROI: ungefär en vecka) · **Påverkan:** 5/5 · **Beroenden:** NU-4 · **Delegering:** Opus med alla åtta /review-vinklar.
 - **Risker:** close-only-strategier fortsätter att skicka nekade opens. Behåll refusal-dedup.
 - **Klart när:** tester visar att
@@ -1012,6 +1017,9 @@ Nästa har två delar:
   - Marginal och avstånd till likvidation övervakas på mainnet.
   - Multiplikatorn sätts till 1–2 på mainnet.
   - EWMA-kovarians, vol-target och beta-tak stryks tills mer än en validerad strategi har kapital.
+- **Ur CLAUDE.md § 5** (flyttade ordagrant 2026-10-14, eftersom planerade initiativ hör hemma här och § 5 bara listar fel). Två äldre förslag ur Kelly-diskussionen. Storleksfunktionen ovan är en bredare form av det första, med budgeten i procent av equity och stoppavståndet med i nämnaren. Brytaren ovan gäller hela kontot, medan det andra skalar ned en strategi i taget:
+  - [ ] **Volatility-adjusted sizing (option C from Kelly discussion).** Replace fixed `MAX_POSITION_SIZE_USD` with ATR-normalized sizing: `notional = RISK_BUDGET_USD / (atr × atr_mult)` so every trade has roughly the same dollar-risk regardless of asset volatility. Industry standard, no statistical estimation needed. Add `RISK_BUDGET_USD` config; keep `MAX_POSITION_SIZE_USD` as a hard cap. ~3-4h work, defensive change. *(Roadmap SE-2.)*
+  - [ ] **Drawdown-based auto-scaling (option B from Kelly discussion).** Add `MAX_STRATEGY_DRAWDOWN_PCT` per strategy. When 80% of cap reached → halve effective margin until 7-day rolling PnL > 0. Limits exposure on degrading strategies without requiring stationary distribution assumptions like Kelly does. *(Roadmap SE-2.)*
 - **Insats:** M (ROI: S för storlek och tak; HWM och marginal tillkommer för riktiga pengar) · **Påverkan:** 4/5 · **Beroenden:** NU-6, NA-1 och B1 = ja.
 - **Klart när:**
   - Dollarrisken vid stopp skiljer högst 2× mellan strategier.
