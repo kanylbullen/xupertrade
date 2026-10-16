@@ -57,12 +57,17 @@ planned PR, accepted with no owner, process items). The lists have no
   - Five strategies export no state: bb_short, cdc_macd, macd_zero,
     penguin_volatility and sma_rsi. When B's exit cannot read its own
     row and then raises or is refused, `_rearm` has neither row nor
-    pre-signal state, so it resets the strategy flat; since #200's
-    first review round that is published once per bar. Nothing re-syncs
-    a flat strategy to its row later, so it stays flat until a restart,
-    not "until its row is readable" as #200's body first said. Four of
-    the five ignore the entry price in `restore_state`, so a trivial
-    `export_state` (NU-5d) or C's owed close would cover them.
+    pre-signal state, so it resets the strategy flat. When the exit
+    raised, the note saying so is published once per bar (since #200's
+    first review round). When HL refused it, one alert goes out, sent
+    again until delivered: the position is still open and nothing
+    sends the exit again (since #200's second round; the first round
+    published "re-armed … sent again" there, which was false).
+    Nothing re-syncs a flat strategy to its row later, so it stays flat
+    until a restart, not "until its row is readable" as #200's body
+    first said. Four of the five ignore the entry price in
+    `restore_state`, so a trivial `export_state` (NU-5d) or C's owed
+    close would cover them.
 - **Effect:** DB and exchange agree, so reconcile does nothing. The
   position rides until the strategy's next edge, and cdc_macd, macd_zero
   and hash_supertrend have no stop-loss. Pine's `strategy.close` would

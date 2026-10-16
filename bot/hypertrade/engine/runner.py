@@ -2134,16 +2134,17 @@ class EngineRunner:
                         self._resync_strategy_to_row(open_pos)
             except Exception as db_exc:
                 # The order is already on the exchange and the DB missed it.
-                if is_open:  # no row to manage; reconcile closes the orphan
-                    await self._reset_strategy_state(signal.strategy_name, why=(
-                        "its open filled but the DB write failed"))
+                # An open's strategy keeps holding: while the DB is down its
+                # stop still goes out at the exchange's size (NU-5b fallback).
                 what = (
                     f"{signal.action.value} {signal.symbol} {order.side} "
                     f"{size} @ {filled_price} (order {order.id}, {signal.reason})"
                 )
                 after = (
-                    "the position has no DB row: once the DB answers, "
-                    "reconcile handles it as an exchange orphan" if is_open else
+                    "the position has no DB row: the strategy still manages it, "
+                    "and its exit closes the exchange's side while the DB is "
+                    "down; once the DB answers, reconcile handles what is left "
+                    "as an exchange orphan" if is_open else
                     f"{remaining} stays open on its row at the old size, "
                     "managed by no strategy until a restart restores it"
                     if remaining else "reconcile books its row from this fill "
@@ -3103,10 +3104,12 @@ class EngineRunner:
         exchange holds on its side, reduce-only. None (the caller raises,
         the strategy is re-armed) when the exchange is unreadable or holds
         none of it, or another row may share the coin HL nets: with
-        allow_multi_coin on, or unreadable and another holder in memory."""
+        allow_multi_coin on, another strategy trading the coin, whatever it
+        holds in memory; with it unreadable, another holder in memory."""
         try:
             multi = bool(self.control) and await self.control.get_allow_multi_coin()
-            others = ["allow_multi_coin is on: other rows"] if multi else []
+            others = sorted(s.name for s in self.strategies if multi
+                            and s.symbol == symbol and s.name != name)
         except Exception:
             others = sorted(s.name for s in self.strategies if s.symbol == symbol
                             and s.name != name and _holds(s))
@@ -3133,11 +3136,12 @@ class EngineRunner:
         return held
 
     async def _rearm(self, signal: Signal, side: str, row, why: str,
-                     bar_time=None, publish: bool | None = None, error=None) -> None:
+                     bar_time=None, publish: bool | None = None, error=None) -> bool:
         """NU-5b: `signal` was not sent or not filled (`why`); its strategy
         dropped `side` on emitting it. Re-arm it on its row, else with its
         `_pre_signal_state`, else reset it flat (a plain open). Never after
-        a close filled. Noted once per bar; published unless a plain open."""
+        a close filled. Noted once per bar; published unless a plain open.
+        Returns whether it was re-armed."""
         name = signal.strategy_name
         state = self._pre_signal_state.get(name)
         strat = next((s for s in self.strategies if s.name == name), None)
@@ -3160,6 +3164,7 @@ class EngineRunner:
             f"{signal.action.value} {signal.symbol} {why} — strategy {how}",
             publish=publish if publish is not None else state is not None
             or signal.action.value.startswith("close"), exc_info=error)
+        return how.startswith("re-armed")
 
     async def _close_left_open(
         self, signal: Signal, order, row, price=None, bar_time=None, sent=None,
@@ -3215,8 +3220,20 @@ class EngineRunner:
                 if key not in self._flip_closes:
                     await self._alert_unmanaged_close(signal, message)
                 return
-            await self._rearm(signal, stand_in.side, None, f"{sent} {got}",
-                              bar_time, publish=False)
+            if not await self._rearm(signal, stand_in.side, None, f"{sent} {got}",
+                                     bar_time, publish=False):
+                # No state to re-arm it with (5 strategies export none): the
+                # exit is not sent again, so no "re-armed" alert. As (b)'s
+                # unknown outcome: one alert, sent until delivered.
+                self._close_rejects.pop(key, None)
+                if key not in self._flip_closes:  # a flip aligns and alerts
+                    await self._alert_unmanaged_close(signal, (
+                        f"{signal.action.value} {signal.symbol} {sent} {got}; its "
+                        "row is unreadable and its strategy could not be re-armed "
+                        "(no state from before the exit), so nothing sends this "
+                        "exit again until a restart restores the strategy from "
+                        "its row. The position is still open: check it."))
+                return
             outcome = await self._alert_rejected_close(
                 signal, stand_in, f"{got}; its row is unreadable")
             if key in self._flip_closes:
