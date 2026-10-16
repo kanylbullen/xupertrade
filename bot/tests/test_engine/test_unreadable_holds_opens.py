@@ -5,15 +5,21 @@ kill switch on a fill the DB missed is decision 5.4 (2026-10-16)."""
 
 from __future__ import annotations
 
+import logging
 import time
 from unittest.mock import AsyncMock
 
 import pytest
 
 from hypertrade.config import settings
-from hypertrade.engine.runner import TradeDbDivergence
+from hypertrade.engine.runner import (
+    CLOSE_REJECTS_BEFORE_WIDE_BAND as K,
+    WIDE_CLOSE_BAND,
+    SignalNotSent,
+    TradeDbDivergence,
+)
 from hypertrade.engine.signals import Signal, SignalAction
-from hypertrade.exchange.base import Position
+from hypertrade.exchange.base import ExchangeReadError, Position
 
 from .test_reduce_only_closes import (  # noqa: F401 — `repo`, `_settings`: fixtures
     ENTRY, TENANT, Exit, HLLike, _hold, _runner, _settings, _trades, repo,
@@ -138,24 +144,98 @@ async def test_a_flat_all_that_cannot_finish_holds_opens_and_says_so_once(repo):
     assert ex.book == {} and await runner.control.is_paused()
 
 
-@pytest.mark.parametrize(
-    "exchange", ["holds it", "refuses it", "flat", "unreadable", "shared"],
-)
+async def test_a_flat_all_whose_exchange_read_flaps_says_each_thing_once(
+    repo, caplog,
+):
+    """b-flat-all-2, b-tests-real-4: an unreadable exchange is its own coin
+    set, so a read that flapped re-keyed the notice every tick. Now each
+    (token, coins) is told once and its repeats log at INFO."""
+    btc = Exit("BTC")
+    ex, runner, bus = await _ticking(repo, btc, positions=[_long("BTC")])
+    await _hold(repo, btc)
+    btc.quiet, ex.refuse, real, down = True, 99, ex.get_positions, [False]
+
+    async def flapping():
+        if down[0]:
+            raise ExchangeReadError("clearinghouseState: 502")
+        return await real()
+
+    ex.get_positions = flapping
+    await runner.control.request_flat_all("tok-1")
+    for d in (False, True, False, True, False, True):
+        down[0] = d
+        await runner.tick()
+
+    notices = bus.errors("flat-all")
+    assert [n.split(":")[1].strip()[:13] for n in notices] == [
+        "1 of 1 close(", "exchange read"]
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR
+                and r.getMessage().startswith("Flat-all NOT")]) == 2
+
+
+async def test_holders_only_runs_the_strategies_with_an_open_row(repo):
+    """b-tests-real-3: with the disabled set unreadable, the open rows pick
+    who runs; memory only when the rows are unreadable too."""
+    by_row, by_memory = Exit("ETH"), Exit("BTC")
+    ex, runner, bus = await _ticking(repo, by_row, by_memory)
+    await _hold(repo, by_row)
+    by_row.side, by_memory.side = None, "long"
+    runner.control._redis.fail_get.add(runner.control._key_disabled)
+    for s in (by_row, by_memory):
+        s.on_candle = AsyncMock(return_value=None)
+
+    await runner.tick()
+
+    assert (by_row.on_candle.await_count, by_memory.on_candle.await_count) == (1, 0)
+
+
+async def test_with_all_of_redis_down_the_exit_still_goes(repo):
+    """b-tests-real-5: every Redis call raising at once, not one key."""
+    held, opener = Exit("ETH"), Opener("BTC")
+    ex, runner, bus = await _ticking(repo, held, opener, positions=[_long()])
+    await _hold(repo, held)
+
+    class Down:
+        def __getattr__(self, name):
+            async def fail(*a, **kw):
+                raise ConnectionError(f"redis {name}: down")
+            return fail
+
+    runner.control._redis = Down()
+    await runner.tick()
+
+    assert [(o["symbol"], o["side"], o["reduce_only"]) for o in ex.orders] == [
+        ("ETH", "sell", True),
+    ]
+    assert ex.book == {} and held.side is None
+
+
+@pytest.mark.parametrize("exchange", [
+    "holds it", "holds more", "refuses it", "flat", "unreadable",
+    "phantom beside it", "multi-coin on", "flag unreadable, holder beside",
+])
 async def test_an_exit_whose_row_is_unreadable_closes_the_exchange_side(
     repo, exchange,
 ):
     """NU-5b's DB half: the exit was dropped. Now the exchange's side goes
-    out reduce-only; with nothing safe to send (flat, unreadable, another
-    holder on the coin HL nets) it raises. Unfilled, the strategy re-arms."""
+    out reduce-only, booked up to its row (b-db-fallback-2); with nothing
+    safe to send (flat, unreadable, another row maybe on the coin HL nets)
+    it raises. Unfilled, the strategy re-arms. A strategy that only thinks
+    it holds the coin (a refused open) no longer blocks it (b-exits-never-
+    blocked-1); allow_multi_coin on does (b-db-fallback-3)."""
     strat, other = Exit(), Exit()
     other.name, other.side, other.quiet = "t_ETH", "long", True
     ex, runner, bus = await _ticking(
-        repo, strat, *[other][:exchange == "shared"],
-        positions=[] if exchange == "flat" else [_long()],
+        repo, strat, *[other][:exchange in ("phantom beside it", "multi-coin on",
+                                            "flag unreadable, holder beside")],
+        positions={"flat": []}.get(exchange, [_long(size=1.5 if "more" in exchange else 1.0)]),
     )
     await _hold(repo, strat)
     ex.read_errors = int(exchange == "unreadable")
     ex.refuse = int(exchange == "refuses it")
+    await runner.control.set_allow_multi_coin(exchange == "multi-coin on")
+    if exchange.startswith("flag"):
+        runner.control._redis.fail_get.add(runner.control._key_allow_multi)
     real, blips = repo.get_open_position, [ConnectionError("db blip")]
 
     async def blip(*a):
@@ -164,21 +244,75 @@ async def test_an_exit_whose_row_is_unreadable_closes_the_exchange_side(
         return await real(*a)
 
     repo.get_open_position = blip
-    sent, booked = exchange in ("holds it", "refuses it"), exchange == "holds it"
+    booked = exchange in ("holds it", "holds more", "phantom beside it")
+    sent = booked or exchange == "refuses it"
     if sent:
         await runner._run_strategy(strat)
     else:
-        with pytest.raises(ConnectionError):
+        with pytest.raises(SignalNotSent):
             await runner._run_strategy(strat)
 
     assert ex.orders == [{
-        "symbol": "ETH", "side": "sell", "size": 1.0, "reduce_only": True,
-        "slippage": None,
+        "symbol": "ETH", "side": "sell", "size": 1.5 if "more" in exchange else 1.0,
+        "reduce_only": True, "slippage": None,
     }][:sent]
     assert [(t.size, t.reason) for t in await _trades(repo)] == [
         (1.0, "stop hit"),
     ][:booked]
     assert strat.side == (None if booked else "long")
+
+
+@pytest.mark.parametrize("refusal", ["no match", "outcome unknown"])
+async def test_a_refused_exit_whose_row_is_unreadable_escalates_as_with_a_row(
+    repo, refusal,
+):
+    """b-exits-never-blocked-2, b-db-fallback-1/-4: a row-less exit HL
+    refused never counted a miss (narrow band, no alert), and one whose
+    outcome was unknown was sent again. Now NU-5a's escalation applies."""
+    strat = Exit()
+    ex, runner, bus = await _ticking(repo, strat, positions=[_long()])
+    await _hold(repo, strat)
+    repo.get_open_position = AsyncMock(side_effect=ConnectionError("db down"))
+    ex.refuse = K + 1
+    if refusal == "outcome unknown":
+        ex.refusal = "outcome unknown: timed out, no fill seen in 30s"
+    for _ in range(K + 1):
+        await runner._run_strategy(strat)
+
+    alerts = bus.errors(strat.name)
+    if refusal == "outcome unknown":
+        assert len(ex.orders) == 1 and strat.side is None
+        assert len(alerts) == 1 and "not sent again" in alerts[0]
+        return
+    assert [o["slippage"] for o in ex.orders] == [None] * K + [WIDE_CLOSE_BAND]
+    assert len(alerts) == 2 and alerts[1].startswith("CRITICAL")
+    assert strat.side == "long" and ex.book["ETH"].size == 1.0
+
+
+async def test_a_signal_that_raises_is_noted_once_per_bar(repo):
+    """b-tick-lifecycle-1, b-alerts-and-logs-1/-4: re-armed and raised
+    again, it published "Strategy tick failed" every tick, or, transient,
+    opened the candle-fetch outage window. Now one note per bar: an exit's
+    is published, a plain open's only logged."""
+    exit_, opener = Exit("ETH"), Opener("BTC")
+    ex, runner, bus = await _ticking(repo, exit_, opener, positions=[_long()])
+    await _hold(repo, exit_)
+    real = repo.get_open_position
+
+    async def btc_down(name, symbol):
+        if symbol == "BTC":
+            raise ConnectionError("db down")
+        return await real(name, symbol)
+
+    repo.get_open_position = btc_down
+    ex.place_order = AsyncMock(side_effect=RuntimeError("SDK bug"))
+    for _ in range(3):
+        await runner.tick()
+
+    [note] = bus.errors(exit_.name)
+    assert note.startswith("close_long ETH 1.0 @ ~2100 raised RuntimeError")
+    assert bus.errors(opener.name) == [] and runner._outage_start is None
+    assert exit_.side == "long" and opener.side is None
 
 
 @pytest.mark.parametrize("fault", ["close order", "flip row read", "open row read"])
@@ -194,7 +328,7 @@ async def test_an_exit_that_raises_leaves_the_strategy_holding(repo, fault):
     else:
         repo.get_open_position = AsyncMock(side_effect=ConnectionError("db blip"))
 
-    with pytest.raises((RuntimeError, ConnectionError)):
+    with pytest.raises(SignalNotSent):
         await runner._run_strategy(strat)
 
     assert strat.side == (None if fault == "open row read" else "long")
@@ -242,8 +376,11 @@ async def test_a_db_outage_still_sends_every_exit(repo):
         ("ETH", 1.0, True), ("BTC", 0.5, True),
     ]
     assert ex.book == {} and eth.side is None and btc.side is None
-    [alert] = bus.errors(eth.name)
-    assert "Kill switch ON: no new opens, exits keep running" in alert
+    [eth_alert], [btc_alert] = bus.errors(eth.name), bus.errors(btc.name)
+    [landed] = bus.errors("kill-switch")
+    assert "Kill switch write FAILED" in eth_alert, "b-tick-lifecycle-2"
+    unset = 'before: unset; to restore: POST /api/control/kill-switch {"clear"'
+    assert unset in landed and unset in btc_alert, "not 'on': this bot set it"
 
     repo._session_factory = up
     await repo.reconcile_positions(
@@ -256,31 +393,58 @@ async def test_a_db_outage_still_sends_every_exit(repo):
     )
 
 
-@pytest.mark.parametrize("close", ["short fill", "flip"])
+@pytest.mark.parametrize("close", ["short fill", "flip", "open"])
 async def test_a_fill_the_db_missed_re_arms_nothing(repo, close):
     """failure-injection-3: a close fills 0.4 of 1.0 (or a flip's close
     fills) and its DB write fails. Nothing re-arms it, a flip opens nothing,
-    the kill switch is on; the restart the alert asks for manages the 0.6."""
-    strat = Flip() if close == "flip" else Exit()
-    ex, runner, bus = await _ticking(repo, strat, positions=[_long()])
-    await _hold(repo, strat)
-    real = ex.place_order
+    the kill switch is on; the restart the alert asks for manages the 0.6.
+    An open's ends flat and reconcile closes its orphan (b-tests-real-2).
+    The alert says what the switch was and how to restore it (b-opens-held-
+    2), and an open it refuses later is only logged (b-flat-all-4)."""
+    strat = {"short fill": Exit, "flip": Flip, "open": Opener}[close]()
+    ex, runner, bus = await _ticking(
+        repo, strat, positions=[] if close == "open" else [_long()],
+    )
+    ctl, real, write = runner.control, ex.place_order, "record_trade_and_close_position"
+    if close == "open":
+        write = "record_trade_and_open_position"
+        await ctl.set_kill_switch(False)
+    else:
+        await _hold(repo, strat)
+    if close == "flip":
+        await ctl.set_kill_switch(True)
     if close == "short fill":
         ex.place_order = lambda s, d, size, *a, **kw: real(s, d, min(size, 0.4), *a, **kw)
-    repo.record_trade_and_close_position = AsyncMock(side_effect=ConnectionError("db"))
+    setattr(repo, write, AsyncMock(side_effect=ConnectionError("db")))
+    bus.deliver = close != "short fill"  # undelivered: sent again (b-opens-held-1)
 
     with pytest.raises(TradeDbDivergence):
         await runner._run_strategy(strat)
+    bus.deliver = True
+    await runner._resend_close_alerts()
 
-    assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [("sell", True)]
-    assert strat.side is None and (await repo.get_open_positions())[0].size == 1.0
-    assert await runner.control.is_kill_switch_active()
-    assert not await runner.control.is_paused()
+    assert [(o["side"], o["reduce_only"]) for o in ex.orders] == [
+        ("buy", False) if close == "open" else ("sell", True)]
+    assert strat.side is None and not await ctl.is_paused()
+    assert await ctl.is_kill_switch_active()
+    [alert] = bus.errors(strat.name)
+    assert {
+        "short fill": 'before: unset; to restore: POST /api/control/kill-switch {"clear"',
+        "flip": "before: on; to restore: leave it on",
+        "open": 'before: off; to restore: POST /api/control/kill-switch {"active"',
+    }[close] in alert
+    delattr(repo, write)
     if close == "flip":
         return
-    [alert] = bus.errors(strat.name)
+    if close == "open":
+        await runner._run_strategy(strat)  # refused by the kill switch: logged
+        assert len(ex.orders) == 1 and len(bus.errors(strat.name)) == 1
+        assert "has no DB row" in alert and strat.side is None
+        await runner._run_reconcile("Periodic")
+        assert ex.book == {} and ex.orders[-1]["reduce_only"]
+        return
+    assert (await repo.get_open_positions())[0].size == 1.0
     assert "0.6 stays open on its row at the old size" in alert
-    del repo.record_trade_and_close_position
     ex.place_order = real
     assert await runner._restore_from_db(())
     await runner._run_strategy(strat)

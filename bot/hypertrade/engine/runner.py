@@ -5,6 +5,7 @@ import logging
 import socket
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import aiohttp
 
@@ -80,6 +81,10 @@ class TradeDbDivergence(Exception):
     type and skip its generic "Strategy tick failed" handling to avoid
     double-logging / double-publishing the same incident.
     """
+
+
+class SignalNotSent(Exception):
+    """NU-5b: raised before a fill; `_rearm` re-armed it and noted it."""
 
 
 # Errors that indicate transient HL/network issues — bot recovers
@@ -323,11 +328,12 @@ class EngineRunner:
         # sends again that the bus has not taken. No later attempt would
         # carry it, so `tick` sends it until it is delivered.
         self._unsent_close_alerts: list[tuple[str, str]] = []
-        # NU-5b: why opens are held this tick only, the last "did not
+        # NU-5b: why opens are held this tick only, each "did not
         # complete" sent (token, coins), and a kill-switch write still owed.
         self._tick_hold: str | None = None
-        self._flat_all_notice: tuple | None = None
+        self._flat_all_notices: set[tuple] = set()
         self._kill_switch_owed = False
+        self._kill_switch_was: str | None = None  # before this bot set it
 
     async def startup(self) -> None:
         """Restore in-memory strategy state from DB after a restart.
@@ -1058,7 +1064,9 @@ class EngineRunner:
         if controls.flat_request:
             holds.append("a flat-all request is pending")
             paused_by_flat_all = await self._honour_flat_all(controls.flat_request)
-        if self._kill_switch_owed and not await self._engage_kill_switch():
+        if self._kill_switch_owed:
+            await self._engage_kill_switch()
+        if self._kill_switch_owed:
             holds.append(_KILL_SWITCH_OWED)
         # A flat-all that just completed paused the bot; hold this tick
         # even if that pause write failed, so no strategy re-opens seconds
@@ -1095,8 +1103,8 @@ class EngineRunner:
             for strategy in active:
                 try:
                     await self._run_strategy(strategy)
-                except TradeDbDivergence:
-                    # Already handled at source: kill switch on, detailed
+                except (TradeDbDivergence, SignalNotSent):
+                    # Handled at source (kill switch on, or re-armed), detailed
                     # ErrorOccurred event published, full traceback
                     # logged via logger.exception. Skip the generic
                     # "Strategy tick failed" branch so we don't
@@ -1284,22 +1292,23 @@ class EngineRunner:
         if status.ok:
             await self._pause_after_flat_all(status)
             await self.control.acknowledge_flat_request(token)
-            self._flat_all_notice = None
+            self._flat_all_notices = set()
             return True
         notice = (token, status.coins or (status.reason,))
+        self._flat_all_notices = {n for n in self._flat_all_notices if n[0] == token}
         logger.log(
-            logging.INFO if notice == self._flat_all_notice else logging.ERROR,
+            logging.INFO if notice in self._flat_all_notices else logging.ERROR,
             "Flat-all NOT acknowledged (%s) — the request stays pending and "
             "retries every tick; opens held until it completes, exits run",
             status.reason,
         )
-        if notice != self._flat_all_notice and await self._publish_error(
+        if notice not in self._flat_all_notices and await self._publish_error(
             "flat-all", f"Flat-all did not complete: {status.reason}. "
             "Positions may still be open; the request stays pending and "
             "retries every tick. Until it completes this bot opens nothing; "
             "exits still run.",
         ):
-            self._flat_all_notice = notice
+            self._flat_all_notices.add(notice)
         return False
 
     async def _read_tick_controls(self) -> "_TickControls":
@@ -1374,10 +1383,18 @@ class EngineRunner:
             holders = {s.name for s in self.strategies if _holds(s)}
         return [s for s in active if s.name in holders]
 
-    async def _engage_kill_switch(self) -> bool:
+    async def _engage_kill_switch(self) -> str:
         """Kill switch on for a fill the DB missed (decision 5.4, 2026-10-16:
         automatic guards block opens, never exits). A write that fails is
-        owed: retried every tick, opens held in memory until it lands."""
+        owed: retried every tick, opens held in memory. Returns alert text."""
+        try:
+            was = {True: "on", False: "off", None: "unset"}[
+                await self.control.is_kill_switch_active()]
+        except Exception:
+            was = "unreadable"
+        if self._kill_switch_was is None or was != "on":  # "on": maybe ours
+            self._kill_switch_was = was
+        was = self._kill_switch_was
         try:
             await self.control.set_kill_switch(True)
         except Exception:
@@ -1387,9 +1404,17 @@ class EngineRunner:
                 "retried every tick", exc_info=not self._kill_switch_owed,
             )
             self._kill_switch_owed = True
-            return False
-        self._kill_switch_owed = False
-        return True
+            return ("Kill switch write FAILED: only this bot holds opens, the "
+                    "write retried every tick; a restart before it lands ends it")
+        undo = {"on": "leave it on", "unreadable": "find what it was first",
+                "off": 'POST /api/control/kill-switch {"active": false}'}.get(
+            was, 'POST /api/control/kill-switch {"clear": true}')
+        told = f"Kill switch ON: no new opens (before: {was}; to restore: {undo})"
+        if self._kill_switch_owed:
+            self._kill_switch_owed = False
+            await self._publish_error("kill-switch", f"{told}; owed since a "
+                                      "DB-write divergence, now written")
+        return told
 
     async def _pause_after_flat_all(self, status: "FlatAllStatus") -> None:
         """A completed flat-all pauses the bot.
@@ -1729,9 +1754,10 @@ class EngineRunner:
                 # Nothing sent: a flip goes back to its side, an open to flat.
                 await self._rearm(
                     signal, "short" if wanted_side == "long" else "long",
-                    None, f"its own row could not be read ({_brief_error(e)})",
+                    None, f"~{current_price:g}: its own row could not be read "
+                    f"({_brief_error(e)})", bar_time, error=e,
                 )
-                raise
+                raise SignalNotSent(signal.strategy_name) from e
             if existing and existing.side == wanted_side:
                 logger.info(
                     "[%s] Skipping %s %s — already have open %s position",
@@ -1751,18 +1777,18 @@ class EngineRunner:
         # refusing it would trap a losing position past MAX_DAILY_LOSS_USD
         # until UTC midnight.
         if not await self.portfolio.check_risk_limits(is_open=is_open):
-            # This bot's reconcile hold (NU-2) or tick hold (NU-5b) says so,
-            # not "risk limit"; each is announced on its own, so a plain
-            # open is only logged.
+            # This bot's reconcile hold (NU-2), tick hold or kill switch
+            # (NU-5b) says so, not "risk limit"; a plain open is only logged.
             held = is_open and self.portfolio.opens_held
             tick = bool(held) and held == self._tick_hold
+            killed = is_open and not held and self.portfolio.kill_switch_refused is True
             category = (
                 "opens held" if tick else "reconcile hold" if held
-                else "risk limit"
+                else "kill switch" if killed else "risk limit"
             )
             head = (
                 f"Opens held ({held})" if tick else f"Reconcile hold ({held})"
-                if held else "Risk limit breached"
+                if held else "Kill switch on" if killed else "Risk limit breached"
             )
             if existing is None:
                 if is_open:
@@ -1770,7 +1796,7 @@ class EngineRunner:
                         signal, category, bar_time,
                         f"{head} — execution of "
                         f"{signal.action.value} {signal.symbol} blocked",
-                        publish=not held,
+                        publish=not (held or killed),
                     )
                 else:
                     await self._note_refusal(
@@ -1809,7 +1835,7 @@ class EngineRunner:
         )
 
         flipped = False
-        close_row = None
+        close_row = close_size = None
         if is_open:
             try:
                 refusal = await self._open_refusal(
@@ -1907,10 +1933,10 @@ class EngineRunner:
             except Exception as e:
                 # Before the order is known to fill (NU-5b): the strategy
                 # takes back what it dropped, so its exit goes again.
-                await self._rearm(
-                    signal, held, close_row, f"it raised {_brief_error(e)}",
-                )
-                raise
+                await self._rearm(signal, held, close_row, f"{close_size or '?'} @ "
+                                  f"~{current_price:g} raised {_brief_error(e)}",
+                                  bar_time, error=e)
+                raise SignalNotSent(signal.strategy_name) from e
             size = close_size
         else:
             return False
@@ -1939,7 +1965,7 @@ class EngineRunner:
                 )
             elif not is_open:
                 await self._close_left_open(
-                    signal, order, close_row, current_price, bar_time,
+                    signal, order, close_row, current_price, bar_time, size,
                 )
             return False
 
@@ -2074,19 +2100,25 @@ class EngineRunner:
                     open_pos = await self.repo.get_open_position(
                         signal.strategy_name, signal.symbol
                     )
+                    booked = size  # NU-5b: sized from the exchange, the row's own
+                    if open_pos and close_row is None and size > open_pos.size + 1e-9:
+                        booked = open_pos.size
+                        logger.warning("[%s] %s %s filled %s; beyond its row's %s "
+                                       "is no row's, not booked", signal.strategy_name,
+                                       signal.action.value, signal.symbol, size, booked)
                     if open_pos:
                         close_pnl = realized_pnl(
                             side=open_pos.side, entry_price=open_pos.entry_price,
-                            exit_price=filled_price, size=size, fee=fee,
+                            exit_price=filled_price, size=booked, fee=fee * booked / size,
                         )
                     await self.repo.record_trade_and_close_position(
                         order_id=order.id,
                         strategy_name=signal.strategy_name,
                         symbol=signal.symbol,
                         trade_side=order.side,
-                        size=size,
+                        size=booked,
                         price=filled_price,
-                        fee=fee,
+                        fee=fee * booked / size,
                         pnl=close_pnl or 0,
                         reason=signal.reason,
                         remaining=remaining,
@@ -2102,6 +2134,9 @@ class EngineRunner:
                         self._resync_strategy_to_row(open_pos)
             except Exception as db_exc:
                 # The order is already on the exchange and the DB missed it.
+                if is_open:  # no row to manage; reconcile closes the orphan
+                    await self._reset_strategy_state(signal.strategy_name, why=(
+                        "its open filled but the DB write failed"))
                 what = (
                     f"{signal.action.value} {signal.symbol} {order.side} "
                     f"{size} @ {filled_price} (order {order.id}, {signal.reason})"
@@ -2114,23 +2149,18 @@ class EngineRunner:
                     if remaining else "reconcile books its row from this fill "
                     "once the DB answers; the strategy stays flat"
                 )
-                logger.exception(
-                    "[%s] CRITICAL: %s filled but its DB write FAILED — kill "
-                    "switch ON: no new opens, exits keep running; %s",
-                    signal.strategy_name, what, after,
-                )
-                if (
-                    self.control and not await self._engage_kill_switch()
-                    and not self.portfolio.opens_held
-                ):
+                switch = (await self._engage_kill_switch() if self.control
+                          else "No kill switch without Redis")
+                if self._kill_switch_owed and not self.portfolio.opens_held:
                     self.portfolio.opens_held = self._tick_hold = _KILL_SWITCH_OWED
-                await self._publish_error(signal.strategy_name, (
+                message = (
                     f"DB-write divergence: {what} filled but the DB write "
-                    f"failed ({_brief_error(db_exc)}). Kill switch ON: no new "
-                    f"opens, exits keep running; {after}. Fix the DB (a "
-                    "restart refreshes its credentials), check the book, then "
-                    "turn the kill switch off."
-                ))
+                    f"failed ({_brief_error(db_exc)}). {switch}; exits keep "
+                    f"running; {after}. Fix the DB (a restart refreshes its "
+                    "credentials) and check the book."
+                )
+                logger.exception("[%s] CRITICAL: %s", signal.strategy_name, message)
+                await self._alert_unmanaged_close(signal, message)
                 # Re-raise as a sentinel so `_run_strategy`'s catch-all
                 # recognises this incident is already handled (kill switch +
                 # published) and skips its generic "Strategy tick failed"
@@ -2363,6 +2393,7 @@ class EngineRunner:
         *,
         publish: bool = False,
         level: int = logging.WARNING,
+        exc_info: BaseException | None = None,  # its traceback, once
     ) -> bool:
         """Log (and optionally publish) a refusal once per (category, bar).
 
@@ -2397,7 +2428,7 @@ class EngineRunner:
                 )
                 return False
         self._refusal_notes[key] = (category, bar_time, now)
-        logger.log(level, "[%s] %s", signal.strategy_name, message)
+        logger.log(level, "[%s] %s", signal.strategy_name, message, exc_info=exc_info)
         if publish:
             await self._publish_error(signal.strategy_name, message)
         return True
@@ -2499,8 +2530,8 @@ class EngineRunner:
         verify) → reset to flat. Either way it no longer believes in the
         side it asked for. An exception from the close is re-raised after
         that, so the tick handler still classifies it (transient outage vs
-        bug); `TradeDbDivergence` passes straight through (the bot is
-        already paused and the incident published).
+        bug). `TradeDbDivergence` resets it to flat and is re-raised: the
+        kill switch is on and the incident published (NU-5b).
         """
         wanted = "long" if signal.action == SignalAction.OPEN_LONG else "short"
         close_action = (
@@ -3071,13 +3102,15 @@ class EngineRunner:
         """NU-5b: the row could not be read, so the exit closes what the
         exchange holds on its side, reduce-only. None (the caller raises,
         the strategy is re-armed) when the exchange is unreadable or holds
-        none of it, or another strategy holds the coin: HL nets it, so the
-        size could be partly theirs."""
-        others = sorted(
-            s.name for s in self.strategies
-            if s.symbol == symbol and s.name != name and _holds(s)
-        )
-        held, why = 0.0, f"{', '.join(others)} also hold(s) {symbol}"
+        none of it, or another row may share the coin HL nets: with
+        allow_multi_coin on, or unreadable and another holder in memory."""
+        try:
+            multi = bool(self.control) and await self.control.get_allow_multi_coin()
+            others = ["allow_multi_coin is on: other rows"] if multi else []
+        except Exception:
+            others = sorted(s.name for s in self.strategies if s.symbol == symbol
+                            and s.name != name and _holds(s))
+        held, why = 0.0, f"{', '.join(others)} may hold {symbol} too"
         if not others:
             try:
                 pos = await self.exchange.get_position(symbol)
@@ -3099,11 +3132,12 @@ class EngineRunner:
         )
         return held
 
-    async def _rearm(self, signal: Signal, side: str, row, why: str) -> None:
+    async def _rearm(self, signal: Signal, side: str, row, why: str,
+                     bar_time=None, publish: bool | None = None, error=None) -> None:
         """NU-5b: `signal` was not sent or not filled (`why`); its strategy
         dropped `side` on emitting it. Re-arm it on its row, else with its
         `_pre_signal_state`, else reset it flat (a plain open). Never after
-        a close filled."""
+        a close filled. Noted once per bar; published unless a plain open."""
         name = signal.strategy_name
         state = self._pre_signal_state.get(name)
         strat = next((s for s in self.strategies if s.name == name), None)
@@ -3121,13 +3155,14 @@ class EngineRunner:
         else:
             await self._reset_strategy_state(name, why=why, quiet=True)
             how = "flat: no row or earlier state to re-arm it with"
-        logger.warning(
-            "[%s] %s %s: %s — strategy %s", name, signal.action.value,
-            signal.symbol, why, how,
-        )
+        await self._note_refusal(
+            signal, "not filled", bar_time,
+            f"{signal.action.value} {signal.symbol} {why} — strategy {how}",
+            publish=publish if publish is not None else state is not None
+            or signal.action.value.startswith("close"), exc_info=error)
 
     async def _close_left_open(
-        self, signal: Signal, order, row, price=None, bar_time=None,
+        self, signal: Signal, order, row, price=None, bar_time=None, sent=None,
     ) -> None:
         """NU-5a: a close came back rejected or zero-filled and left `row`
         open. A confirmed read (`_held_after_close`) says why:
@@ -3161,12 +3196,6 @@ class EngineRunner:
         """
         if not self.repo:
             return
-        if row is None:  # NU-5b: sized from the exchange, its row unreadable
-            await self._rearm(signal, row=None, side=(
-                "long" if signal.action == SignalAction.CLOSE_LONG else "short"
-            ), why=f"came back {order.status.value}, {order.size} filled "
-                   f"({order.error or 'no reason'}); its row is unreadable")
-            return
         key = (signal.strategy_name, signal.symbol)
         got = (
             "came back zero-filled" if order.status.value == "filled"
@@ -3174,6 +3203,25 @@ class EngineRunner:
             + (f" ({order.error})" if order.error else "")
         ) + (f" at ~{price:g}" if price else "")
         outcome: str | None = None
+        if row is None:  # NU-5b: `sent` from the exchange, its row unreadable
+            stand_in = SimpleNamespace(side=signal.action.value.split("_")[1], size=sent)
+            if (order.error or "").startswith("outcome unknown"):  # as (b)
+                self._close_rejects.pop(key, None)
+                message = (f"{signal.action.value} {signal.symbol} {sent} {got}; "
+                           "its row is unreadable. HL may still fill it, so it is "
+                           "not sent again: nothing manages the position until "
+                           "reconcile or a restart. Check the position.")
+                logger.warning("[%s] %s", signal.strategy_name, message)
+                if key not in self._flip_closes:
+                    await self._alert_unmanaged_close(signal, message)
+                return
+            await self._rearm(signal, stand_in.side, None, f"{sent} {got}",
+                              bar_time, publish=False)
+            outcome = await self._alert_rejected_close(
+                signal, stand_in, f"{got}; its row is unreadable")
+            if key in self._flip_closes:
+                self._flip_closes[key] = outcome
+            return
         # Outside the try below, whose except re-arms. Never raises.
         beside, error = await self._shares_coin(row)
         if beside or error is not None:

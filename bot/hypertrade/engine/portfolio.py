@@ -56,6 +56,7 @@ class PortfolioManager:
         # wait for a reconcile pass. A kill switch scoped to this bot; the
         # kill switch key is shared by every tenant of the mode.
         self.opens_held: str | None = None
+        self.kill_switch_refused = False  # the last open check's reason
 
     async def _ensure_loaded(self) -> None:
         """Load today's PnL from Redis once per process start and once
@@ -224,7 +225,8 @@ class PortfolioManager:
             return True
 
         # Check kill switch (OPEN only — see docstring).
-        if await self._kill_switch_active():
+        self.kill_switch_refused = await self._kill_switch_active()
+        if self.kill_switch_refused:
             if not self._kill_switch_unreadable:
                 logger.warning("Kill switch active — new opens disabled")
             return False

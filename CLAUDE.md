@@ -177,6 +177,7 @@ Planned initiatives live in the roadmap.
 
 - [ ] **Rows larger than the exchange are never settled from fills.** Owner: settlement PR. [D2][d]
 - [ ] **A late fill is booked at a guessed price under a new id.** Owner: late-fill PR. [D3][d]
+- [ ] **Flat-all does nothing in a DB outage, and loops on a refused write.** Owner: settlement PR. [D10][d]
 
 ### Open — Low
 
@@ -186,6 +187,8 @@ Planned initiatives live in the roadmap.
 - [ ] **The "flip open failed" Telegram lacks `order.error`.** Owner: order path. [D7][d]
 - [ ] **Each failed HL read logs a traceback.** Accepted noise. [D8][d]
 - [ ] **A refused close alerts on its first miss.** Operator call. [D9][d]
+- [ ] **A plain open that comes back unfilled leaves its strategy holding.** Owner: order path. [D11][d]
+- [ ] **Some of B's holds reach no human.** Owner: B follow-up. [D12][d]
 
 [d]: docs/plans/nu5-deferred-defects.md
 
