@@ -554,20 +554,21 @@ async def test_an_exit_that_comes_and_goes_is_one_episode(
     assert [o["side"] for o in ex.orders] == ["buy"] * 5, "no open sent"
 
 
-@pytest.mark.parametrize("fault", ["db read raises", "unpriceable"])
+@pytest.mark.parametrize("fault", ["db reads raise", "unpriceable"])
 async def test_a_streak_that_lost_its_strategy_never_says_it_holds(repo, caplog, fault):
     """Refused once (re-armed, streak 1), then an attempt that leaves the
-    strategy flat: its DB read raises before any order, or the position
-    is gone and the row cannot be priced. The strategy dropped the
-    position on its exit; no line may say it still holds it."""
+    strategy flat: with its row unreadable the exit fills from the
+    exchange size and is not booked (NU-5b), or the position is gone and
+    the row cannot be priced. The strategy dropped the position on its
+    exit; no line may say it still holds it."""
     strat, ex, runner, bus = await _exit_holding(repo, refuse=1)
     await runner._run_strategy(strat)
     assert strat.side == "long"
 
-    if fault == "db read raises":
+    if fault == "db reads raise":
         real = repo.get_open_position
         repo.get_open_position = AsyncMock(side_effect=ConnectionError("db blip"))
-        with pytest.raises(ConnectionError):
+        with pytest.raises(runner_mod.TradeDbDivergence):
             await runner._run_strategy(strat)
         repo.get_open_position = real
     else:
@@ -583,9 +584,7 @@ async def test_a_streak_that_lost_its_strategy_never_says_it_holds(repo, caplog,
         await runner._run_strategy(strat)
 
     assert strat.side is None and len(await repo.get_open_positions()) == 1
-    ends = [r.getMessage() for r in caplog.records if "no longer fires" in r.getMessage()]
-    assert len(ends) == (0 if fault == "unpriceable" else 1)
-    assert not any("held by the strategy" in m for m in ends)
+    assert not [r for r in caplog.records if "no longer fires" in r.getMessage()]
 
 
 async def test_k_rejections_widen_the_band_then_alert_critical(repo):

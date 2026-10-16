@@ -155,8 +155,9 @@ planned PR, accepted with no owner, process items). The lists have no
   daily-loss counter and `/eval`. Pricing it from fills has its own
   trap: a ledger that can hand this order another order's booked fill
   (a sibling's close, a flat-all) writes a duplicate `trades.order_id`.
-  The runner treats that as a DB-write divergence and pauses the bot,
-  which freezes every exit (booking-1, double-close-1).
+  The runner treats that as a DB-write divergence and paused the bot,
+  which froze every exit (booking-1, double-close-1); since B (#200) it
+  turns the kill switch on, and exits keep running.
 - **Owner:** the NU-5 late-fill PR (audit H2 follow-up):
   - Book a late fill at its own fill price and order id, matched from
     fills at or after the send, with the reduce-only target capped at
@@ -322,7 +323,7 @@ listed so this file shows where each one went.
 
 | PR | Findings |
 |---|---|
-| B (NU-5b) | exits-never-blocked-2, exits-never-blocked-4, r1-exits-never-blocked-3, flip-and-flat-2 (the pre-existing part), exits-never-blocked-6 (the notice part), r1-tests-and-noise-2, failure-injection-3 (a DB failure after a short fill, below), and master's DB-divergence auto-pause against decision 5.4 |
+| B (NU-5b), **fixed by #200** | exits-never-blocked-2, exits-never-blocked-4, r1-exits-never-blocked-3, flip-and-flat-2 (the pre-existing part), exits-never-blocked-6 (the notice part), r1-tests-and-noise-2, failure-injection-3 (a DB failure after a short fill, below), and master's DB-divergence auto-pause against decision 5.4 (the kill switch since 2026-10-16) |
 | NU-5c | exits-never-blocked-3 (an open gate refuses the whole flip, the only exit of hash_supertrend and kalman_breakout) and the rest of exits-never-blocked-5 |
 | NU-5d | the restart part of tests-real-4 and r1-restart-and-state (a restart restores open-time state and rolls back a ratcheted stop) |
 | C | r1-exits-never-blocked-1, -2 and -4, r1-restart-and-state-1 to -5, exits-never-blocked-6 (the band part); exits-money-1, exits-money-3, r1-booking-1, r1-booking-2 and r1-double-close-2 are #192 regressions that the plan's rules (a) and (b) avoid; exits-money-2, the third, is moot: A's sibling guard never classifies a close beside another row, and rule (a) keeps that guard |
@@ -340,6 +341,17 @@ failed write also pauses the bot. B owns DB failures after a fill, and
 the split plans B to re-arm nothing after a fill. So B settles the
 short-fill case: re-arm on the rest, as the dropped test asserted, or
 say what manages it.
+
+**Settled by B (#200): nothing re-arms.** The operator's 2026-10-16
+decision binds B to re-arm nothing after a filled close. A failed row
+read or write after the fill turns the kill switch on (not the pause)
+and sends one alert, which names what is left: the row keeps its old
+size and the strategy stays flat, so the rest is managed by no strategy
+until the restart the alert asks for restores it from that row; its
+next exit then closes the rest. Reconcile pass 1 books nothing while the
+exchange still holds the coin, and the part that filled is the
+settlement PR's (D2). Test:
+`test_a_fill_the_db_missed_re_arms_nothing[short fill]`.
 
 ## Accepted, no owner
 
@@ -390,7 +402,7 @@ that takes one says so here.
 - **lifecycle-1.** #192's PR description, rewritten for `47f844e`.
 - **a-tests-real-6.** A's suite counts, and the roadmap's NU-5 "Klart
   när" bullets that no test on A covers, each with its owner: "ett
-  Redis- eller DB-fel inte stoppar SL-exit" (B), "en avstängd strategi
+  Redis- eller DB-fel inte stoppar SL-exit" (B, tested by #200), "en avstängd strategi
   som håller en position stänger enligt sin regel" (NU-5c), "en omstart
   bevarar ett ratchetat SL" (NU-5d), and NU-5a's "mindre än raden" with
   a readable clamp (the settlement PR, D2). `c4cc958` routes these
